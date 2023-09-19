@@ -1,0 +1,869 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from lightPred.transformer_models import TransformerEncoderDecoder, TransformerEncoder as TEncoder, TransformerDecoder as TDecoder
+import math
+from torch.nn.utils import weight_norm
+from lightPred.utils import residual_by_period
+from lightPred.period_analysis import analyze_lc_torch, analyze_lc
+from lightPred.Informer2020.models.encoder import Encoder, EncoderLayer, ConvLayer, EncoderStack, HwinEncoderLayer
+from lightPred.Informer2020.models.attn import FullAttention, ProbAttention, AttentionLayer, HwinAttentionLayer
+from lightPred.Informer2020.models.embed import DataEmbedding
+from lightPred.Autoformer.layers.Autoformer_EncDec import Encoder as AutoformerEncoder, EncoderLayer as AutoformerEncoderLayer, my_Layernorm as AutoformerLayerNorm, series_decomp
+from lightPred.Autoformer.layers.AutoCorrelation import AutoCorrelation, AutoCorrelationLayer
+
+
+
+def D(p, z, version='simplified'): # negative cosine similarity
+    if version == 'original':
+        z = z.detach() # stop gradient
+        p = F.normalize(p, dim=1) # l2-normalize 
+        z = F.normalize(z, dim=1) # l2-normalize 
+        return -(p*z).sum(dim=1).mean()
+
+    elif version == 'simplified':# same thing, much faster. Scroll down, speed test in __main__
+        return - F.cosine_similarity(p, z.detach(), dim=-1).mean()
+    else:
+        raise Exception
+
+
+
+class projection_MLP(nn.Module):
+    def __init__(self, in_dim, hidden_dim=2048, out_dim=2048):
+        super().__init__()
+        ''' page 3 baseline setting
+        Projection MLP. The projection MLP (in f) has BN ap-
+        plied to each fully-connected (fc) layer, including its out- 
+        put fc. Its output fc has no ReLU. The hidden fc is 2048-d. 
+        This MLP has 3 layers.
+        '''
+        self.layer1 = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True)
+        )
+        self.layer2 = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True)
+        )
+        self.layer3 = nn.Sequential(
+            nn.Linear(hidden_dim, out_dim),
+            nn.BatchNorm1d(hidden_dim)
+        )
+        self.num_layers = 3
+    def set_layers(self, num_layers):
+        self.num_layers = num_layers
+
+    def forward(self, x):
+        if self.num_layers == 3:
+            x = self.layer1(x)
+            x = self.layer2(x)
+            x = self.layer3(x)
+        elif self.num_layers == 2:
+            x = self.layer1(x)
+            x = self.layer3(x)
+        else:
+            raise Exception
+        return x 
+
+
+class prediction_MLP(nn.Module):
+    def __init__(self, in_dim=2048, hidden_dim=512, out_dim=2048): # bottleneck structure
+        super().__init__()
+        ''' page 3 baseline setting
+        Prediction MLP. The prediction MLP (h) has BN applied 
+        to its hidden fc layers. Its output fc does not have BN
+        (ablation in Sec. 4.4) or ReLU. This MLP has 2 layers. 
+        The dimension of h’s input and output (z and p) is d = 2048, 
+        and h’s hidden layer’s dimension is 512, making h a 
+        bottleneck structure (ablation in supplement). 
+        '''
+        self.layer1 = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True)
+        )
+        self.layer2 = nn.Linear(hidden_dim, out_dim)
+        """
+        Adding BN to the output of the prediction MLP h does not work
+        well (Table 3d). We find that this is not about collapsing. 
+        The training is unstable and the loss oscillates.
+        """
+
+    def forward(self, x):
+        x = self.layer1(x)
+        x = self.layer2(x)
+        return x 
+
+class SimSiam(nn.Module):
+    def __init__(self, backbone):
+        super().__init__()
+        
+        self.backbone = backbone
+        self.projector = projection_MLP(backbone.output_dim)
+
+        self.encoder = nn.Sequential( # f encoder
+            self.backbone,
+            self.projector
+        )
+        self.predictor = prediction_MLP()
+    
+    def forward(self, x1, x2):
+        f, h = self.encoder, self.predictor
+        z1, z2 = f(x1), f(x2)
+        p1, p2 = h(z1), h(z2)
+        L = D(p1, z2) / 2 + D(p2, z1) / 2
+        return {'loss': L}
+
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1):
+        super(ResidualBlock, self).__init__()
+
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm1d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm1d(out_channels)
+
+        # Adjust the dimensions using a 1x1 convolutional layer if needed
+        self.downsample = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.downsample = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm1d(out_channels)
+            )
+
+    def forward(self, x):
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        out += self.downsample(identity)
+        out = self.relu(out)
+
+        return out
+class ResNet(nn.Module):
+    def __init__(self, block, blocks,seq_len=1024, num_classes=10):
+        super(ResNet, self).__init__()
+        self.in_channels = 64
+        self.num_classes = num_classes
+        self.seq_len = seq_len
+
+        self.conv1 = nn.Conv1d(1, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm1d(64)
+        self.relu = nn.ReLU(inplace=True)
+        layers = [self.make_layer(block, 64*2**i, blocks[i], stride=min(2,i+1) ) for i in range(len(blocks))]
+
+        self.layers = torch.nn.Sequential(*layers)
+        self.out_shape = self._out_shape()
+        self.output_dim = self.out_shape[-1]
+        # self.avg_pool = nn.MaxPool1d(2)
+        # self.fc = nn.Linear(64*2**(len(blocks)-1), num_classes)
+
+    def make_layer(self, block, out_channels, num_blocks, stride):
+        layers = []
+        layers.append(block(self.in_channels, out_channels, stride))
+        self.in_channels = out_channels
+        print(stride)
+        for _ in range(1, num_blocks):
+            layers.append(block(out_channels, out_channels))
+
+        return nn.Sequential(*layers)
+
+    def _out_shape(self) -> int:
+        """
+        Calculates the number of extracted features going into the the classifier part.
+        :return: Number of features.
+        """
+        # Make sure to not mess up the random state.
+        rng_state = torch.get_rng_state()
+        try:
+            dummy_input = torch.randn(1,1, self.seq_len)
+            output = self.forward(dummy_input)
+            # n_features = output.numel() // output.shape[0]  
+            return output.shape 
+        finally:
+            torch.set_rng_state(rng_state)
+
+    def forward(self, x):
+        # print("stating backbone with: ", x.shape)
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.layers(out)
+    
+        # out = self.avg_pool(out)
+        # out = out.view(out.size(0), -1)
+        # out = self.fc(out)
+        # print("after backbone: ", out.shape)
+
+        return out.view(out.shape[0], -1)
+
+class LSTMFeatureExtractor(nn.Module):
+    def __init__(self, seq_len=1024, hidden_size=256, num_layers=4, num_classes=4,
+                 in_channels=1, channels=256, dropout=0.2, kernel_size=4 ,stride=4):
+        super(LSTMFeatureExtractor, self).__init__()
+        self.seq_len = seq_len
+        self.in_channels = in_channels
+        self.hidden_size = hidden_size
+        self.num_classes = num_classes
+        self.conv1 = nn.Conv1d(in_channels=in_channels, out_channels=channels, kernel_size=kernel_size, padding='same', stride=1)
+        self.pool = nn.MaxPool1d(kernel_size=stride)
+        # self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=kernel_size, padding=1, stride=2)
+        # self.conv3 = nn.Conv1d(in_channels=128, out_channels=channels, kernel_size=kernel_size, padding=1, stride=4)
+        self.skip = nn.Conv1d(in_channels=in_channels, out_channels=channels, kernel_size=1, padding=0, stride=stride)
+        
+        self.lstm = nn.LSTM(channels, hidden_size, num_layers=num_layers, batch_first=True, bidirectional=True, dropout=dropout)
+        self.drop = nn.Dropout1d(p=dropout)
+        # self.batchnorm1 = nn.BatchNorm1d(64)
+        # self.batchnorm2 = nn.BatchNorm1d(128)
+        self.batchnorm1 = nn.BatchNorm1d(channels)
+        self.activation = nn.GELU()
+        self.num_features = self._out_shape()
+        self.output_dim = self.num_features
+
+    def _out_shape(self) -> int:
+        """
+        Calculates the number of extracted features going into the the classifier part.
+        :return: Number of features.
+        """
+        # Make sure to not mess up the random state.
+        rng_state = torch.get_rng_state()
+        try:
+            dummy_input = torch.randn(2,self.in_channels, self.seq_len)
+            x = self.conv1(dummy_input)
+            x = torch.swapaxes(x, 1,2)
+            x_f,(h_f,_) = self.lstm(x)
+            h_f = h_f.transpose(0,1).transpose(1,2)
+            h_f = h_f.reshape(h_f.shape[0], -1)
+            return h_f.shape[1] 
+        finally:
+            torch.set_rng_state(rng_state)
+
+    def forward(self, x, return_cell=False):
+        if len(x.shape) == 2:
+            x = x.unsqueeze(1)
+        elif len(x.shape) == 3 and x.shape[-1] == 1:
+            x = x.transpose(-1,-2)
+        skip = self.skip(x)
+        # x = self.conv(x)
+        x = self.drop(self.pool(self.activation(self.batchnorm1(self.conv1(x)))))
+        # x = self.drop(self.activation(self.batchnorm2(self.conv2(x))))
+        # x = self.drop(self.activation(self.batchnorm3(self.conv3(x))))
+        x = x + skip
+        x = torch.swapaxes(x, 1,2)
+        x_f,(h_f,c_f) = self.lstm(x)
+        if return_cell:
+            return x_f, h_f, c_f
+        h_f = h_f.transpose(0,1).transpose(1,2)
+        h_f = h_f.reshape(h_f.shape[0], -1)
+        return h_f
+    
+class LSTM(nn.Module):
+    def __init__(self, seq_len=1024, hidden_size=256, num_layers=4, num_classes=4,
+                 in_channels=1, predict_size=256, channels=256, dropout=0.2, kernel_size=4,stride=4):
+        super(LSTM, self).__init__()
+        self.activation = nn.GELU()
+        self.feature_extractor = LSTMFeatureExtractor(seq_len=seq_len, hidden_size=hidden_size, num_layers=num_layers, num_classes=num_classes,in_channels=in_channels,
+                                                      channels=channels, dropout=dropout, kernel_size=kernel_size)
+        self.num_classes = num_classes
+        self.out_shape = self.feature_extractor.num_features
+        self.predict_size = predict_size
+        self.fc1 = nn.Linear(self.out_shape, predict_size)
+        self.fc2 = nn.Linear(predict_size, num_classes)
+        # self.fc3 = nn.Linear(predict_size, num_classes)
+
+    def forward(self, x):
+        if len(x.shape) == 2:
+            x = x.unsqueeze(1)
+        
+        h_f = self.feature_extractor(x)
+        out = self.fc2(self.activation(self.fc1(h_f)))
+        # out2 = self.fc3(self.fc1(x_f))
+        return out
+
+class LSTM_ATTN(LSTM):
+    def __init__(self, **kwargs):
+        super(LSTM_ATTN, self).__init__(**kwargs)
+        self.fc1 = nn.Linear(self.feature_extractor.hidden_size*2, self.predict_size)
+        self.fc2 = nn.Linear(self.predict_size, self.num_classes)
+        # self.fc3 = nn.Linear(self.feature_extractor.hidden_size*4, self.predict_size)
+        # self.fc4 = nn.Linear(self.predict_size, self.num_classes)
+
+
+    def attention(self, query, keys, values):
+        # Query = [BxQ]
+        # Keys = [BxTxK]
+        # Values = [BxTxV]
+        # Outputs = a:[TxB], lin_comb:[BxV]
+
+        # Here we assume q_dim == k_dim (dot product attention)
+        scale = 1/(keys.size(-1) ** -0.5)
+        query = query.unsqueeze(1) # [BxQ] -> [Bx1xQ]
+        keys = keys.transpose(1,2) # [BxTxK] -> [BxKxT]
+        energy = torch.bmm(query, keys) # [Bx1xQ]x[BxKxT] -> [Bx1xT]
+        energy = F.softmax(energy.mul_(scale), dim=2) # scale, normalize
+
+        linear_combination = torch.bmm(energy, values).squeeze(1) #[Bx1xT]x[BxTxV] -> [BxV]
+        return linear_combination
+
+    def forward(self, x):
+        if len(x.shape) == 2:
+            x = x.unsqueeze(1)  
+        x_f, h_f, c_f = self.feature_extractor(x, return_cell=True)
+        c_f = torch.cat([c_f[-1], c_f[-2]], dim=1)
+
+        values = self.attention(c_f, x_f, x_f) 
+        out = self.fc2(self.activation(self.fc1(values)))
+        # values = (values[...,None] + out[:,None,:]).view(out.shape[0], -1)
+        # conf = self.fc4(self.activation(self.fc3(values)))
+        return out
+
+
+class BERTEncoder(nn.Module):
+    def __init__(self, ntoken=1024, vocab_size=1024, d_model=768, nhead=12, nlayers=12, in_channels=1, dropout=0.2, num_classes=4):
+        super(BERTEncoder, self).__init__()
+        self.conv1 = nn.Conv1d(in_channels=in_channels, out_channels=d_model, kernel_size=3, padding=1, stride=4)
+        self.skip = nn.Conv1d(in_channels=in_channels, out_channels=d_model, kernel_size=1, padding=0, stride=4)
+        
+        self.embedding = torch.nn.Sequential(self.conv1, nn.BatchNorm1d(d_model), nn.GELU(), nn.Dropout(dropout))
+        self.layer_norm = nn.LayerNorm(d_model)
+        
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, activation='gelu')
+        self.encoder = nn.TransformerEncoder(self.encoder_layer, nlayers)
+        self.output_dim = d_model*ntoken//4
+
+        self.encoder2hidden = nn.Linear(d_model*ntoken//4, vocab_size)
+        self.hidden2out = nn.Linear(vocab_size, num_classes)
+
+
+        # self.token_prediction_layer = nn.Linear(d_model, vocab_size)
+        # self.softmax = nn.LogSoftmax(dim=-1)  
+        # self.classification_layer = nn.Linear(d_model, 2)
+
+
+    def forward(self, input_tensor, attention_mask=None):
+        if len(input_tensor.shape) == 2:
+            input_tensor = input_tensor.unsqueeze(1) 
+        # print("input_tensor: ", input_tensor.shape)
+        skip = self.skip(input_tensor)
+        embedded = self.embedding(input_tensor)
+        embedded = embedded + skip
+        embedded = self.layer_norm(embedded.transpose(1,2))
+        # print("nans2: ", torch.isnan(embedded).any()) 
+
+        # print("max embedded: ", embedded.max())
+        encoded = self.encoder(embedded, attention_mask) # [batch_size, seq_len, d_model]
+        return encoded.view(encoded.shape[0], -1)  
+        # print("nans3: ", torch.isnan(encoded).any()) 
+
+        # hidden = self.encoder2hidden(encoded.view(encoded.shape[0], -1)) # [batch_size, vocab_size]
+        # out = self.hidden2out(hidden) # [batch_size, num_classes]
+        # return out
+        # token_predictions = self.token_prediction_layer(encoded)  # [batch_size, seq_len, vocab_size]
+        # print("nans4: ", torch.isnan(token_predictions).any()) 
+        # print("nans5: ", torch.isnan(self.softmax(token_predictions)).any())
+  
+        # first_word = encoded[:, 0, :] # [batch_size, d_model]  
+        # return self.softmax(token_predictions) 
+        
+    
+class EncoderDecoder(nn.Module):
+    def __init__(self, seq_len, hidden_size, num_layers, vocab_size, predict_size=256):
+        super(EncoderDecoder, self).__init__()
+        self.model = TransformerEncoderDecoder( vocab_size,  vocab_size, hidden_size, num_layers)
+        self.fc1 = nn.Linear(hidden_size*seq_len, predict_size)
+        self.fc2 = nn.Linear(predict_size, 2)
+        self.activation = nn.GELU()
+
+
+    def forward(self, x, return_logits=False):
+        x = x.long()
+        # print("X", x.shape)
+        logits, memory_bank = self.model(x[:,0,:], x[:,0,:])
+        # print("memory_bank: ", memory_bank.shape)
+        prediction = memory_bank.view(memory_bank.shape[0], -1)
+        # print("prediction: ", prediction.shape)
+        prediction = F.softmax(self.fc2(self.activation(self.fc1(prediction))), dim=-1)
+        return prediction, logits
+
+
+class CNN1DBackBone(nn.Module):
+    def __init__(self, input_channels, output_channels=512):
+        super(CNN1DBackBone, self).__init__()
+        
+        # First convolutional layer
+        self.conv1 = nn.Conv1d(in_channels=input_channels, out_channels=output_channels//8, kernel_size=3, padding=1, stride=2)
+        self.bn1 = nn.BatchNorm1d(output_channels//8)
+        
+        # Second convolutional layer
+        self.conv2 = nn.Conv1d(in_channels=output_channels//8, out_channels=output_channels//4, kernel_size=3, padding=1, stride=2)
+        self.bn2 = nn.BatchNorm1d(output_channels//4)
+        
+        # Third convolutional layer
+        self.conv3 = nn.Conv1d(in_channels=output_channels//4, out_channels=output_channels//2, kernel_size=3, padding=1, stride=2)
+        self.bn3 = nn.BatchNorm1d(output_channels//2)
+        
+        # Fourth convolutional layer
+        self.conv4 = nn.Conv1d(in_channels=output_channels//2, out_channels=output_channels, kernel_size=3, padding=1, stride=2)
+        self.bn4 = nn.BatchNorm1d(output_channels)
+
+        # 1x1 Convolutional layers for skip connections
+        self.skip_conv1 = nn.Conv1d(in_channels=input_channels, out_channels=output_channels//8, kernel_size=1, stride=2)
+        self.skip_conv2 = nn.Conv1d(in_channels=output_channels//8, out_channels=output_channels//4, kernel_size=1, stride=2)
+        self.skip_conv3 = nn.Conv1d(in_channels=output_channels//4, out_channels=output_channels//2, kernel_size=1, stride=2)
+        
+        self.activation = nn.GELU()
+        self.drop = nn.Dropout(p=0.1)
+        self.pool = nn.MaxPool1d(kernel_size=2)
+        
+        
+    def forward(self, x):
+        skip = self.skip_conv1(x)
+        x = self.drop(self.activation(self.bn1(self.conv1(x))))
+        x = x + skip
+        skip = self.skip_conv2(x)
+        x = self.drop(self.activation(self.bn2(self.conv2(x))))
+        x = x + skip
+        skip = self.skip_conv3(x)
+        x = self.drop(self.activation(self.bn3(self.conv3(x))))
+        x = x + skip
+        x = self.drop(self.activation(self.bn4(self.conv4(x))))
+        
+        # x = x.view(x.size(0), -1)  # Flatten the output
+        
+        return x
+    
+class TransformerModel(nn.Module):
+
+    def __init__(self, ntoken: int, d_model: int, nhead: int,
+                 nlayers: int, in_channels=1, stride=1, dropout: float = 0.5, num_classes=2):
+        super().__init__()
+        self.model_type = 'Transformer'
+        self.d_model = d_model
+        self.ntoken = ntoken
+        self.in_channels = in_channels
+
+        self.backbone = CNN1DBackBone(in_channels, d_model)
+        # self.conv = nn.Conv1d(in_channels=in_channels, out_channels=d_model, kernel_size=3, padding=1, stride=stride)
+        # self.skip = nn.Conv1d(in_channels=in_channels, out_channels=d_model, kernel_size=1, padding=0, stride=stride)
+        # self.pos_encoder = PositionalEncoding(d_model, dropout, max_len=ntoken)
+        encoder_layers = nn.TransformerEncoderLayer(d_model, nhead, dropout=dropout, batch_first=True, activation='gelu')
+        # decoder_layers = nn.TransformerDecoderLayer(d_model, nhead, dropout=dropout, batch_first=True, activation='gelu')
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, nlayers)
+        # self.transformer_decoder = nn.TransformerDecoder(encoder_layers, nlayers)
+        self.dropout = nn.Dropout1d(p=dropout)
+        # self.batchnorm = nn.BatchNorm1d(d_model)
+        self.activation = nn.GELU()
+        self.linear1 = nn.Linear(d_model*ntoken//16, 256)
+        # self.linear2 = nn.Linear(2048, 1024)
+        # self.linear3 = nn.Linear(1024, 256)
+        self.hidden2output = nn.Linear(256, num_classes)
+
+        # self.out_shape = self._out_shape() # Number of features extracted by the conv layers.
+        # print("out shape: ", self.out_shape)
+        # self.fc1 = nn.Linear(self.out_shape[1], d_hid)
+        # self.fc2 = nn.Linear(d_hid, 2)
+        
+        # self.embedding = nn.Embedding(ntoken, d_model)
+        # self.linear = nn.Linear(d_model*ntoken, 2)
+
+        # self.init_weights()
+
+    # def init_weights(self) -> None:
+    #     initrange = 0.1
+    #     self.fc1.weight.data.uniform_(-initrange, initrange)
+    #     self.fc1.bias.data.zero_()
+    #     self.fc2.bias.data.zero_()
+    #     self.fc2.weight.data.uniform_(-initrange, initrange)
+
+    # def _out_shape(self) -> int:
+    #     """
+    #     Calculates the number of extracted features going into the the classifier part.
+    #     :return: Number of features.
+    #     """
+    #     # Make sure to not mess up the random state.
+    #     rng_state = torch.get_rng_state()
+    #     # ====== YOUR CODE: ======
+        
+    #     dummy_input = torch.randn(2,self.in_channels, self.ntoken)
+    #     x = self.drop(self.activation(self.batchnorm(self.conv(dummy_input))))
+    #     # x = self.drop(self.activation(self.batchnorm(self.conv2(x))))
+    #     # x = self.drop(self.activation(self.batchnorm(self.conv3(x))))
+    #     x = torch.swapaxes(x, 1,2)
+    #     x = self.transformer_encoder(x) # (batch_size, seq_len, d_model)
+    #     # h_f = h_f.transpose(0,1).transpose(1,2)
+    #     x = x.reshape(x.shape[0], -1)
+
+        
+    #     # n_features = output.numel() // output.shape[0]  
+    #     return x.shape 
+
+    def forward(self, src, src_mask = None):
+        """
+        Arguments:
+            src: Tensor, shape ``[batch_size, seq_len]``
+            src_mask: Tensor, shape ``[seq_len, seq_len]``
+
+        Returns:
+            output Tensor of shape ``[seq_len, batch_size, ntoken]``
+        """
+        if len(src.shape) == 2:
+            src = src.unsqueeze(1)
+        elif len(src.shape) == 3 and src.shape[-1] == 1:
+            src = src.transpose(-1,-2)
+        # skip = self.skip(src)
+        # x = self.drop(self.activation(self.batchnorm(self.conv(src))))
+        # x = self.drop(self.activation(self.batchnorm(self.conv2(x))))
+        # x = self.drop(self.activation(self.batchnorm(self.conv3(x))))
+        # x = x + skip
+        x = self.backbone(src)
+        # print("after conv: ", x.shape)
+        x = torch.swapaxes(x, 1,2)
+        memory = self.transformer_encoder(x, src_mask)
+        out = self.dropout(self.activation(self.linear1(memory.reshape(memory.shape[0], -1))))
+        # out = self.dropout(self.activation(self.linear2(out)))
+        # out = self.dropout(self.activation(self.linear3(out)))
+        out = F.softplus(self.hidden2output(out))
+        # output = self.transformer_decoder(tgt_in, memory)
+        # print("encoded shape ", output.shape)
+        # output = output.transpose(0,1).transpose(1,2)
+        # output = output.reshape(output.shape[0], -1)
+        # output = self.fc2(self.activation(self.fc1(output)))
+        return out
+
+class InformerEncoder(nn.Module):
+    def __init__(self,enc_in, c_out, seq_len, 
+                factor=5, d_model=512, n_heads=8, e_layers=3, d_ff=512, 
+                dropout=0.1, attn='prob', embed='fixed', freq='h', activation='gelu',
+                output_attention = False, distil=True, mix=True, ssl=False  ):
+        super(InformerEncoder, self).__init__()
+        # Encoding
+        self.enc_embedding = DataEmbedding(enc_in, d_model, embed, freq, dropout, max_len=seq_len)
+        # Attention
+        Attn = ProbAttention if attn=='prob' else FullAttention
+        # Encoder
+        self.encoder = Encoder(
+            [
+                EncoderLayer(
+                    AttentionLayer(Attn(False, factor, attention_dropout=dropout, output_attention=output_attention), 
+                                d_model, n_heads, mix=False),
+                    d_model,
+                    d_ff,
+                    dropout=dropout,
+                    activation=activation
+                ) for l in range(e_layers)
+            ],
+            [
+                ConvLayer(
+                    d_model
+                ) for l in range(e_layers-1)
+            ] if distil else None,
+            norm_layer=torch.nn.LayerNorm(d_model)
+        )
+        # self.ffd = nn.Linear(d_model*seq_len, 1024, bias=True)
+        self.projection = nn.Linear(d_model, c_out, bias=True)
+        self.ssl = ssl
+        self.output_dim = d_model
+
+    def forward(self, x_enc, enc_self_mask=None):
+        if len(x_enc.shape) == 2:
+            x_enc = x_enc.unsqueeze(-1)
+        if len(x_enc.shape) == 3 and x_enc.shape[1] == 1:
+            x_enc = x_enc.transpose(-1,-2)
+        enc_out = self.enc_embedding(x_enc, None)
+        enc_out, attns = self.encoder(enc_out, attn_mask=enc_self_mask)
+        # print("enc_out: ", enc_out.shape)
+        # enc_out = self.projection(self.ffd(enc_out.reshape(enc_out.shape[0], -1)))
+        if self.ssl:
+            return enc_out.max(dim=1).values
+        enc_out = self.projection(enc_out.max(dim=1).values)
+        return enc_out
+
+class HwinEncoder(nn.Module):
+    def __init__(self,enc_in, c_out, seq_len, 
+                factor=5, d_model=512, n_heads=8, e_layers=3, d_ff=512, window_size=6, n_windows=4,
+                dropout=0.1, predict_size=256, attn='full', embed='fixed', freq='h', activation='gelu',
+                output_attention = False, distil=True, mix=True, ssl=False  ):
+        super(HwinEncoder, self).__init__()
+        self.seq_len = seq_len
+        self.d_model = d_model
+        shrink_factor =seq_len/(sum([seq_len/(window_size*2**i) for i in range(n_windows)]))
+
+        # Encoding
+        self.enc_embedding = DataEmbedding(enc_in, d_model, embed, freq, dropout, max_len=seq_len)
+        # Attention
+        Attn = ProbAttention if attn=='prob' else FullAttention
+        # Encoder
+        self.encoder = Encoder(
+            [
+                HwinEncoderLayer(
+                    HwinAttentionLayer(Attn(False, factor, attention_dropout=dropout, output_attention=output_attention), 
+                                d_model=d_model*2**l, n_heads=n_heads, window_size=window_size, n_windows=n_windows, mix=False),
+                    d_model*2**l,
+                    d_ff,
+                    dropout=dropout,
+                    activation=activation
+                ) for l in range(e_layers)
+            ],
+            [
+                ConvLayer(
+                    d_model*2**(l), c_out=d_model*2**(l+1)
+                ) for l in range(e_layers-1)
+            ] if distil else None,
+            norm_layer=torch.nn.LayerNorm(d_model*2**(e_layers-1))
+        )
+        # self.ffd = nn.Linear(d_model*seq_len, 1024, bias=True)
+        self.output_dim = self._out_shape()
+        self.projection = nn.Linear(self.output_dim, predict_size, bias=True)
+        self.prediction = nn.Linear(predict_size, c_out, bias=True)
+        self.ssl = ssl
+
+    def _out_shape(self) -> int:
+        """
+        Calculates the number of extracted features going into the the classifier part.
+        :return: Number of features.
+        """
+        # Make sure to not mess up the random state.
+        rng_state = torch.get_rng_state()
+        try:
+            dummy_input = torch.randn(2,self.seq_len, self.d_model)
+            x,_ = self.encoder(dummy_input)
+            print("x: ", x.shape)
+            x = x.view(x.size(0), -1)  # Flatten the output
+            return x.shape[1] 
+        finally:
+            torch.set_rng_state(rng_state)
+
+    def forward(self, x_enc, enc_self_mask=None):
+        if len(x_enc.shape) == 2:
+            x_enc = x_enc.unsqueeze(-1)
+        if len(x_enc.shape) == 3 and x_enc.shape[1] == 1:
+            x_enc = x_enc.transpose(-1,-2)
+        enc_out = self.enc_embedding(x_enc, None)
+        enc_out, attns = self.encoder(enc_out, attn_mask=enc_self_mask)
+        # print("enc_out: ", enc_out.shape)
+        # enc_out = self.projection(self.ffd(enc_out.reshape(enc_out.shape[0], -1)))
+        if self.ssl:
+            return enc_out.view(enc_out.size(0, -1))
+        enc_out = self.projection(enc_out.view(enc_out.size(0), -1))
+        enc_out = self.prediction(enc_out)
+        return enc_out
+
+
+
+class AutoEncoder(nn.Module):
+    def __init__(self,enc_in, c_out, seq_len, 
+                factor=5, d_model=512, n_heads=8, e_layers=3, d_ff=512, moving_avg=25, 
+                dropout=0.1, attn='prob', embed='fixed', freq='h', activation='gelu',
+                output_attention = False, distil=True, mix=True, ssl=False  ):
+        super(AutoEncoder, self).__init__()
+        # Encoding
+        self.enc_embedding = DataEmbedding(enc_in, d_model, embed, freq, dropout, max_len=seq_len)
+        # Encoder
+        self.encoder = AutoformerEncoder(
+            [
+                AutoformerEncoderLayer(
+                    AutoCorrelationLayer(
+                        AutoCorrelation(False, factor, attention_dropout=dropout,
+                                        output_attention=output_attention),
+                        d_model, n_heads),
+                    d_model,
+                    d_ff,
+                    moving_avg=moving_avg,
+                    dropout=dropout,
+                    activation=activation
+                ) for l in range(e_layers)
+            ],
+            norm_layer = AutoformerLayerNorm(d_model)
+        )
+
+        # self.ffd = nn.Linear(d_model*seq_len, 1024, bias=True)
+        self.projection = nn.Linear(d_model, c_out, bias=True)
+        self.ssl = ssl
+
+    def forward(self, x_enc, enc_self_mask=None):
+        enc_out = self.enc_embedding(x_enc, None)
+        enc_out, attns = self.encoder(enc_out, attn_mask=enc_self_mask)
+        # print("enc_out: ", enc_out.shape)
+        # enc_out = self.projection(self.ffd(enc_out.reshape(enc_out.shape[0], -1)))
+        if self.ssl:
+            return enc_out.max(dim=1).values
+        enc_out = self.projection(enc_out.max(dim=1).values)
+        return enc_out
+
+
+class DLInear(nn.Module):
+    def __init__(self, seq_len, pred_len, c_out, moving_avg=25, dropout=0.2):
+        super(DLInear, self).__init__()
+        self.decompsition = series_decomp(moving_avg)
+        self.seq_len = seq_len
+        self.pred_len = pred_len
+        self.Linear_Seasonal = nn.Linear(self.seq_len,self.pred_len)
+        self.Linear_Trend = nn.Linear(self.seq_len,self.pred_len)
+        self.activation = nn.GELU()
+        self.dropout = nn.Dropout(p=dropout)
+        self.pred = nn.Linear(self.pred_len, c_out)
+
+    def forward(self, x):
+        season, trend = self.decompsition(x)
+        season = self.Linear_Seasonal(season.squeeze())
+        trend = self.Linear_Trend(trend.squeeze())
+        out = self.pred(self.dropout(self.activation(season + trend)))
+        return out
+
+class PositionalEncoding(nn.Module):
+
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        """
+        Arguments:
+            x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
+        """
+        x = x + self.pe[:x.size(0)]
+        return self.dropout(x)
+
+
+class Chomp1d(nn.Module):
+    def __init__(self, chomp_size):
+        super(Chomp1d, self).__init__()
+        self.chomp_size = chomp_size
+
+    def forward(self, x):
+        return x[:, :, :-self.chomp_size].contiguous()
+
+
+class TemporalBlock(nn.Module):
+    def __init__(self, n_inputs, n_outputs, kernel_size, stride, dilation, padding, dropout=0.2):
+        super(TemporalBlock, self).__init__()
+        self.conv1 = weight_norm(nn.Conv1d(n_inputs, n_outputs, kernel_size,
+                                           stride=stride, padding=padding, dilation=dilation))
+        self.chomp1 = Chomp1d(padding)
+        self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout(dropout)
+
+        self.conv2 = weight_norm(nn.Conv1d(n_outputs, n_outputs, kernel_size,
+                                           stride=stride, padding=padding, dilation=dilation))
+        self.chomp2 = Chomp1d(padding)
+        self.relu2 = nn.ReLU()
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.net = nn.Sequential(self.conv1, self.chomp1, self.relu1, self.dropout1,
+                                 self.conv2, self.chomp2, self.relu2, self.dropout2)
+        self.downsample = nn.Conv1d(n_inputs, n_outputs, 1) if n_inputs != n_outputs else None
+        self.relu = nn.ReLU()
+        # self.init_weights()
+
+    # def init_weights(self):
+    #     self.conv1.weight.data.normal_(0, 0.01)
+    #     self.conv2.weight.data.normal_(0, 0.01)
+    #     if self.downsample is not None:
+    #         self.downsample.weight.data.normal_(0, 0.01)
+
+    def forward(self, x):
+        out = self.net(x)
+        res = x if self.downsample is None else self.downsample(x)
+        return self.relu(out + res)
+
+
+class TemporalConvNet(nn.Module):
+    def __init__(self, num_inputs, num_channels, kernel_size=[2], dropout=0.2):
+        super(TemporalConvNet, self).__init__()
+        layers = []
+        num_levels = len(num_channels)
+        for i in range(num_levels):
+            dilation_size = 2 ** i
+            in_channels = num_inputs if i == 0 else num_channels[i-1]
+            out_channels = num_channels[i]
+            k = kernel_size[i]
+            layers += [TemporalBlock(in_channels, out_channels, k, stride=1, dilation=dilation_size,
+                                     padding=(k-1) * dilation_size, dropout=dropout)]
+
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.network(x)
+
+
+
+class ResidualNet(nn.Module):
+    def __init__(self, backbone, predict_size):
+        super(ResidualNet, self).__init__()
+        self.network = backbone
+        self.num_features = self.network.num_features
+        self.hidden2output = nn.Linear(self.num_features, predict_size)
+        self.batchnorm = nn.BatchNorm1d(predict_size)
+        self.p_head = nn.Linear(predict_size, 1)
+        self.i_head = nn.Linear(predict_size, 1)
+        self.activation = nn.GELU()
+    def forward(self, x):
+        p = analyze_lc_torch(x[:,1,:]).to(x.device).unsqueeze(-1)
+        # with torch.no_grad():
+        #     out = self.activation(self.batchnorm(self.hidden2output(self.network(x))))
+        #     p  = self.p_head(out)
+        residuals = residual_by_period(x[:,0,:].clone(), p)
+        x[:,0,:] = residuals
+        out =  self.activation(self.batchnorm(self.hidden2output(self.network(x))))
+        i = self.i_head(out)
+        return i.float()
+        # return torch.concat([i,p], dim = -1).float()
+
+
+class Autoencoder(nn.Module):
+    def __init__(self):
+        super(Autoencoder, self).__init__()
+        
+        # Encoder
+        self.encoder = nn.Sequential(
+            nn.Conv1d(in_channels=1, out_channels=16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            
+            nn.Conv1d(in_channels=16, out_channels=32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            
+            nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            
+            nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2)
+        )
+        
+        # Decoder
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose1d(in_channels=128, out_channels=64, kernel_size=2, stride=2),
+            nn.ReLU(),
+            nn.ConvTranspose1d(in_channels=64, out_channels=32, kernel_size=2, stride=2),
+            nn.ReLU(),
+            nn.ConvTranspose1d(in_channels=32, out_channels=16, kernel_size=2, stride=2),
+            nn.ReLU(),
+            nn.ConvTranspose1d(in_channels=16, out_channels=1, kernel_size=2, stride=2),
+            nn.ReLU()
+        )
+    
+    def forward(self, x):
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        return decoded
+
+    
