@@ -34,8 +34,8 @@ class Trainer(object):
     """
     A class that encapsulates the training loop for a PyTorch model.
     """
-    def __init__(self, model, optimizer, criterion, scheduler, train_dataloader, val_dataloader, device,
-                 optim_params, net_params, exp_num, log_path, exp_name, plot_every=None):
+    def __init__(self, model, optimizer, criterion, train_dataloader, device,scheduler=None, val_dataloader=None,
+                 optim_params=None, net_params=None, exp_num=None, log_path=None, exp_name=None, plot_every=None):
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
@@ -231,13 +231,10 @@ class ClassifierTrainer(Trainer):
             self.optimizer.zero_grad()
             y_pred = self.model(x)
             # print("y_pred: ", y_pred.shape, "y: ", y.shape)
-            if only_p:
-                y = y[:, :self.num_classes]
-                loss = self.criterion(y_pred, y)
-            else:
-                loss1 = self.criterion(y_pred[:, :self.num_classes], y[:, :self.num_classes])
-                loss2 = self.criterion(y_pred[:, self.num_classes:], y[:, self.num_classes:])
-                loss = loss1 + loss2
+            
+            loss1 = self.criterion(y_pred[:, :self.num_classes], y[:, :self.num_classes].argmax(dim=1))
+            loss2 = self.criterion(y_pred[:, self.num_classes:], y[:, self.num_classes:].argmax(dim=1))
+            loss = loss1 + loss2
             # print("y_pred: ", y_pred.argmax(1), "y: ", y.argmax(1))
             self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
             self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
@@ -271,13 +268,10 @@ class ClassifierTrainer(Trainer):
             x, y = x.to(device), y.to(device)
             with torch.no_grad():
                 y_pred = self.model(x)
-            if only_p:
-                y = y[:, :self.num_classes]
-                loss = self.criterion(y_pred, y)
-            else:
-                loss1 = self.criterion(y_pred[:, :self.num_classes], y[:, :self.num_classes])
-                loss2 = self.criterion(y_pred[:, self.num_classes:], y[:, self.num_classes:])
-                loss = loss1 + loss2
+            
+            loss1 = self.criterion(y_pred[:, :self.num_classes], y[:, :self.num_classes].argmax(dim=1))
+            loss2 = self.criterion(y_pred[:, self.num_classes:], y[:, self.num_classes:].argmax(dim=1))
+            loss = loss1 + loss2
             self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
 
             # if not only_p:            
@@ -504,7 +498,7 @@ class EncoderDecoderTrainer(Trainer):
         return preds, targets
     
 
-class BERTTrainerSSL(Trainer):
+class MaskedSSLTrainer(Trainer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
@@ -513,50 +507,54 @@ class BERTTrainerSSL(Trainer):
         Trains the model for one epoch.
         """
         self.model.train()
-        train_loss = 0
+        train_loss = []
         train_acc = 0
-        for x_masked, mask, x in self.train_dl:
+        for i, (x, x_masked, mask, _) in enumerate(self.train_dl):
             x_masked, mask, x = x_masked.to(device), mask.to(device), x.to(device)
-            out = self.model(x_masked)
-            print(mask.shape, out.shape, x.shape)
-            tm = mask.expand_as(out)  
-            out = out.masked_fill(tm, 0)
-            x_target = x[:, 0, :].masked_fill(mask, 0).long() 
-            loss = self.criterion(out.transpose(1, 2), x_target)
+            out = self.model(x_masked, x).squeeze()
+            # print(mask.shape, out.shape, x.shape)
+            # tm = mask.expand_as(out)  
+            out = out.masked_fill(mask, 0)
+            x_target = x.squeeze().masked_fill(mask, 0)
+            # print(x_target.shape, out.shape ) 
+            loss = self.criterion(out, x_target)
+            if self.logger is not None:
+                self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
             loss.backward()
             self.optim.step()
-            train_loss += loss.item()
-            train_acc += self.mask_accuracy(out, x_target, mask) 
-            # print("train_loss: ",loss.item(), "train_acc: ", self.mask_accuracy(out, x_target, mask))
-        return train_loss/len(self.train_dl), train_acc/len(self.train_dl.dataset)
+            train_loss.append(loss.item())
+            train_acc += self.mask_accuracy(out, x_target, mask).item()
+        return train_loss, train_acc/len(self.train_dl.dataset)
 
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
         """
         Evaluates the model for one epoch.
         """
         self.model.eval()
-        val_loss = 0
+        val_loss = []
         val_acc = 0
-        for x_masked, mask, x in self.val_dl:
+        for i, (x, x_masked, mask, _) in enumerate(self.val_dl):
             x_masked, mask, x = x_masked.to(device), mask.to(device), x.to(device)
             with torch.no_grad():
-                out = self.model(x_masked)
-            print(mask.shape, out.shape, x.shape)
-            tm = mask.expand_as(out)  
-            out = out.masked_fill(tm, 0)
-            x_target = x[:, 0, :].masked_fill(mask, 0).long()
-            # print("nans in x_masked: ", torch.isnan(x_masked).sum())
-            # print("nans in out: ", torch.isnan(out).sum())
-            # print("nans in x_target: ", torch.isnan(x_target).sum())
-            loss = self.criterion(out.transpose(1, 2), x_target)
-            assert not torch.isnan(loss).any()
-            val_loss += loss.item()
-            val_acc += self.mask_accuracy(out, x_target, mask) 
+                out = self.model(x_masked, x).squeeze()
+            # print(mask.shape, out.shape, x.shape)
+            # tm = mask.expand_as(out)  
+            out = out.masked_fill(mask, 0)
+            x_target = x.squeeze().masked_fill(mask, 0)
+            loss = self.criterion(out, x_target)
+            if self.logger is not None:
+                self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
+            if torch.isnan(loss).any():
+                print("loss is nan")
+                print("out: ", out, "x_target: ", x_target, "mask: ", mask)
+            val_loss.append(loss.item())
+            val_acc += self.mask_accuracy(out, x_target, mask).item()
             # print("val_loss: ",loss.item(), "val_acc: ", self.mask_accuracy(out, x_target, mask))
-        return val_loss/len(self.val_dl), val_acc/len(self.val_dl.dataset)
+        return val_loss, val_acc/len(self.val_dl.dataset)
     
     def mask_accuracy(self, result, target, inverse_token_mask):
-        r = result.argmax(-1).masked_select(~inverse_token_mask)  
+        # print(inverse_token_mask.shape, result.shape, target.shape)
+        r = result.masked_select(~inverse_token_mask)  
         t = target.masked_select(~inverse_token_mask)  
         s = (r == t).sum()  
         return s

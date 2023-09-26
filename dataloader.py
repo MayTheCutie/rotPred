@@ -149,7 +149,7 @@ class TimeSsl(Dataset):
           self.cur_len = len(x)
         except TypeError as e:
             print("TypeError: ", e)
-            return torch.zeros((1,self.cur_len)), torch.zeros((1,self.cur_len)) 
+            return np.zeros((1,self.cur_len)), np.zeros((1,self.cur_len)) 
         if self.seq_len:
           f = interp1d(time, x)
           new_t = np.linspace(time[0], time[-1], self.seq_len)
@@ -161,6 +161,7 @@ class TimeSsl(Dataset):
         # if idx % 1000 == 0:
         #   print(idx)
         x = self.read_data(idx)
+        x = torch.tensor(fill_nan_np(x, interpolate=True))
         # min, max = torch.nanmin(x), torch.nanmax(x)
         # x = ((x-x.min())/(x.max()-x.min())).unsqueeze(0).unsqueeze(0)
         if self.transforms is not None:
@@ -181,17 +182,38 @@ class TimeSsl(Dataset):
           return x, torch.zeros((1,self.seq_len))
         
         
-class BERTDatasetSSL(TimeSsl):
-   def __init__(self, root_dir, paths_list, t_samples=1024, norm='minmax', tf=None, vocab_size=1024, mask_prob = 0.15, mask_val= -2,
-                cls_val = -1):
-    super().__init__(root_dir, paths_list, t_samples, norm=norm, tf=tf)
+class MaskedSSL(TimeSsl):
+   def __init__(self, root_dir, paths_list, t_samples=1024, norm='minmax', transforms=None, vocab_size=1024, mask_prob = 0.15, mask_val= -1,
+                cls_val = 0):
+    super().__init__(root_dir, paths_list, t_samples, norm=norm, transforms=transforms)
     self.vocab_size = vocab_size
     self.mask_prob = mask_prob
     self.mask_val = mask_val
     self.cls_val = cls_val
+    self.transforms = transforms
+
+   def mask_array(self, array, mask_percentage=0.15, mask_value=-1):
+      if len(array.shape) == 1:
+        array = array.unsqueeze(0)
+      len_s = array.shape[1]  
+      inverse_token_mask = torch.ones(len_s, dtype=torch.bool)  
+
+      mask_amount = round(len_s * mask_percentage)  
+      for _ in range(mask_amount):  
+          i = random.randint(0, len_s - 1)  
+
+          if random.random() < 0.8:  
+              array[:,i] = mask_value  
+          else:
+              array[:,i] = random.randint(0, 1)  
+          inverse_token_mask[i] = False  
+      return array, inverse_token_mask
 
    def __getitem__(self, idx):
       x = self.read_data(idx)
+      x = torch.tensor(fill_nan_np(x, interpolate=True))
+      if self.transforms is not None:
+        x, _, info = self.transforms(x, mask=None, info=dict())
       # xcf = A(x[:,1], nlags=len(x[:,0]))
       # x = torch.stack([torch.tensor(x[:,1]),torch.tensor(xcf)])
       x = torch.tensor(x[:,1]).unsqueeze(0)
@@ -201,7 +223,7 @@ class BERTDatasetSSL(TimeSsl):
         mini = x.min(dim=-1).values.view(-1,1).float()
         maxi = x.max(dim=-1).values.view(-1,1).float()
         x = torch.clamp((x-mini)/(maxi - mini)*self.vocab_size, min=0, max=self.vocab_size)
-      masked_x, inv_mask = mask_array(x.clone(), mask_percentage=self.mask_prob, mask_value=self.mask_val, vocab_size=self.vocab_size)
+      masked_x, inv_mask = mask_array(x.clone(), mask_percentage=self.mask_prob, mask_value=self.mask_val)
       x[:,0] = self.cls_val
       if torch.isnan(x).any():
         print(f"idx {idx} - sample {idx} is nan")
@@ -210,27 +232,47 @@ class BERTDatasetSSL(TimeSsl):
 
 
 class KeplerDataset(TimeSsl):
-  def __init__(self, root_dir, path_list, df=None,  **kwargs):
+  def __init__(self, root_dir, path_list, df=None, mask_prob=0.15, mask_val=-1,  **kwargs):
     super().__init__(root_dir, path_list, **kwargs)
     self.df = df
     self.length = len(self.paths_list) if self.df is None else len(self.df)
     self.cur_len = None
+    self.mask_prob = mask_prob
+    self.mask_val = mask_val
+
+  def mask_array(self, array, mask_percentage=0.15, mask_value=-1):
+      # if len(array.shape) == 1:
+      #   array = array.unsqueeze(0)
+      len_s = array.shape[0]  
+      inverse_token_mask = torch.ones(len_s, dtype=torch.bool)  
+
+      mask_amount = round(len_s * mask_percentage)
+      for _ in range(mask_amount):  
+          i = random.randint(0, len_s - 1)  
+
+          if random.random() < 0.95:  
+              array[i] = mask_value  
+          else:
+              array[i] = random.uniform(array.min(),array.max())  
+          inverse_token_mask[i] = False  
+      return array, inverse_token_mask
 
   def __getitem__(self, idx):
     if self.df is not None:
       row = self.df.iloc[idx]
+      # print(row['KID'])
       try:
         for i in range(len(row['data_file_path'])):
           x,time = read_fits(row['data_file_path'][i])
           x /= x.max()
           x = fill_nan_np(np.array(x), interpolate=True)
           if i == 0:
-            x_tot = x
+            x_tot = x.copy()
           else:
-            border_val = x[0] - x_tot[-1]
+            border_val = np.mean(x[0:10]) - np.mean(x_tot[-10:-1])
             x -= border_val
             x_tot = np.concatenate((x_tot, np.array(x)))
-        x = torch.tensor(x_tot)
+        x = torch.tensor(x_tot/x_tot.max())
         self.cur_len = len(x)
       except TypeError as e:
           print("TypeError: ", e)
@@ -248,10 +290,14 @@ class KeplerDataset(TimeSsl):
         x = torch.stack([x,torch.tensor(xcf)])
       else:
         x = torch.tensor(xcf).unsqueeze(-1)
+    masked_x, inv_mask = self.mask_array(x.clone(), mask_percentage=self.mask_prob, mask_value=self.mask_val)
+    torch.nan_to_num(masked_x, torch.nanmean(masked_x))
+    torch.nan_to_num(x, torch.nanmean(x))
+
     info['idx'] = idx
     info['path'] = row['data_file_path'] if self.df is not None else self.paths_list[idx]
     info['KID']  = row['KID'] if self.df is not None else self.paths_list[idx].split("/")[-1].split("-")[0].split('kplr')[-1]
-    return x.float(), info
+    return x.float(), masked_x.squeeze().float(), inv_mask, info
 
 
 class KeplerLabeledDataset(Dataset):
@@ -435,9 +481,10 @@ class ACFDataset(TimeSeriesDataset):
         x = torch.stack([x,torch.tensor(xcf)])
       else:
         x = torch.tensor(xcf).unsqueeze(0)
-      y = torch.tensor([y['Inclination'], y['Period']]).float()
+      y = torch.round(torch.tensor([y['Inclination']*180/np.pi, y['Period']]))
       y[1] = (y[1] - min_p)/(max_p-min_p)
-      y[0] = (y[0] - min_i)/(max_i-min_i)
+      # y[0] = (y[0] - min_i)/(max_i-min_i)
+      y[0] /= 90
       if self.norm == 'std':
           x = (x - x.mean(dim=-1)[:,None])/(x.std(dim=-1)[:,None] + 1e-8)
       elif self.norm == 'minmax':

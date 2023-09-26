@@ -7,6 +7,7 @@ from torch.nn.utils import weight_norm
 from lightPred.utils import residual_by_period
 from lightPred.period_analysis import analyze_lc_torch, analyze_lc
 from lightPred.Informer2020.models.encoder import Encoder, EncoderLayer, ConvLayer, EncoderStack, HwinEncoderLayer
+from lightPred.Informer2020.models.decoder import Decoder, DecoderLayer
 from lightPred.Informer2020.models.attn import FullAttention, ProbAttention, AttentionLayer, HwinAttentionLayer
 from lightPred.Informer2020.models.embed import DataEmbedding
 from lightPred.Autoformer.layers.Autoformer_EncDec import Encoder as AutoformerEncoder, EncoderLayer as AutoformerEncoderLayer, my_Layernorm as AutoformerLayerNorm, series_decomp
@@ -321,7 +322,27 @@ class LSTM_ATTN(LSTM):
         c_f = torch.cat([c_f[-1], c_f[-2]], dim=1)
 
         values = self.attention(c_f, x_f, x_f) 
-        out = self.fc2(self.activation(self.fc1(values)))
+        out = F.relu(self.fc2(self.activation(self.fc1(values))))
+        # values = (values[...,None] + out[:,None,:]).view(out.shape[0], -1)
+        # conf = self.fc4(self.activation(self.fc3(values)))
+        return out
+
+class LSTM_ATTN2(LSTM):
+    def __init__(self, attn='prob',n_heads=8, factor=5, dropout=0.1, output_attention=False, **kwargs):
+        super(LSTM_ATTN2, self).__init__(**kwargs)
+        self.fc1 = nn.Linear(self.feature_extractor.hidden_size*2, self.predict_size)
+        self.fc2 = nn.Linear(self.predict_size, self.num_classes)
+        Attn = ProbAttention if attn=='prob' else FullAttention
+        self.attention = AttentionLayer(Attn(False, factor, attention_dropout=dropout, output_attention=output_attention), 
+                                d_model=self.feature_extractor.hidden_size*2, n_heads=n_heads, mix=False)
+    def forward(self, x):
+        if len(x.shape) == 2:
+            x = x.unsqueeze(1)  
+        x_f, h_f, c_f = self.feature_extractor(x, return_cell=True)
+        c_f = torch.cat([c_f[-1], c_f[-2]], dim=1)
+
+        values, _ = self.attention(x_f, x_f, x_f, attn_mask=None) 
+        out = self.fc2(self.activation(self.fc1(values.max(dim=1).values)))
         # values = (values[...,None] + out[:,None,:]).view(out.shape[0], -1)
         # conf = self.fc4(self.activation(self.fc3(values)))
         return out
@@ -587,6 +608,90 @@ class InformerEncoder(nn.Module):
         enc_out = self.projection(enc_out.max(dim=1).values)
         return enc_out
 
+class Informer(nn.Module):
+    def __init__(self, enc_in, dec_in, c_out, seq_len, label_len, out_len, 
+                factor=5, d_model=512, n_heads=8, e_layers=3, d_layers=2, d_ff=512, 
+                dropout=0.0, attn='prob', embed='fixed', freq='h', activation='gelu', 
+                output_attention = False, distil=True, mix=True,
+                device=torch.device('cuda:0')):
+        super(Informer, self).__init__()
+        self.pred_len = out_len
+        self.attn = attn
+        self.output_attention = output_attention
+
+        # Encoding
+        self.enc_embedding = DataEmbedding(enc_in, d_model, embed, freq, dropout, max_len=seq_len)
+        self.dec_embedding = DataEmbedding(dec_in, d_model, embed, freq, dropout, max_len=seq_len)
+        # Attention
+        Attn = ProbAttention if attn=='prob' else FullAttention
+        # Encoder
+        self.encoder = Encoder(
+            [
+                EncoderLayer(
+                    AttentionLayer(Attn(False, factor, attention_dropout=dropout, output_attention=output_attention), 
+                                d_model, n_heads, mix=False),
+                    d_model,
+                    d_ff,
+                    dropout=dropout,
+                    activation=activation
+                ) for l in range(e_layers)
+            ],
+            [
+                ConvLayer(
+                    d_model
+                ) for l in range(e_layers-1)
+            ] if distil else None,
+            norm_layer=torch.nn.LayerNorm(d_model)
+        )
+        # Decoder
+        self.decoder = Decoder(
+            [
+                DecoderLayer(
+                    AttentionLayer(Attn(True, factor, attention_dropout=dropout, output_attention=False), 
+                                d_model, n_heads, mix=mix),
+                    AttentionLayer(FullAttention(False, factor, attention_dropout=dropout, output_attention=False), 
+                                d_model, n_heads, mix=False),
+                    d_model,
+                    d_ff,
+                    dropout=dropout,
+                    activation=activation,
+                )
+                for l in range(d_layers)
+            ],
+            norm_layer=torch.nn.LayerNorm(d_model)
+        )
+        # self.end_conv1 = nn.Conv1d(in_channels=label_len+out_len, out_channels=out_len, kernel_size=1, bias=True)
+        # self.end_conv2 = nn.Conv1d(in_channels=d_model, out_channels=c_out, kernel_size=1, bias=True)
+        self.projection = nn.Linear(d_model, c_out, bias=True)
+    
+    def reshape_input(self, x_enc, x_dec):
+        if len(x_enc.shape) == 2:
+            x_enc = x_enc.unsqueeze(-1)
+        if len(x_enc.shape) == 3 and x_enc.shape[1] == 1:
+            x_enc = x_enc.transpose(-1,-2)
+        if len(x_dec.shape) == 2:
+            x_dec = x_dec.unsqueeze(-1)
+        if len(x_dec.shape) == 3 and x_enc.shape[1] == 1:
+            x_dec = x_dec.transpose(-1,-2)
+        return x_enc, x_dec
+        
+    def forward(self, x_enc, x_dec, 
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
+        x_enc, x_dec = self.reshape_input(x_enc, x_dec)
+        enc_out = self.enc_embedding(x_enc, None)
+        enc_out, attns = self.encoder(enc_out, attn_mask=enc_self_mask)
+
+        dec_out = self.dec_embedding(x_dec, None)
+        dec_out = self.decoder(dec_out, enc_out, x_mask=dec_self_mask, cross_mask=dec_enc_mask)
+        dec_out = self.projection(dec_out)
+        
+        # dec_out = self.end_conv1(dec_out)
+        # dec_out = self.end_conv2(dec_out.transpose(2,1)).transpose(1,2)
+        if self.output_attention:
+            return dec_out[:,-self.pred_len:,:], attns
+        else:
+            return dec_out[:,-self.pred_len:,:] # [B, L, D]
+
 class HwinEncoder(nn.Module):
     def __init__(self,enc_in, c_out, seq_len, 
                 factor=5, d_model=512, n_heads=8, e_layers=3, d_ff=512, window_size=6, n_windows=4,
@@ -606,8 +711,8 @@ class HwinEncoder(nn.Module):
             [
                 HwinEncoderLayer(
                     HwinAttentionLayer(Attn(False, factor, attention_dropout=dropout, output_attention=output_attention), 
-                                d_model=d_model*2**l, n_heads=n_heads, window_size=window_size, n_windows=n_windows, mix=False),
-                    d_model*2**l,
+                                d_model=d_model, n_heads=n_heads, window_size=window_size, n_windows=n_windows, mix=False),
+                    d_model,
                     d_ff,
                     dropout=dropout,
                     activation=activation
@@ -615,15 +720,17 @@ class HwinEncoder(nn.Module):
             ],
             [
                 ConvLayer(
-                    d_model*2**(l), c_out=d_model*2**(l+1)
+                    d_model, c_out=d_model
                 ) for l in range(e_layers-1)
             ] if distil else None,
-            norm_layer=torch.nn.LayerNorm(d_model*2**(e_layers-1))
+            norm_layer=torch.nn.LayerNorm(d_model)
         )
         # self.ffd = nn.Linear(d_model*seq_len, 1024, bias=True)
         self.output_dim = self._out_shape()
         self.projection = nn.Linear(self.output_dim, predict_size, bias=True)
         self.prediction = nn.Linear(predict_size, c_out, bias=True)
+        # self.prediction2 = nn.Linear(predict_size, c_out, bias=True)
+
         self.ssl = ssl
 
     def _out_shape(self) -> int:
@@ -654,8 +761,9 @@ class HwinEncoder(nn.Module):
         if self.ssl:
             return enc_out.view(enc_out.size(0, -1))
         enc_out = self.projection(enc_out.view(enc_out.size(0), -1))
-        enc_out = self.prediction(enc_out)
-        return enc_out
+        out = self.prediction(enc_out)
+        # out2 = self.prediction2(enc_out)
+        return out
 
 
 
