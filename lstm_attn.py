@@ -1,7 +1,7 @@
 import json
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import os
 import pandas as pd
 import numpy as np
@@ -15,6 +15,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import warnings
 from matplotlib import pyplot as plt
+# from pytorch_forecasting.metrics.quantile import QuantileLoss
 
 
 import sys
@@ -30,12 +31,15 @@ from lightPred.dataloader import *
 from lightPred.models import *
 from lightPred.utils import *
 from lightPred.train import *
-from lightPred.eval import eval_model
-from lightPred.optim import WeightedMSELoss
+from lightPred.eval import eval_model, eval_results, eval_quantiled_results
+from lightPred.optim import WeightedMSELoss, QuantileLoss
 from lightPred.transforms import *
+from lightPred.sampler import DistributedSamplerWrapper
 print(f"python path {os.sys.path}")
 
-warnings.filterwarnings("ignore")
+torch.manual_seed(1234)
+
+# warnings.filterwarnings("ignore")
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -43,12 +47,12 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 292
+exp_num = 47
 
 log_path = '/data/logs/lstm_attn'
 
-# chekpoint_path = '/data/logs/simsiam/exp11/simsiam_lstm.pth'
-checkpoint_path = '/data/logs/lstm_attn/exp29'
+chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
+# checkpoint_path = '/data/logs/lstm_attn/exp29'
 data_folder = "/data/butter/data2"
 
 test_folder = "/data/butter/test2"
@@ -56,6 +60,8 @@ test_folder = "/data/butter/test2"
 Nlc = 50000
 
 test_Nlc = 5000
+
+CUDA_LAUNCH_BLOCKING='1'
 
 
 idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc))+1) for idx in range(Nlc)]
@@ -66,7 +72,7 @@ test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(te
 
 b_size = 256
 
-num_epochs = 20
+num_epochs = 1000
 
 cad = 30
 
@@ -87,14 +93,13 @@ def setup(rank, world_size):
 
 if __name__ == '__main__':
 
-    torch.manual_seed(1234)
 
     # optim_params = {"betas": (0.7191221416723297, 0.9991147816604715),
     # "lr": 2.4516572028943392e-05,
     # "weight_decay": 3.411877716394279e-05}
     optim_params = {
     # "lr": 0.0096, "weight_decay": 0.0095
-    "lr": 5e-3
+    "lr": 5e-4
     }
 
     net_params = {
@@ -142,25 +147,54 @@ if __name__ == '__main__':
 
     transform = Compose([Detrend(), RandomCrop(width=int(dur/cad*DAY2MIN))
                         ])
+    test_transform = Compose([Detrend(), Slice(0, int(dur/cad*DAY2MIN))])
     
     train_dataset = ACFDataset(data_folder, train_list, t_samples=None, transforms=transform, return_raw=False)
     val_dataset = ACFDataset(data_folder, val_list, t_samples=None, transforms=transform, return_raw=False)
-    test_dataset = ACFDataset(test_folder, test_idx_list, t_samples=None, transforms=transform, return_raw=False)
+    test_dataset = ACFDataset(test_folder, test_idx_list, t_samples=None, transforms=test_transform, return_raw=False)
 
-    # train_dataset = TimeSeriesDataset(data_folder, train_list, seq_len=None, transforms=transform)
-    # val_dataset = TimeSeriesDataset(data_folder, val_list, seq_len=None, transforms=transform)
-    # test_dataset = TimeSeriesDataset(test_folder, test_idx_list, seq_len=None, transforms=transform)
+    # train_dataset = ACFClassifierDataset(data_folder, train_list, t_samples=None, transforms=transform, return_raw=False)
+    # val_dataset = ACFClassifierDataset(data_folder, val_list, t_samples=None, transforms=transform, return_raw=False)
+    # test_dataset = ACFClassifierDataset(test_folder, test_idx_list, t_samples=None, transforms=transform, return_raw=False)
+   
+    # train_dataset = TimeSeriesDataset(data_folder, train_list, t_samples=None, num_classes=net_params['num_classes']//2,
+    #                                  transforms=transform)
+    # val_dataset = TimeSeriesDataset(data_folder, val_list, t_samples=None,num_classes=net_params['num_classes']//2,
+    #                                 transforms=transform)
+    # test_dataset = TimeSeriesDataset(test_folder, test_idx_list, t_samples=None, num_classes=net_params['num_classes']//2,
+    #                                 transforms=transform)
 
 
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
     train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler, \
                                                num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=b_size, \
+
+    train_weights = dataset_weights(train_dataloader, Nlc)
+
+    train_sampler_weighted = DistributedSamplerWrapper(sampler=WeightedRandomSampler(train_weights, len(train_weights)),
+                                                num_replicas=world_size, rank=rank)
+    train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler_weighted, \
+                                                  num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True) 
+
+    val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
+    val_dataloader = DataLoader(val_dataset, batch_size=b_size, sampler=val_sampler, \
                                  num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
     
 
     test_dataloader = DataLoader(test_dataset, batch_size=b_size, \
                                   num_workers=int(os.environ["SLURM_CPUS_PER_TASK"])) 
+
+    print("dataset length: ", len(train_dataset), len(val_dataset), len(test_dataset))
+
+    # print("check weights...")
+    # incs = torch.zeros(0)
+    # for i, (x,y,_,_) in enumerate(test_dataloader):
+    #     print(i)
+    #     incs = torch.cat((incs, y[:,0]*90), dim=0)
+    # plt.hist(incs.squeeze(), 80)
+    # plt.savefig('/data/tests/incs_hist_test_lstm_attn.png')
+    # plt.clf()
+    # print("done")
     # train_dataset = TimeSeriesDataset(data_folder, train_list, t_samples=net_params['seq_len'])
     # val_dataset = TimeSeriesDataset(data_folder, val_list, t_samples=net_params['seq_len'])
     # test_dataset = TimeSeriesDataset(test_folder, test_idx_list, t_samples=net_params['seq_len'])
@@ -174,9 +208,11 @@ if __name__ == '__main__':
 
    
 
-    model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
+    model, net_params, _ = load_model(f'{log_path}/exp29', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
     
-    # model = LSTM_ATTN(**net_params)
+    # model = LSTM(**net_params)
+    # model = LSTM_ATTN2(**net_params)
+
     # print(model)
     # features_ext = LSTMFeatureExtractor(**backbone)
     # sims = SimSiam(features_ext)
@@ -195,39 +231,53 @@ if __name__ == '__main__':
 
     model = model.to(local_rank)
 
-    model = DDP(model, device_ids=[local_rank])
+    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     print("number of params:", count_params(model))
     
     loss_fn = nn.MSELoss()
     # loss_fn = WeightedMSELoss(factor=1.2)
-    # loss_fn = QuantileLoss(quantiles=[0.9, 0.8])
+
+    # qs = [0.1, 0.2, 0.5, 0.8, 0.9]
+    # loss_fn = QuantileLoss()
+    # loss_fn = nn.CrossEntropyLoss()
+
     optimizer = optim.AdamW(model.parameters(), **optim_params)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=30, verbose=True, factor=0.1)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=20, verbose=True, factor=0.1)
 
     data_dict = {'dataset': train_dataset.__class__.__name__, 'transforms': transform, 'batch_size': b_size,
-     'num_epochs':num_epochs, 'checkpoint_path': checkpoint_path, 'loss_fn': loss_fn.__class__.__name__}
+     'num_epochs':num_epochs, 'checkpoint_path': f'{log_path}/exp{exp_num}', 'loss_fn': loss_fn.__class__.__name__,
+     'model': model.module.__class__.__name__, 'optimizer': optimizer.__class__.__name__,
+     'data_folder': data_folder, 'test_folder': test_folder}
 
     with open(f'{log_path}/exp{exp_num}/data_params.yml', 'w') as outfile:
         yaml.dump(data_dict, outfile, default_flow_style=False)
+
     
-    trainer = Trainer(model=model, optimizer=optimizer, criterion=loss_fn,
+    trainer = Trainer(model=model, optimizer=optimizer, criterion=loss_fn, num_classes=net_params['num_classes']//2,
                        scheduler=scheduler, train_dataloader=train_dataloader, val_dataloader=val_dataloader,
                         device=local_rank, optim_params=optim_params, net_params=net_params, exp_num=exp_num, log_path=log_path,
                         exp_name="lstm_attn")
     
 
-    # fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank, early_stopping=50, only_p=False, best='loss', conf=True)
+    fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank, early_stopping=25, only_p=False, best='loss', conf=True)
 
     
-    # output_filename = f'{log_path}/exp{exp_num}/lstm_attn.json'
-    # with open(output_filename, "w") as f:
-    #     json.dump(fit_res, f, indent=2)
-    # fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-    # plt.savefig(f"{log_path}/exp{exp_num}/fit.png") 
+    output_filename = f'{log_path}/exp{exp_num}/lstm_attn.json'
+    with open(output_filename, "w") as f:
+        json.dump(fit_res, f, indent=2)
+    fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+    plt.savefig(f"{log_path}/exp{exp_num}/fit.png")
+    plt.clf()
 
     print("Evaluation on test set:")
 
-    eval_model(f'{log_path}/exp{exp_num}',model=LSTM_ATTN, test_dl=test_dataloader, data_folder=test_folder, num_classes=2, conf=True) 
+    preds, targets, confs = trainer.predict(test_dataloader, device=local_rank, conf=True)
+
+    eval_results(preds, targets, confs, data_dir=f'{log_path}/exp{exp_num}', model_name=model.module.__class__.__name__)
+
+
+    # eval_model(f'{log_path}/exp{exp_num}',model=LSTM_ATTN, test_dl=val_dataloader,
+    #                 data_folder=test_folder, conf=True, num_classes=net_params['num_classes']//2) 
 
     
     

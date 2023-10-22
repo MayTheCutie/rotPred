@@ -11,10 +11,14 @@ from astropy.io import fits
 from lightPred.utils import create_kepler_df
 from matplotlib import pyplot as plt
 from lightPred.utils import fill_nan_np
+from pyts.image import GramianAngularField
+
 
 
 min_p, max_p = 0,60
 min_i, max_i = 0, np.pi/2
+min_tau, max_tau = 1,10 
+T_SUN = 5777
 
 non_period_table_path = "/data/lightPred/Table_2_Non_Periodic.txt"
 kepler_path = "/data/lightPred/data"
@@ -53,11 +57,13 @@ def read_fits(filename):
     # print("reading fits file: ", filename)
     with fits.open(filename) as hdulist:
           binaryext = hdulist[1].data
-          header = hdulist[1].header
+          meta = hdulist[0].header
+          # print(header)
     df = pd.DataFrame(data=binaryext)
     x = df['PDCSAP_FLUX']
     time = df['TIME'].values
-    return x,time
+    # teff = meta['TEFF']
+    return x,time, meta
 
 def add_kepler_noise(x, non_p_df, factor=4):
     # plt.plot(x)
@@ -124,17 +130,20 @@ def mask_array(array, mask_percentage=0.15, mask_value=-1, vocab_size=1024):
   return array, inverse_token_mask
 
 class TimeSsl(Dataset):
-    def __init__(self, root_dir, paths_list, t_samples=512, norm='std', ssl_tf=None, transforms=None, acf=False, return_raw=False):
+    def __init__(self, root_dir, path_list,  df=None, t_samples=512, norm='std', ssl_tf=None, transforms=None, acf=False, return_raw=False):
         # self.idx_list = idx_list
-        self.length = len(paths_list) if paths_list is not None else 0
+        self.path_list = path_list
+        self.cur_len = None
+        self.df = df
         self.root_dir = root_dir
-        self.paths_list = paths_list
         self.seq_len = t_samples
-        self.norm=norm
+        self.norm = norm
         self.ssl_tf = ssl_tf
         self.transforms = transforms
         self.acf = acf
         self.return_raw = return_raw
+        self.length = len(self.df) if self.df is not None else len(self.path_list)
+
 
         
     def __len__(self):
@@ -144,7 +153,7 @@ class TimeSsl(Dataset):
         path = self.paths_list[idx]
         filename = os.path.join(self.root_dir, path)
         try:
-          x, time = read_fits(filename)
+          x, time, meta = read_fits(filename)
           x = fill_nan_np(x, interpolate=interpolate)
           self.cur_len = len(x)
         except TypeError as e:
@@ -155,23 +164,54 @@ class TimeSsl(Dataset):
           new_t = np.linspace(time[0], time[-1], self.seq_len)
           x = f(new_t)
         # x = torch.tensor(x)
-        return x
+        return x, meta
+
+    def read_row(self, idx):
+        row = self.df.iloc[idx]
+        # print(row['KID'])
+        try:
+          for i in range(len(row['data_file_path'])):
+            x,time,meta = read_fits(row['data_file_path'][i])
+            x /= x.max()
+            x = fill_nan_np(np.array(x), interpolate=True)
+            if i == 0:
+              x_tot = x.copy()
+            else:
+              border_val = np.mean(x) - np.mean(x_tot)
+              x -= border_val
+              x_tot = np.concatenate((x_tot, np.array(x)))
+          x = torch.tensor(x_tot/x_tot.max())
+          self.cur_len = len(x)
+        except TypeError as e:
+            print("TypeError: ", e)
+            x = torch.zeros((self.cur_len))
+        return x, meta
     
     def __getitem__(self, idx):
         # if idx % 1000 == 0:
         #   print(idx)
-        x = self.read_data(idx)
-        x = torch.tensor(fill_nan_np(x, interpolate=True))
-        # min, max = torch.nanmin(x), torch.nanmax(x)
-        # x = ((x-x.min())/(x.max()-x.min())).unsqueeze(0).unsqueeze(0)
+        if self.df is not None:
+          x, meta = self.read_row(idx)
+        else:
+          x, meta =  self.read_data(idx).float()
+          x /= x.max()
         if self.transforms is not None:
           x, _, info = self.transforms(x, mask=None, info=dict())
         if self.acf:
           x = A(x, nlags=len(x))
         x = torch.tensor(x)
+        x = torch.nan_to_num(x, torch.nanmean(x))
         x = x.unsqueeze(0).unsqueeze(0)
         # print("before augmentation: ", x.shape)
         # x = self.x_samples[idx].unsqueeze(0).unsqueeze(0)
+        if self.norm == 'std':
+          x = (x - x.mean())/(x.std()+1e-8)
+        elif self.norm == 'median':
+          x /= x.median()
+        elif self.norm == 'minmax':
+          mini = x.min(dim=-1).values.view(-1,1).float()
+          maxi = x.max(dim=-1).values.view(-1,1).float()
+          x = (x-mini)/(maxi - mini)
         if self.ssl_tf is not None:
           x1 = self.ssl_tf(copy.deepcopy(x))
           x2 = self.ssl_tf(copy.deepcopy(x))
@@ -183,9 +223,9 @@ class TimeSsl(Dataset):
         
         
 class MaskedSSL(TimeSsl):
-   def __init__(self, root_dir, paths_list, t_samples=1024, norm='minmax', transforms=None, vocab_size=1024, mask_prob = 0.15, mask_val= -1,
+   def __init__(self, root_dir, path_list, t_samples=1024, norm='minmax', transforms=None, vocab_size=1024, mask_prob = 0.15, mask_val= -1,
                 cls_val = 0):
-    super().__init__(root_dir, paths_list, t_samples, norm=norm, transforms=transforms)
+    super().__init__(root_dir, path_list, t_samples, norm=norm, transforms=transforms)
     self.vocab_size = vocab_size
     self.mask_prob = mask_prob
     self.mask_val = mask_val
@@ -232,11 +272,10 @@ class MaskedSSL(TimeSsl):
 
 
 class KeplerDataset(TimeSsl):
-  def __init__(self, root_dir, path_list, df=None, mask_prob=0.15, mask_val=-1,  **kwargs):
-    super().__init__(root_dir, path_list, **kwargs)
-    self.df = df
-    self.length = len(self.paths_list) if self.df is None else len(self.df)
-    self.cur_len = None
+  def __init__(self, root_dir, path_list, df=None, mask_prob=0, mask_val=-1,  **kwargs):
+    super().__init__(root_dir, path_list, df=df, **kwargs)
+    # self.df = df
+    # self.length = len(self.df) if self.df is not None else len(self.paths_list)
     self.mask_prob = mask_prob
     self.mask_val = mask_val
 
@@ -256,29 +295,14 @@ class KeplerDataset(TimeSsl):
               array[i] = random.uniform(array.min(),array.max())  
           inverse_token_mask[i] = False  
       return array, inverse_token_mask
+  
+
 
   def __getitem__(self, idx):
     if self.df is not None:
-      row = self.df.iloc[idx]
-      # print(row['KID'])
-      try:
-        for i in range(len(row['data_file_path'])):
-          x,time = read_fits(row['data_file_path'][i])
-          x /= x.max()
-          x = fill_nan_np(np.array(x), interpolate=True)
-          if i == 0:
-            x_tot = x.copy()
-          else:
-            border_val = np.mean(x[0:10]) - np.mean(x_tot[-10:-1])
-            x -= border_val
-            x_tot = np.concatenate((x_tot, np.array(x)))
-        x = torch.tensor(x_tot/x_tot.max())
-        self.cur_len = len(x)
-      except TypeError as e:
-          print("TypeError: ", e)
-          x = torch.zeros((self.cur_len))
+      x, meta = self.read_row(idx)
     else:
-      x =  self.read_data(idx).float()
+      x, meta =  self.read_data(idx).float()
       x /= x.max()
     
     info = dict()
@@ -290,66 +314,46 @@ class KeplerDataset(TimeSsl):
         x = torch.stack([x,torch.tensor(xcf)])
       else:
         x = torch.tensor(xcf).unsqueeze(-1)
-    masked_x, inv_mask = self.mask_array(x.clone(), mask_percentage=self.mask_prob, mask_value=self.mask_val)
+    if self.norm == 'std':
+      x = (x - x.mean())/(x.std()+1e-8)
+    elif self.norm == 'median':
+      x /= x.median()
+    elif self.norm == 'minmax':
+      mini = x.min(dim=-1).values.view(-1,1).float()
+      maxi = x.max(dim=-1).values.view(-1,1).float()
+      x = (x-mini)/(maxi - mini)
+    if self.mask_prob > 0:
+      masked_x, inv_mask = self.mask_array(x.clone(), mask_percentage=self.mask_prob, mask_value=self.mask_val)
+    else:
+      masked_x = x.clone()
+      inv_mask = torch.ones_like(x).bool()
     torch.nan_to_num(masked_x, torch.nanmean(masked_x))
     torch.nan_to_num(x, torch.nanmean(x))
-
+    # print(meta['TEFF'], meta['RADIUS'], meta['LOGG'])
     info['idx'] = idx
-    info['path'] = row['data_file_path'] if self.df is not None else self.paths_list[idx]
-    info['KID']  = row['KID'] if self.df is not None else self.paths_list[idx].split("/")[-1].split("-")[0].split('kplr')[-1]
+    info['Teff'] = meta['TEFF'] if meta['TEFF'] is not None else 0
+    info['R'] = meta['RADIUS'] if meta['RADIUS'] is not None else 0
+    info['logg'] = meta['LOGG'] if meta['LOGG'] is not None else 0
+    info['path'] = self.df.iloc[idx]['data_file_path'] if self.df is not None else self.paths_list[idx]
+    info['KID']  = self.df.iloc[idx]['KID'] if self.df is not None else self.paths_list[idx].split("/")[-1].split("-")[0].split('kplr')[-1]
     return x.float(), masked_x.squeeze().float(), inv_mask, info
 
 
-class KeplerLabeledDataset(Dataset):
-  def __init__(self, df,  t_samples=512, norm='std', transforms=None, acf=False, return_raw=False):
-      self.df = df
-      self.seq_len = t_samples
-      self.norm=norm
-      self.transforms = transforms
-      self.acf = acf 
-      self.return_raw = return_raw
+class KeplerLabeledDataset(KeplerDataset):
+  def __init__(self, root_dir, path_list, **kwargs):
+      super().__init__(root_dir, path_list, **kwargs)
 
-  def __len__(self):
-      return len(self.df)
-  
+
   def __getitem__(self, idx): 
-    row = self.df.iloc[idx]
-    try:
+    x, masked_x, inv_mask, info = super().__getitem__(idx)
+    if self.df is not None:
       row = self.df.iloc[idx]
-      for i in range(len(row['data_file_path'])):
-        x,time = read_fits(row['data_file_path'][i])
-        x /= x.max()
-        x = fill_nan_np(np.array(x), interpolate=True)
-        if i == 0:
-          x_tot = x
-        else:
-          border_val = x[0] - x_tot[-1]
-          x -= border_val
-          x_tot = np.concatenate((x_tot, np.array(x))) 
-      x = x_tot
-    except TypeError as e:
-        print("TypeError: ", e)
-        return torch.zeros((1,self.seq_len)), torch.zeros((1,self.seq_len)) 
-    if self.seq_len:
-      f = interp1d(time, x)
-      new_t = np.linspace(time[0], time[-1], self.seq_len)
-      x = np.concatenate((new_t[:,None], f(new_t)[:,None]), axis=1)
-      x = torch.tensor(x.astype(np.float32))[:,1]
-    else:
-      x = torch.tensor(x.astype(np.float32))
-    # x = torch.nan_to_num(x, torch.nanmean(x))
-    if self.transforms is not None:
-      x, _, info = self.transforms(x, mask=None, info=dict())
-    if self.acf:
-      xcf = torch.tensor(A(x, nlags=len(x)))
-      if self.return_raw:
-        x = torch.stack([x,torch.tensor(xcf)])
-      else:
-        x = torch.tensor(xcf).unsqueeze(-1)
-    x = (x - x.mean())/(x.std()+1e-8)
-    y = {'Period': torch.tensor(row['Prot'])/max_p, 'period_err': torch.tensor(row['Prot_err']),
-          'Teff': torch.tensor(row['Teff']),'logg': torch.tensor(row['logg'])} 
-    return x.float(), y
+    if 'Prot' in row:
+      y = {'Period': torch.tensor(row['Prot'])/max_p, 'period_err': torch.tensor(row['Prot_err']),
+          'Teff': torch.tensor(row['Teff']),'logg': torch.tensor(row['logg'])}
+    elif 'i' in row:
+      y = {'i': torch.tensor(row['i'])/max_i} 
+    return x.float(), y, inv_mask, info
 
 class DenoisingDataset(Dataset):
 
@@ -384,7 +388,7 @@ class DenoisingDataset(Dataset):
 
 
 class TimeSeriesDataset(Dataset):
-  def __init__(self, root_dir, idx_list, t_samples=512, norm='std', num_classes=10, vocab_size=30521, transforms=None,
+  def __init__(self, root_dir, idx_list, t_samples=512, norm='std', num_classes=2, transforms=None,
                 noise=False, noise_factor=4):
       self.idx_list = idx_list
       self.length = len(idx_list)
@@ -392,8 +396,7 @@ class TimeSeriesDataset(Dataset):
       self.lc_path = os.path.join(root_dir, "simulations")
       self.seq_len = t_samples
       self.norm=norm
-      self.cls = num_classes
-      self.vocab_size = vocab_size
+      self.num_classes = num_classes
       self.transforms = transforms
       self.noise = noise
       self.noise_factor = noise_factor
@@ -413,10 +416,12 @@ class TimeSeriesDataset(Dataset):
         new_t = np.linspace(x[:,0][0], x[:,0][-1], self.seq_len)
         x = np.concatenate((new_t[:,None], f(new_t)[:,None]), axis=1)
       y = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
-      y = torch.tensor([y['Inclination'], y['Period']]).float()
+      y = torch.tensor([y['Inclination'], y['Period'],  y['Decay Time']]).float()
       y[0] = (y[0] - min_i)/(max_i-min_i)
       y[1] = (y[1] - min_p)/(max_p-min_p)
+      y[2] = (y[2] - min_tau)/(max_tau-min_tau)
       x = torch.tensor(x.astype(np.float32))[:,1]
+      y = y[:self.num_classes]
       if self.transforms is not None:
         x, _, info = self.transforms(x, mask=None, info=dict())
         info['idx'] = idx
@@ -424,8 +429,10 @@ class TimeSeriesDataset(Dataset):
         x = add_kepler_noise(x, self.non_p_df, factor=self.noise_factor)
       if self.norm == 'std':
         x = ((x-x.mean())/(x.std()+1e-8))
+      elif self.norm == 'median':
+        x /= x.median()
       elif self.norm == 'minmax':
-        x = ((x-x.min())/(x.max()-x.min())*self.vocab_size).to(torch.long)
+        x = (x-x.min())/(x.max()-x.min())
       return x.float(), y.squeeze(0).squeeze(-1).float(), torch.ones_like(x), info
   
 class TimeSeriesClassifierDataset(TimeSeriesDataset):
@@ -438,13 +445,12 @@ class TimeSeriesClassifierDataset(TimeSeriesDataset):
     y1 = quantize_tensor(y[0].unsqueeze(0), self.cls)
     y2 = quantize_tensor(y[1].unsqueeze(0), self.cls)
     return x.float(), torch.cat([y1,y2], dim=-1).float().squeeze(0)
-        
+  
         
 class ACFDataset(TimeSeriesDataset):
-  def __init__(self, root_dir, idx_list, t_samples=512, norm='std', vocab_size=30521, return_raw=True, transforms=None):
-    super().__init__(root_dir, idx_list, t_samples, norm=norm, vocab_size=vocab_size)
+  def __init__(self, root_dir, idx_list, t_samples=512, norm='std', num_classes=2, return_raw=True, transforms=None):
+    super().__init__(root_dir, idx_list, t_samples, norm=norm, num_classes=num_classes, transforms=transforms)
     self.return_raw = return_raw
-    self.transforms = transforms
 
   def __getitem__(self, idx):
       sample_idx = remove_leading_zeros(self.idx_list[idx])
@@ -468,25 +474,21 @@ class ACFDataset(TimeSeriesDataset):
       xcf = fill_nan_np(xcf, interpolate=True)
       if np.isnan(xcf).any():
         pass
-        # print(f"xcf idx {idx} - sample {self.idx_list[idx]} is nan")
-        # fig, ax = plt.subplots(1,2)
-        # ax[0].plot(x[:,1])
-        # ax[0].set_title("x")
-        # ax[1].plot(xcf)
-        # ax[1].set_title("xcf")
-        # plt.savefig(f"/data/tests/xcf_with_nans_{self.idx_list[idx]}.png")
-        # print(x[:,1])
       x = torch.tensor(x[:,1])
       if self.return_raw:
         x = torch.stack([x,torch.tensor(xcf)])
       else:
         x = torch.tensor(xcf).unsqueeze(0)
-      y = torch.round(torch.tensor([y['Inclination']*180/np.pi, y['Period']]))
+      y = torch.tensor([y['Inclination'], y['Period'], y['Decay Time']])
       y[1] = (y[1] - min_p)/(max_p-min_p)
-      # y[0] = (y[0] - min_i)/(max_i-min_i)
-      y[0] /= 90
+      y[0] = (y[0] - min_i)/(max_i-min_i)
+      y[2] = (y[2] - min_tau)/(max_tau-min_tau)
+      y = y[:self.num_classes]
+      # y[0] /= 90
       if self.norm == 'std':
-          x = (x - x.mean(dim=-1)[:,None])/(x.std(dim=-1)[:,None] + 1e-8)
+        x = (x - x.mean(dim=-1)[:,None])/(x.std(dim=-1)[:,None] + 1e-8)
+      elif self.norm == 'median':
+        x /= x.median()
       elif self.norm == 'minmax':
         mini = x.min(dim=-1).values.view(-1,1).float()
         maxi = x.max(dim=-1).values.view(-1,1).float()
@@ -508,3 +510,20 @@ class ACFClassifierDataset(ACFDataset):
     return x.float(), torch.cat([y1,y2], dim=-1).float().squeeze(0), torch.ones_like(x), info
   
 
+class TimeImageDataset(TimeSeriesDataset):
+  def __init__(self, root_dir, idx_list, cls=10, **kwargs):
+    super().__init__(root_dir, idx_list, **kwargs)
+    self.cls = cls
+      
+  def __len__(self):
+      return self.length
+  
+  def __getitem__(self, idx):
+      x,y, mask, info = super().__getitem__(idx)
+      if self.cls:
+        y = quantize_tensor(y[0].unsqueeze(0), self.cls)
+        # y2 = quantize_tensor(y[1].unsqueeze(0), self.cls)
+      gaf = GramianAngularField()
+      x_gram = gaf.transform(x.reshape(1,-1)).squeeze()
+      x_gram = torch.tensor(x_gram).unsqueeze(0)
+      return x_gram.float(), y.squeeze(0).squeeze(-1).float(), mask, info

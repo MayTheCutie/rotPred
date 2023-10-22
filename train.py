@@ -5,6 +5,9 @@ import time
 import os
 import yaml
 from matplotlib import pyplot as plt
+import glob
+from collections import OrderedDict
+
 # import NamedTuple
 # import List
 
@@ -34,15 +37,17 @@ class Trainer(object):
     """
     A class that encapsulates the training loop for a PyTorch model.
     """
-    def __init__(self, model, optimizer, criterion, train_dataloader, device,scheduler=None, val_dataloader=None,
-                 optim_params=None, net_params=None, exp_num=None, log_path=None, exp_name=None, plot_every=None):
+    def __init__(self, model, optimizer, criterion, train_dataloader, device, num_classes=2, scheduler=None, val_dataloader=None,
+                 optim_params=None, max_iter=np.inf, net_params=None, exp_num=None, log_path=None, exp_name=None, plot_every=None):
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
         self.optim = optimizer
+        self.num_classes = num_classes
         self.scheduler = scheduler
         self.train_dl = train_dataloader
         self.val_dl = val_dataloader
+        self.max_iter = max_iter
         self.device = device
         self.optim_params = optim_params
         self.net_params = net_params
@@ -109,15 +114,27 @@ class Trainer(object):
             plot = (self.plot_every is not None) and (epoch % self.plot_every == 0)
             t_loss, t_acc = self.train_epoch(device, epoch=epoch, only_p=only_p, plot=plot, conf=conf)
             t_loss_mean = np.mean(t_loss)
-            self.logger.add_scalar('train_acc', t_acc, epoch)
-            train_acc.append(t_acc)
             train_loss.extend(t_loss)
+            global_train_accuracy = torch.tensor(t_acc).cuda()  # Convert accuracy to a tensor on the GPU
+            torch.distributed.reduce(global_train_accuracy, dst=0, op=torch.distributed.ReduceOp.SUM)  
+            if torch.distributed.get_rank() == 0:  # Only perform this on the master GPU
+                # global_accuracy /= torch.distributed.get_world_size()
+                train_acc.append(global_train_accuracy)
+                self.logger.add_scalar('train_acc', global_train_accuracy, epoch)
+
 
             v_loss, v_acc = self.eval_epoch(device, epoch=epoch, only_p=only_p, plot=plot, conf=conf)
             v_loss_mean = np.mean(v_loss)
-            self.logger.add_scalar('validation_acc', v_acc, epoch)
-            val_acc.append(v_acc)
             val_loss.extend(v_loss)
+            global_val_accuracy = torch.tensor(v_acc).cuda() 
+            torch.distributed.reduce(global_val_accuracy, dst=0, op=torch.distributed.ReduceOp.SUM)  
+            if torch.distributed.get_rank() == 0:  # Only perform this on the master GPU
+                # global_accuracy /= torch.distributed.get_world_size()
+                # print("global_val_accuracy: ", global_val_accuracy)
+                val_acc.append(global_val_accuracy)
+                self.logger.add_scalar('validation_acc', global_val_accuracy, epoch)
+
+
             if self.scheduler is not None:
                 self.scheduler.step(v_loss_mean)
             criterion = min_loss if best == 'loss' else best_acc
@@ -137,17 +154,20 @@ class Trainer(object):
                 if epochs_without_improvement == early_stopping:
                     print('early stopping!', flush=True)
                     break
-            if self.logger is not None:
-                self.logger.add_scalar('time', time.time() - start_time, epoch)
-                self.optim_params['lr'] = self.optimizer.param_groups[0]['lr']
-                self.optim_params['lr_history'].append(self.optim_params['lr'])
-                print(f'Epoch {epoch}: Train Loss: {t_loss_mean:.6f}, Val Loss: {v_loss_mean:.6f}, Train Acc: {t_acc:.6f}, Val Acc: {v_acc:.6f}, Time: {time.time() - start_time:.2f}s')
-                with open(f'{self.log_path}/exp{self.exp_num}/optim_params.yml', 'w') as outfile:
-                    yaml.dump(self.optim_params, outfile, default_flow_style=False)
+
+            if torch.distributed.get_rank() == 0:  # Only perform this on the master GPU
+                print(f'Epoch {epoch}: Train Loss: {t_loss_mean:.6f}, Val Loss: {v_loss_mean:.6f}, Train Acc: {global_train_accuracy:.6f}, Val Acc: {global_val_accuracy:.6f}, Time: {time.time() - start_time:.2f}s')
 
             if epoch % 10 == 0:
                 print(os.system('nvidia-smi'))
+
+        self.optim_params['lr'] = self.optimizer.param_groups[0]['lr']
+        self.optim_params['lr_history'].append(self.optim_params['lr'])
+        with open(f'{self.log_path}/exp{self.exp_num}/optim_params.yml', 'w') as outfile:
+            yaml.dump(self.optim_params, outfile, default_flow_style=False)
+
         if self.logger is not None:
+            self.logger.add_scalar('time', time.time() - start_time, epoch)
             self.logger.close()
         return {"num_epochs":num_epochs, "train_loss": train_loss, "val_loss": val_loss, "train_acc": train_acc, "val_acc": val_acc}
     
@@ -184,9 +204,10 @@ class Trainer(object):
             train_loss.append(loss.item())
             diff = torch.abs(y_pred - y)
             train_acc += (diff[:,0] < (y[:,0]/10)).sum().item() 
+            
             # mean_acc = (diff[:,0]/(y[:,0])).sum().item()
-            # train_acc2 += (diff[:,1] < 0.1).sum().item()
-        print("number of train_accs: ", train_acc, train_acc2)
+            # train_acc2 += (diff[:,self.num_classes-1] < y[:,self.num_classes-1]/10).sum().item()
+        print("number of train_accs: ", train_acc)
         return train_loss, train_acc/len(self.train_dl.dataset)
 
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
@@ -196,13 +217,14 @@ class Trainer(object):
         self.model.eval()
         val_loss = []
         val_acc = 0
+        val_acc2 = 0
         for i,(x, y,_,_) in enumerate(self.val_dl):
             x = x.to(device)
             y = y.to(device)
             with torch.no_grad():
                 y_pred = self.model(x)
                 if conf:
-                    y_pred, conf_pred = y_pred[:, :2], y_pred[:, 2:]
+                    y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
                     conf_y = torch.abs(y - y_pred)
             loss = self.criterion(y_pred, y) if not only_p else self.criterion(y_pred, y[:, 0])
             if conf:
@@ -211,9 +233,247 @@ class Trainer(object):
                 self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
             val_loss.append(loss.item())
             diff = torch.abs(y_pred - y)
+            # print("diff: ", diff.shape, "y: ", y.shape)
             val_acc += (diff[:,0] < (y[:,0]/10)).sum().item()  
+            val_acc2 += (diff[:,self.num_classes-1] < y[:,self.num_classes-1]/10).sum().item()
+        print("number of val_acc: ", val_acc, val_acc2)
+        return val_loss, val_acc/len(self.val_dl.dataset)
+
+    def load_best_model(self, to_ddp=True, from_ddp=True):
+        data_dir = f'{self.log_path}/exp{self.exp_num}'
+        # data_dir = f'{self.log_path}/exp29' # for debugging
+
+        state_dict_files = glob.glob(data_dir + '/*.pth')
+        print("loading model from ", state_dict_files[-1])
+        
+        state_dict = torch.load(state_dict_files[-1]) if to_ddp else torch.load(state_dict_files[0],map_location=device)
+    
+        if from_ddp:
+            print("loading distributed model")
+            # Remove "module." from keys
+            new_state_dict = OrderedDict()
+            for key, value in state_dict.items():
+                if key.startswith('module.'):
+                    while key.startswith('module.'):
+                        key = key[7:]
+                new_state_dict[key] = value
+            state_dict = new_state_dict
+        # print("state_dict: ", state_dict.keys())
+        # print("model: ", self.model.state_dict().keys())
+
+        self.model.load_state_dict(state_dict, strict=False)
+
+    def predict(self, test_dataloader, device, conf=True, only_p=False, load_best=False):
+        """
+        Returns the predictions of the model on the given dataset.
+        """
+        if self.best_state_dict is not None:
+            self.model.load_state_dict(self.best_state_dict)
+        if load_best:
+            self.load_best_model(from_ddp=False)
+        self.model.eval()
+        preds = np.zeros((0, self.num_classes))
+        targets = np.zeros((0, self.num_classes))
+        confs = np.zeros((0, self.num_classes))
+        tot_kic = []
+        tot_teff = []
+        for i,(x, y,_,info) in enumerate(test_dataloader):
+            x = x.to(device)
+            with torch.no_grad():
+                y_pred = self.model(x)
+                # print(i, " y_pred: ", y_pred.shape, "y: ", y.shape)
+                if conf:
+                    y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+            preds = np.concatenate((preds, y_pred.cpu().numpy()))
+            if y.shape[1] == self.num_classes:
+                targets = np.concatenate((targets, y.cpu().numpy()))
+            if conf:
+                confs = np.concatenate((confs, conf_pred.cpu().numpy()))
+        print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
+        return preds, targets, confs
+
+class KeplerTrainer(Trainer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+    
+    def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
+        """
+        Trains the model for one epoch.
+        """
+        self.model.train()
+        train_loss = []
+        train_acc = 0
+        for i, (x, y, _,info) in enumerate(self.train_dl):
+            x = x.to(device)
+            y = {k: v.to(device) for k, v in y.items()}
+            self.optimizer.zero_grad()
+            y_pred = self.model(x.float())
+            y_val = y['Period'] if only_p else y['i']
+            pred_idx = 1 if only_p else 0
+            if conf:
+                y_pred, conf_pred = y_pred[:, :2], y_pred[:, 2:]
+                conf_y = torch.abs(y_val - y_pred[:,pred_idx]) 
+            loss = self.criterion(y_pred[:,pred_idx].float(), y_val.float()) 
+            if conf:
+                loss += self.criterion(conf_pred[:,pred_idx].float(), conf_y.float())
+            self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
+            loss.backward()
+            self.optimizer.step()
+            self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
+            train_loss.append(loss.item())
+            diff = torch.abs(y_pred[:,pred_idx] - y_val)
+            train_acc += (diff < (y_val/10)).sum().item() 
+        print("number of train_accs: ", train_acc)
+        return train_loss, train_acc/len(self.train_dl.dataset)
+
+    def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
+        """
+        Evaluates the model for one epoch.
+        """
+        self.model.eval()
+        val_loss = []
+        val_acc = 0
+        for i, (x, y, _,info) in enumerate(self.val_dl):
+            x = x.to(device)
+            y = {k: v.to(device) for k, v in y.items()}
+            self.optimizer.zero_grad()
+            y_pred = self.model(x.float())
+            y_val = y['Period'] if only_p else y['i']
+            pred_idx = 1 if only_p else 0
+            if conf:
+                y_pred, conf_pred = y_pred[:, :2], y_pred[:, 2:]
+                conf_y = torch.abs(y_val - y_pred[:,pred_idx]) 
+            loss = self.criterion(y_pred[:,pred_idx].float(), y_val.float()) 
+            if conf:
+                loss += self.criterion(conf_pred[:,pred_idx].float(), conf_y.float())
+            self.logger.add_scalar('val_loss', loss.item(), i + epoch*len(self.train_dl))
+            self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
+            val_loss.append(loss.item())
+            diff = torch.abs(y_pred[:,pred_idx] - y_val)
+            val_acc += (diff < (y_val/10)).sum().item() 
         print("number of val_acc: ", val_acc)
         return val_loss, val_acc/len(self.val_dl.dataset)
+
+    def predict(self, test_dataloader, device, conf=True, only_p=False, load_best=False):
+        """
+        Returns the predictions of the model on the given dataset.
+        """
+        if self.best_state_dict is not None:
+            self.model.load_state_dict(self.best_state_dict)
+        if load_best:
+            self.load_best_model()
+        self.model.eval()
+        preds = np.zeros((0, self.num_classes))
+        targets = np.zeros((0))
+        confs = np.zeros((0, self.num_classes))
+        tot_kic = np.zeros((0))
+        tot_teff = np.zeros((0))
+        tot_r = np.zeros((0))
+        tot_g = np.zeros((0))
+
+        print("len test_dataloader: ", len(test_dataloader))
+        for i,(x, y,_,info) in enumerate(test_dataloader):
+            print(i)
+            x = x.to(device)
+            with torch.no_grad():
+                y_pred = self.model(x)
+                if conf:
+                    y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+            preds = np.concatenate((preds, y_pred.cpu().numpy()))
+            if isinstance(y, dict):
+                y_val = y['Period'] if only_p else y['i']
+                targets = np.concatenate((targets, y_val.cpu().numpy()))
+            if conf:
+                confs = np.concatenate((confs, conf_pred.cpu().numpy()))
+            tot_kic = np.concatenate((tot_kic, info['KID'].cpu().numpy()))
+            tot_teff = np.concatenate((tot_teff, info['Teff'].cpu().numpy()))
+            tot_r = np.concatenate((tot_r, info['R'].cpu().numpy()))
+            tot_g = np.concatenate((tot_g, info['logg'].cpu().numpy()))
+        return preds, targets, confs, tot_kic, tot_teff, tot_r, tot_g
+
+
+class QuantileTrainer(Trainer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+    def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
+        """
+        Trains the model for one epoch.
+        """
+        self.model.train()
+        train_loss = []
+        train_acc = 0
+        train_acc2 = 0
+        for i, (x, y,_,_) in enumerate(self.train_dl):
+            x = x.to(device)
+            y = y.to(device)
+            self.optimizer.zero_grad()
+            y_pred = self.model(x.float())
+            
+            loss1 = self.criterion(y_pred[:,0,:], y[:,0])
+            loss2 = self.criterion(y_pred[:,1,:], y[:,1])
+            loss = loss1 + loss2
+            if self.logger is not None:
+                self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
+                self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
+            # print("loss: ", loss, "y_pred: ", y_pred, "y: ", y)
+            loss.backward()
+            self.optimizer.step()
+            train_loss.append(loss.item())
+            diff = torch.abs(y_pred[...,len(self.quantiles)//2] - y)
+            train_acc += (diff[:,0] < (y[:,0]/10)).sum().item() 
+            # mean_acc = (diff[:,0]/(y[:,0])).sum().item()
+            # train_acc2 += (diff[:,self.num_classes-1] < y[:,self.num_classes-1]/10).sum().item()
+        print("number of train_accs: ", train_acc)
+        return train_loss, train_acc/len(self.train_dl.dataset)
+
+    def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
+        """
+        Evaluates the model for one epoch.
+        """
+        self.model.eval()
+        val_loss = []
+        val_acc = 0
+        val_acc2 = 0
+        for i,(x, y,_,_) in enumerate(self.val_dl):
+            x = x.to(device)
+            y = y.to(device)
+            with torch.no_grad():
+                y_pred = self.model(x)
+                
+            loss1 = self.criterion(y_pred[:,0,:], y[:,0])
+            loss2 = self.criterion(y_pred[:,1,:], y[:,1])
+            loss = loss1 + loss2 
+
+            if self.logger is not None:
+                self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
+            val_loss.append(loss.item())
+            diff = torch.abs(y_pred[...,len(self.quantiles)//2] - y)
+            val_acc += (diff[:,0] < (y[:,0]/10)).sum().item()  
+            val_acc2 += (diff[:,self.num_classes-1] < y[:,self.num_classes-1]/10).sum().item()
+        print("number of val_acc: ", val_acc, val_acc2)
+        return val_loss, val_acc/len(self.val_dl.dataset)
+
+    def predict(self, test_dataloader, device, conf=True, load_best=False):
+        """
+        Returns the predictions of the model on the given dataset.
+        """
+        if self.best_state_dict is not None:
+            self.model.load_state_dict(self.best_state_dict)
+        if load_best:
+            self.load_best_model()
+        self.model.eval()
+        preds = np.zeros((0, self.num_classes, len(self.quantiles)))
+        targets = np.zeros((0, self.num_classes))
+        tot_kic = []
+        tot_teff = []
+        for i,(x, y,_,_) in enumerate(test_dataloader):
+            x = x.to(device)
+            with torch.no_grad():
+                y_pred = self.model(x)
+            preds = np.concatenate((preds, y_pred.cpu().numpy()))
+            targets = np.concatenate((targets, y.cpu().numpy()))
+        return preds, targets
+
 
 class ClassifierTrainer(Trainer):
     def __init__(self, num_classes=10, **kwargs):
@@ -232,9 +492,10 @@ class ClassifierTrainer(Trainer):
             y_pred = self.model(x)
             # print("y_pred: ", y_pred.shape, "y: ", y.shape)
             
-            loss1 = self.criterion(y_pred[:, :self.num_classes], y[:, :self.num_classes].argmax(dim=1))
-            loss2 = self.criterion(y_pred[:, self.num_classes:], y[:, self.num_classes:].argmax(dim=1))
-            loss = loss1 + loss2
+            loss = self.criterion(y_pred[:, :self.num_classes], y[:, :self.num_classes].argmax(dim=1))
+            if not only_p:
+                loss2 = self.criterion(y_pred[:, self.num_classes:], y[:, self.num_classes:].argmax(dim=1))
+                loss = loss + loss2
             # print("y_pred: ", y_pred.argmax(1), "y: ", y.argmax(1))
             self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
             self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
@@ -269,9 +530,10 @@ class ClassifierTrainer(Trainer):
             with torch.no_grad():
                 y_pred = self.model(x)
             
-            loss1 = self.criterion(y_pred[:, :self.num_classes], y[:, :self.num_classes].argmax(dim=1))
-            loss2 = self.criterion(y_pred[:, self.num_classes:], y[:, self.num_classes:].argmax(dim=1))
-            loss = loss1 + loss2
+            loss = self.criterion(y_pred[:, :self.num_classes], y[:, :self.num_classes].argmax(dim=1))
+            if not only_p:
+                loss2 = self.criterion(y_pred[:, self.num_classes:], y[:, self.num_classes:].argmax(dim=1))
+                loss = loss + loss2
             self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
 
             # if not only_p:            
@@ -288,14 +550,18 @@ class ClassifierTrainer(Trainer):
         print("number of val_acc: ", val_acc)
         return val_loss, val_acc/len(self.val_dl.dataset)
     
-    def predict(self, test_dataloader, device):
+    def predict(self, test_dataloader, device, conf=False, load_best=False):
         """
         Returns the predictions of the model on the given dataset.
         """
+        if self.best_state_dict is not None:
+            self.model.load_state_dict(self.best_state_dict)
+        if load_best:
+            self.load_best_model()
         self.model.eval()
-        preds = np.zeros((0, self.num_classes*2))
-        targets = np.zeros((0, self.num_classes*2))
-        for x, y in test_dataloader:
+        preds = np.zeros((0, self.num_classes))
+        targets = np.zeros((0, self.num_classes))
+        for x, y, _, _ in test_dataloader:
             x = x.to(device)
             with torch.no_grad():
                 y_pred = self.model(x)
@@ -303,7 +569,7 @@ class ClassifierTrainer(Trainer):
             preds = np.concatenate((preds, y_pred.cpu().numpy()))
             targets = np.concatenate((targets, y.cpu().numpy()))
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
-        return preds, targets
+        return preds, targets, np.zeros((0, self.num_classes))
 
 
 class SiameseTrainer(Trainer):
@@ -316,14 +582,17 @@ class SiameseTrainer(Trainer):
         """
         self.model.train()
         train_loss = []
-        for x1, x2 in self.train_dl:
+        for i, (x1, x2) in enumerate(self.train_dl):
+            # print(i)
             # print("x1: ", x1.shape, "x2: ", x2.shape)
             x1, x2 = x1.to(device), x2.to(device)
             out = self.model(x1, x2)
             loss = out['loss']
             loss.backward()
             self.optim.step()
-            train_loss.append(loss.item())          
+            train_loss.append(loss.item())  
+            if i > self.max_iter:
+                break        
         return train_loss, 0
 
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
@@ -332,12 +601,15 @@ class SiameseTrainer(Trainer):
         """
         self.model.eval()
         val_loss = []
-        for x1, x2 in self.val_dl:
+        for i, (x1, x2) in enumerate(self.val_dl):
             x1, x2 = x1.to(device), x2.to(device)
             with torch.no_grad():
                 out = self.model(x1, x2)
             loss = out['loss']
-            val_loss.append(loss.item())         
+            val_loss.append(loss.item())  
+            if i > self.max_iter:
+        
+                break       
         return val_loss, 0
 
 
@@ -559,63 +831,7 @@ class MaskedSSLTrainer(Trainer):
         s = (r == t).sum()  
         return s
     
-class KeplerTrainer(Trainer):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-    
-    def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
-        """
-        Trains the model for one epoch.
-        """
-        self.model.train()
-        train_loss = []
-        train_acc = 0
-        for i, (x, y) in enumerate(self.train_dl):
-            x = x.to(device)
-            y = {k: v.to(device) for k, v in y.items()}
-            self.optimizer.zero_grad()
-            y_pred = self.model(x.float())
-            if conf:
-                y_pred, conf_pred = y_pred[:, :2], y_pred[:, 2:]
-                conf_y = torch.abs(y['Period'] - y_pred[:,1]) 
-            loss = self.criterion(y_pred[:,1].float(), y['Period'].float()) 
-            if conf:
-                loss += self.criterion(conf_pred[:,1].float(), conf_y.float())
-            self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
-            loss.backward()
-            self.optimizer.step()
-            self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
-            train_loss.append(loss.item())
-            diff = torch.abs(y_pred[:,1] - y['Period'])
-            train_acc += (diff < (y['Period']/10)).sum().item() 
-        print("number of train_accs: ", train_acc)
-        return train_loss, train_acc/len(self.train_dl.dataset)
 
-    def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
-        """
-        Evaluates the model for one epoch.
-        """
-        self.model.eval()
-        val_loss = []
-        val_acc = 0
-        for i, (x, y) in enumerate(self.val_dl):
-            x = x.to(device)
-            y = {k: v.to(device) for k, v in y.items()}
-            self.optimizer.zero_grad()
-            y_pred = self.model(x.float())
-            if conf:
-                y_pred, conf_pred = y_pred[:, :2], y_pred[:, 2:]
-                conf_y = torch.abs(y['Period'] - y_pred[:,1]) 
-            loss = self.criterion(y_pred[:,1].float(), y['Period'].float()) 
-            if conf:
-                loss += self.criterion(conf_pred[:,1].float(), conf_y.float())
-            self.logger.add_scalar('val_loss', loss.item(), i + epoch*len(self.train_dl))
-            self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
-            val_loss.append(loss.item())
-            diff = torch.abs(y_pred[:,1] - y['Period'])
-            val_acc += (diff < (y['Period']/10)).sum().item() 
-        print("number of val_acc: ", val_acc)
-        return val_loss, val_acc/len(self.val_dl.dataset)
 
 
 class DenoisingTrainer(Trainer):
