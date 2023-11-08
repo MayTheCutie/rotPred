@@ -116,10 +116,13 @@ class Trainer(object):
             t_loss_mean = np.mean(t_loss)
             train_loss.extend(t_loss)
             global_train_accuracy = torch.tensor(t_acc).cuda()  # Convert accuracy to a tensor on the GPU
-            torch.distributed.reduce(global_train_accuracy, dst=0, op=torch.distributed.ReduceOp.SUM)  
+            torch.distributed.reduce(global_train_accuracy, dst=0, op=torch.distributed.ReduceOp.SUM)
+            global_train_loss = torch.tensor(t_loss_mean).cuda()  # Convert loss to a tensor on the GPU
+            torch.distributed.reduce(global_train_loss, dst=0, op=torch.distributed.ReduceOp.SUM)  
+            global_train_loss /= torch.distributed.get_world_size()
             if torch.distributed.get_rank() == 0:  # Only perform this on the master GPU
                 # global_accuracy /= torch.distributed.get_world_size()
-                train_acc.append(global_train_accuracy)
+                train_acc.append(global_train_accuracy.item())
                 self.logger.add_scalar('train_acc', global_train_accuracy, epoch)
 
 
@@ -127,39 +130,40 @@ class Trainer(object):
             v_loss_mean = np.mean(v_loss)
             val_loss.extend(v_loss)
             global_val_accuracy = torch.tensor(v_acc).cuda() 
-            torch.distributed.reduce(global_val_accuracy, dst=0, op=torch.distributed.ReduceOp.SUM)  
+            torch.distributed.reduce(global_val_accuracy, dst=0, op=torch.distributed.ReduceOp.SUM) 
+            global_val_loss = torch.tensor(v_loss_mean).cuda()  # Convert loss to a tensor on the GPU
+            torch.distributed.reduce(global_val_loss, dst=0, op=torch.distributed.ReduceOp.SUM) 
+            global_val_loss /= torch.distributed.get_world_size()
             if torch.distributed.get_rank() == 0:  # Only perform this on the master GPU
                 # global_accuracy /= torch.distributed.get_world_size()
                 # print("global_val_accuracy: ", global_val_accuracy)
-                val_acc.append(global_val_accuracy)
+                val_acc.append(global_val_accuracy.item())
                 self.logger.add_scalar('validation_acc', global_val_accuracy, epoch)
 
-
-            if self.scheduler is not None:
-                self.scheduler.step(v_loss_mean)
-            criterion = min_loss if best == 'loss' else best_acc
-            mult = 1 if best == 'loss' else -1
-            objective = v_loss_mean if best == 'loss' else v_acc
-            if mult*objective < mult*criterion:
-                print("saving model...")
-                if best == 'loss':
-                    min_loss = v_loss_mean
+                if self.scheduler is not None:
+                    self.scheduler.step(global_val_loss)
+                criterion = min_loss if best == 'loss' else best_acc
+                mult = 1 if best == 'loss' else -1
+                objective = global_val_loss if best == 'loss' else global_val_accuracy
+                if mult*objective < mult*criterion:
+                    print("saving model...")
+                    if best == 'loss':
+                        min_loss = global_val_loss
+                    else:
+                        best_acc = global_val_accuracy
+                    torch.save(self.model.state_dict(), f'{self.log_path}/exp{self.exp_num}/{self.exp_name}.pth')
+                    self.best_state_dict = self.model.state_dict()
+                    epochs_without_improvement = 0
                 else:
-                    best_acc = v_acc
-                torch.save(self.model.state_dict(), f'{self.log_path}/exp{self.exp_num}/{self.exp_name}.pth')
-                self.best_state_dict = self.model.state_dict()
-                epochs_without_improvement = 0
-            else:
-                epochs_without_improvement += 1
-                if epochs_without_improvement == early_stopping:
-                    print('early stopping!', flush=True)
-                    break
+                    epochs_without_improvement += 1
+                    if epochs_without_improvement == early_stopping:
+                        print('early stopping!', flush=True)
+                        break
 
-            if torch.distributed.get_rank() == 0:  # Only perform this on the master GPU
-                print(f'Epoch {epoch}: Train Loss: {t_loss_mean:.6f}, Val Loss: {v_loss_mean:.6f}, Train Acc: {global_train_accuracy:.6f}, Val Acc: {global_val_accuracy:.6f}, Time: {time.time() - start_time:.2f}s')
+                print(f'Epoch {epoch}: Train Loss: {global_train_loss:.6f}, Val Loss: {global_val_loss:.6f}, Train Acc: {global_train_accuracy:.6f}, Val Acc: {global_val_accuracy:.6f}, Time: {time.time() - start_time:.2f}s')
 
-            if epoch % 10 == 0:
-                print(os.system('nvidia-smi'))
+                if epoch % 10 == 0:
+                    print(os.system('nvidia-smi'))
 
         self.optim_params['lr'] = self.optimizer.param_groups[0]['lr']
         self.optim_params['lr_history'].append(self.optim_params['lr'])

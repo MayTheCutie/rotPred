@@ -57,6 +57,7 @@ class projection_MLP(nn.Module):
         self.num_layers = num_layers
 
     def forward(self, x):
+        # print("projection_MLP: ", x.shape)
         if self.num_layers == 3:
             x = self.layer1(x)
             x = self.layer2(x)
@@ -207,25 +208,55 @@ class ResNet(nn.Module):
 
         return out.view(out.shape[0], -1)
 
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1, dropout=0.2):
+        super(ConvBlock, self).__init__()
+        print("ConvBlock: ", in_channels, out_channels)
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, stride=1, padding=padding, bias=False)
+        self.pool = nn.MaxPool1d(kernel_size=stride)
+        self.skip = nn.Conv1d(in_channels, out_channels, kernel_size=1, padding=0, stride=stride)
+        self.bn = nn.BatchNorm1d(out_channels)
+        self.activation = nn.GELU()
+        self.dropout = nn.Dropout(p=dropout)
+    def forward(self, x):
+        skip = self.skip(x)
+        x = self.activation(self.bn(self.conv(x)))
+        x = self.dropout(self.pool(x))
+        x = x + skip
+        return x
+
 class LSTMFeatureExtractor(nn.Module):
     def __init__(self, seq_len=1024, hidden_size=256, num_layers=4, num_classes=4,
-                 in_channels=1, channels=256, dropout=0.2, kernel_size=4 ,stride=4):
+                 in_channels=1, channels=256, dropout=0.2, kernel_size=4 ,stride=4, image=False):
         super(LSTMFeatureExtractor, self).__init__()
         self.seq_len = seq_len
         self.in_channels = in_channels
         self.hidden_size = hidden_size
         self.num_classes = num_classes
-        self.conv1 = nn.Conv1d(in_channels=in_channels, out_channels=channels, kernel_size=kernel_size, padding='same', stride=1)
-        self.pool = nn.MaxPool1d(kernel_size=stride)
+        self.image = image
+        print("image: ", image)
+        # self.conv = ConvBlock(in_channels=in_channels, out_channels=channels, kernel_size=kernel_size, padding=1, stride=stride, dropout=dropout)
+        if not image:
+            self.conv1 = nn.Conv1d(in_channels=in_channels, out_channels=channels, kernel_size=kernel_size, padding='same', stride=1)
+            self.pool = nn.MaxPool1d(kernel_size=stride)
+            self.skip = nn.Conv1d(in_channels=in_channels, out_channels=channels, kernel_size=1, padding=0, stride=stride)
+            self.drop = nn.Dropout1d(p=dropout)
+            self.batchnorm1 = nn.BatchNorm1d(channels)
+        else:
+            self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=channels, kernel_size=kernel_size, padding='same', stride=1)
+            self.pool = nn.MaxPool2d(kernel_size=stride)
+            self.skip = nn.Conv2d(in_channels=in_channels, out_channels=channels, kernel_size=1, padding=0, stride=stride)
+            self.drop = nn.Dropout2d(p=dropout)
+            self.batchnorm1 = nn.BatchNorm2d(channels)        
+        # self.conv_list = nn.Sequential(
+        #                         ConvBlock(1,channels//4, kernel_size=3, stride=2, padding=1, dropout=dropout),
+        #                         ConvBlock(channels//4,channels//2, kernel_size=3, stride=2, padding=1, dropout=dropout),
+        #                         ConvBlock(channels//2,channels, kernel_size=3, stride=2, padding=1, dropout=dropout))
         # self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=kernel_size, padding=1, stride=2)
         # self.conv3 = nn.Conv1d(in_channels=128, out_channels=channels, kernel_size=kernel_size, padding=1, stride=4)
-        self.skip = nn.Conv1d(in_channels=in_channels, out_channels=channels, kernel_size=1, padding=0, stride=stride)
         
         self.lstm = nn.LSTM(channels, hidden_size, num_layers=num_layers, batch_first=True, bidirectional=True, dropout=dropout)
-        self.drop = nn.Dropout1d(p=dropout)
-        # self.batchnorm1 = nn.BatchNorm1d(64)
-        # self.batchnorm2 = nn.BatchNorm1d(128)
-        self.batchnorm1 = nn.BatchNorm1d(channels)
+       
         self.activation = nn.GELU()
         self.num_features = self._out_shape()
         self.output_dim = self.num_features
@@ -238,9 +269,12 @@ class LSTMFeatureExtractor(nn.Module):
         # Make sure to not mess up the random state.
         rng_state = torch.get_rng_state()
         try:
-            dummy_input = torch.randn(2,self.in_channels, self.seq_len)
-            x = self.conv1(dummy_input)
-            x = torch.swapaxes(x, 1,2)
+            if not self.image:
+                dummy_input = torch.randn(2,self.in_channels, self.seq_len)
+            else:
+                dummy_input = torch.randn(2,self.in_channels, self.seq_len, self.seq_len)
+            x = self.drop(self.pool(self.activation(self.batchnorm1(self.conv1(dummy_input)))))
+            x = x.view(x.shape[0], x.shape[1], -1).swapaxes(1,2)
             x_f,(h_f,_) = self.lstm(x)
             h_f = h_f.transpose(0,1).transpose(1,2)
             h_f = h_f.reshape(h_f.shape[0], -1)
@@ -259,21 +293,24 @@ class LSTMFeatureExtractor(nn.Module):
         # x = self.drop(self.activation(self.batchnorm2(self.conv2(x))))
         # x = self.drop(self.activation(self.batchnorm3(self.conv3(x))))
         x = x + skip
-        x = torch.swapaxes(x, 1,2)
+        # x = self.conv(x)
+        x = x.view(x.shape[0], x.shape[1], -1).swapaxes(1,2)
         x_f,(h_f,c_f) = self.lstm(x)
         if return_cell:
             return x_f, h_f, c_f
         h_f = h_f.transpose(0,1).transpose(1,2)
+        # h_f = h_f.max(dim=1).values
         h_f = h_f.reshape(h_f.shape[0], -1)
         return h_f
     
 class LSTM(nn.Module):
     def __init__(self, seq_len=1024, hidden_size=256, num_layers=4, num_classes=4,
-                 in_channels=1, predict_size=256, channels=256, dropout=0.2, kernel_size=4,stride=4):
+                 in_channels=1, predict_size=256, channels=256, dropout=0.2, kernel_size=4,stride=4, image=False):
         super(LSTM, self).__init__()
         self.activation = nn.GELU()
         self.feature_extractor = LSTMFeatureExtractor(seq_len=seq_len, hidden_size=hidden_size, num_layers=num_layers, num_classes=num_classes,in_channels=in_channels,
-                                                      channels=channels, dropout=dropout, kernel_size=kernel_size)
+                                                      channels=channels, dropout=dropout, kernel_size=kernel_size,
+                                                      image=image)
         self.num_classes = num_classes
         self.out_shape = self.feature_extractor.num_features
         self.predict_size = predict_size
@@ -322,7 +359,7 @@ class LSTM_ATTN(LSTM):
         c_f = torch.cat([c_f[-1], c_f[-2]], dim=1)
 
         values = self.attention(c_f, x_f, x_f) 
-        out = F.relu(self.fc2(self.activation(self.fc1(values))))
+        out = self.fc2(self.activation(self.fc1(values)))
         # values = (values[...,None] + out[:,None,:]).view(out.shape[0], -1)
         # conf = self.fc4(self.activation(self.fc3(values)))
         return out
@@ -346,6 +383,28 @@ class LSTM_ATTN2(LSTM):
         # values = (values[...,None] + out[:,None,:]).view(out.shape[0], -1)
         # conf = self.fc4(self.activation(self.fc3(values)))
         return out
+
+class LSTM_ATTN_QUANT(LSTM):
+    def __init__(self, attn='prob',n_heads=8, factor=5, dropout=0.1, output_attention=False, n_q=3, **kwargs):
+        super(LSTM_ATTN_QUANT, self).__init__(**kwargs)
+        self.fc1 = nn.Linear(self.feature_extractor.hidden_size*2, self.predict_size)
+        self.fc2 = nn.Linear(self.predict_size, self.num_classes)
+        Attn = ProbAttention if attn=='prob' else FullAttention
+        self.attention = AttentionLayer(Attn(False, factor, attention_dropout=dropout, output_attention=output_attention), 
+                                d_model=self.feature_extractor.hidden_size*2, n_heads=n_heads, mix=False)
+        self.quantiles = n_q
+    def forward(self, x):
+        if len(x.shape) == 2:
+            x = x.unsqueeze(1)  
+        x_f, h_f, c_f = self.feature_extractor(x, return_cell=True)
+        c_f = torch.cat([c_f[-1], c_f[-2]], dim=1)
+
+        values, _ = self.attention(x_f, x_f, x_f, attn_mask=None) 
+        values = values.unsqueeze(1).expand( values.shape[0],self.quantiles, values.shape[1], values.shape[2])
+        out = self.fc2(self.activation(self.fc1(values.max(dim=2).values)))
+        # values = (values[...,None] + out[:,None,:]).view(out.shape[0], -1)
+        # conf = self.fc4(self.activation(self.fc3(values)))
+        return out.transpose(1,2)
 
 
 class BERTEncoder(nn.Module):
@@ -566,6 +625,10 @@ class InformerEncoder(nn.Module):
                 dropout=0.1, attn='prob', embed='fixed', freq='h', activation='gelu',
                 output_attention = False, distil=True, mix=True, ssl=False  ):
         super(InformerEncoder, self).__init__()
+        # Conv
+        self.conv = nn.Sequential(ConvBlock(1,64, kernel_size=3, stride=2, padding=1, dropout=0.1),
+                                ConvBlock(64,128, kernel_size=3, stride=2, padding=3, dropout=0.1),
+                                ConvBlock(128,d_model, kernel_size=3, stride=2, padding=1, dropout=0.1))
         # Encoding
         self.enc_embedding = DataEmbedding(enc_in, d_model, embed, freq, dropout, max_len=seq_len)
         # Attention
@@ -600,6 +663,8 @@ class InformerEncoder(nn.Module):
         if len(x_enc.shape) == 3 and x_enc.shape[1] == 1:
             x_enc = x_enc.transpose(-1,-2)
         enc_out = self.enc_embedding(x_enc, None)
+        # enc_out = self.conv(enc_out.transpose(-1,-2))
+        # enc_out = enc_out.transpose(-1,-2)
         enc_out, attns = self.encoder(enc_out, attn_mask=enc_self_mask)
         # print("enc_out: ", enc_out.shape)
         # enc_out = self.projection(self.ffd(enc_out.reshape(enc_out.shape[0], -1)))

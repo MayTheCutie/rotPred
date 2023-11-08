@@ -15,6 +15,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import warnings
 from matplotlib import pyplot as plt
+import torchvision
 # from pytorch_forecasting.metrics.quantile import QuantileLoss
 
 
@@ -47,7 +48,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 47
+exp_num = 48
 
 log_path = '/data/logs/lstm_attn'
 
@@ -66,11 +67,11 @@ CUDA_LAUNCH_BLOCKING='1'
 
 idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc))+1) for idx in range(Nlc)]
 
-train_list, val_list = train_test_split(idx_list, test_size=0.2, random_state=1234)
+train_list, val_list = train_test_split(idx_list, test_size=0.1, random_state=1234)
 
 test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
-b_size = 256
+b_size = 16
 
 num_epochs = 1000
 
@@ -79,6 +80,8 @@ cad = 30
 DAY2MIN = 24*60
 
 dur = 200
+
+t_samples = 512
 
 if torch.cuda.current_device() == 0:
     if not os.path.exists(log_path):
@@ -108,16 +111,17 @@ if __name__ == '__main__':
  'dropout': 0.35,
  'hidden_size': 64,
  'num_layers': 5,
- 'seq_len': int(dur/cad*DAY2MIN), 
+ 'seq_len': t_samples, 
  "num_classes": 4,
     'stride': 4,
-    'kernel_size': 4}
+    'kernel_size': 4,
+    'image': True,}
 
     backbone= { 'in_channels':1,
  'dropout': 0.35,
  'hidden_size': 64,
  'num_layers': 5,
- 'seq_len': int(dur/cad*DAY2MIN), 
+ 'seq_len': t_samples, 
  "num_classes": 4,
     'stride': 4,
     'kernel_size': 4}
@@ -148,7 +152,22 @@ if __name__ == '__main__':
     transform = Compose([Detrend(), RandomCrop(width=int(dur/cad*DAY2MIN))
                         ])
     test_transform = Compose([Detrend(), Slice(0, int(dur/cad*DAY2MIN))])
+
+    image_transform = torchvision.transforms.Compose([
+    torchvision.transforms.RandomHorizontalFlip(p=0.5),
+    # torchvision.transforms.ToDtype(torch.float32, scale=True),
+    torchvision.transforms.Normalize(mean=[0.445], std=[0.269]),
+])
+
+#     image_test_transform = torchvision.transforms.Compose([
+#     # torchvision.transforms.ToDtype(torch.float32, scale=True),
+#     torchvision.transforms.Normalize(mean=[0.445], std=[0.269]),
+# ])
     
+    # train_dataset = ACFImageDataset(data_folder, train_list, t_samples=t_samples, transforms=transform, image_transform=image_transform)
+    # val_dataset = ACFImageDataset(data_folder, val_list, t_samples=t_samples, transforms=transform, image_transform=image_transform)
+    # test_dataset = ACFImageDataset(data_folder, val_list, t_samples=t_samples, transforms=test_transform, image_transform=image_test_transform)
+
     train_dataset = ACFDataset(data_folder, train_list, t_samples=None, transforms=transform, return_raw=False)
     val_dataset = ACFDataset(data_folder, val_list, t_samples=None, transforms=transform, return_raw=False)
     test_dataset = ACFDataset(test_folder, test_idx_list, t_samples=None, transforms=test_transform, return_raw=False)
@@ -208,10 +227,10 @@ if __name__ == '__main__':
 
    
 
-    model, net_params, _ = load_model(f'{log_path}/exp29', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
+    # model, net_params, _ = load_model(f'{log_path}/exp29', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
     
     # model = LSTM(**net_params)
-    # model = LSTM_ATTN2(**net_params)
+    model = LSTM_ATTN2(**net_params)
 
     # print(model)
     # features_ext = LSTMFeatureExtractor(**backbone)
@@ -231,7 +250,7 @@ if __name__ == '__main__':
 
     model = model.to(local_rank)
 
-    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+    model = DDP(model, device_ids=[local_rank])
     print("number of params:", count_params(model))
     
     loss_fn = nn.MSELoss()
@@ -271,7 +290,7 @@ if __name__ == '__main__':
 
     print("Evaluation on test set:")
 
-    preds, targets, confs = trainer.predict(test_dataloader, device=local_rank, conf=True)
+    preds, targets, confs = trainer.predict(test_dataloader, device=local_rank, conf=True, load_best=True)
 
     eval_results(preds, targets, confs, data_dir=f'{log_path}/exp{exp_num}', model_name=model.module.__class__.__name__)
 
