@@ -12,6 +12,8 @@ from lightPred.utils import create_kepler_df
 from matplotlib import pyplot as plt
 from lightPred.utils import fill_nan_np
 from pyts.image import GramianAngularField
+from scipy.signal import stft, correlate2d
+import time
 
 
 
@@ -184,7 +186,7 @@ class TimeSsl(Dataset):
           self.cur_len = len(x)
         except TypeError as e:
             print("TypeError: ", e)
-            x = torch.zeros((self.cur_len))
+            x, meta = torch.zeros((self.cur_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
         return x, meta
     
     def __getitem__(self, idx):
@@ -415,13 +417,9 @@ class TimeSeriesDataset(Dataset):
         f = interp1d(x[:,0], x[:,1])
         new_t = np.linspace(x[:,0][0], x[:,0][-1], self.seq_len)
         x = np.concatenate((new_t[:,None], f(new_t)[:,None]), axis=1)
-      y = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
-      y = torch.tensor([y['Inclination'], y['Period'],  y['Decay Time']]).float()
-      y[0] = (y[0] - min_i)/(max_i-min_i)
-      y[1] = (y[1] - min_p)/(max_p-min_p)
-      y[2] = (y[2] - min_tau)/(max_tau-min_tau)
       x = torch.tensor(x.astype(np.float32))[:,1]
-      y = y[:self.num_classes]
+
+      
       if self.transforms is not None:
         x, _, info = self.transforms(x, mask=None, info=dict())
         info['idx'] = idx
@@ -433,7 +431,19 @@ class TimeSeriesDataset(Dataset):
         x /= x.median()
       elif self.norm == 'minmax':
         x = (x-x.min())/(x.max()-x.min())
+      
+      y = self.get_labels(sample_idx)
+
       return x.float(), y.squeeze(0).squeeze(-1).float(), torch.ones_like(x), info
+
+  def get_labels(self, sample_idx):
+      y = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
+      y = torch.tensor([y['Inclination'], y['Period'], y['Decay Time']])
+      y[1] = (y[1] - min_p)/(max_p-min_p)
+      y[0] = (y[0] - min_i)/(max_i-min_i)
+      y[2] = (y[2] - min_tau)/(max_tau-min_tau)
+      y = y[:self.num_classes]
+      return y
   
 class TimeSeriesClassifierDataset(TimeSeriesDataset):
   def __init__(self, root_dir, idx_list, num_classes=10, **kwargs):
@@ -466,7 +476,6 @@ class ACFDataset(TimeSeriesDataset):
           f = interp1d(x[:,0], x[:,1])
           new_t = np.linspace(x[:,0][0], x[:,0][-1], self.seq_len)
           x = np.concatenate((new_t[:,None], f(new_t)[:,None]), axis=1)
-      y = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
       if self.transforms is not None:
         x, _, info = self.transforms(x, mask=None, info=dict())
       x[:,1] = fill_nan_np(x[:,1], interpolate=True)
@@ -479,11 +488,6 @@ class ACFDataset(TimeSeriesDataset):
         x = torch.stack([x,torch.tensor(xcf)])
       else:
         x = torch.tensor(xcf).unsqueeze(0)
-      y = torch.tensor([y['Inclination'], y['Period'], y['Decay Time']])
-      y[1] = (y[1] - min_p)/(max_p-min_p)
-      y[0] = (y[0] - min_i)/(max_i-min_i)
-      y[2] = (y[2] - min_tau)/(max_tau-min_tau)
-      y = y[:self.num_classes]
       # y[0] /= 90
       if self.norm == 'std':
         x = (x - x.mean(dim=-1)[:,None])/(x.std(dim=-1)[:,None] + 1e-8)
@@ -497,7 +501,12 @@ class ACFDataset(TimeSeriesDataset):
       x = x.nan_to_num(0)
       if torch.isnan(x).any():
         print(f"idx {idx} - sample {sample_idx} is nan")
+      
+      y = super().get_labels(sample_idx)
+
       return x.float(), torch.squeeze(y,dim=-1).float(), torch.ones_like(x), info
+
+  
 
 class ACFClassifierDataset(ACFDataset):
   def __init__(self, root_dir, idx_list, num_classes=10, **kwargs):
@@ -527,3 +536,48 @@ class TimeImageDataset(TimeSeriesDataset):
       x_gram = gaf.transform(x.reshape(1,-1)).squeeze()
       x_gram = torch.tensor(x_gram).unsqueeze(0)
       return x_gram.float(), y.squeeze(0).squeeze(-1).float(), mask, info
+
+class ACFImageDataset(TimeSeriesDataset):
+  def __init__(self, root_dir, idx_list, lags=None, image_transform=None, **kwargs):
+    super().__init__(root_dir, idx_list, **kwargs)
+    self.lags = lags
+    self.image_transform = image_transform
+      
+  def __len__(self):
+      return self.length
+
+  def auto_correlation_2d(self, x):
+    x0 = x - x.mean()
+    indices = torch.arange(x0.size(0)).unsqueeze(0) - torch.arange(x0.size(0)).unsqueeze(1)    
+    lagged_data = x0[indices.abs()]
+    corr = lagged_data * lagged_data[0].unsqueeze(0)
+    return corr
+  
+  def __getitem__(self, idx):
+      start = time.time()
+      info = {'idx': idx}
+      sample_idx = remove_leading_zeros(self.idx_list[idx])
+      x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values
+      # x = x[int(0.4*len(x)):,:]
+      if self.seq_len:
+        f = interp1d(x[:,0], x[:,1])
+        new_t = np.linspace(x[:,0][0], x[:,0][-1], self.seq_len)
+        x = np.concatenate(f(new_t)[:,None])
+      t1 = time.time()
+      if self.transforms is not None:
+        x, _, info = self.transforms(x, mask=None, info=dict())
+      t2 = time.time()
+      # mean = x.mean()
+      # lags = self.lags if self.lags else len(x)
+      # x = np.tile(x, (lags, 1))
+      # x_im = correlate2d(x - mean, x - mean, mode='same')
+      x_im = self.auto_correlation_2d(torch.tensor(x))
+      x_im = (x_im - x_im.min()) / (x_im.max() - x_im.min()) 
+      t3 = time.time()
+      if self.image_transform is not None:
+        x_im = self.image_transform(x_im.unsqueeze(0)) 
+      x_im = x_im.nan_to_num(0)
+      y = super().get_labels(sample_idx)
+
+      return x_im.float(), y.squeeze(0).squeeze(-1).float(), torch.ones_like(x_im), info
+      
