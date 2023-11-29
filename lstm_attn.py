@@ -48,7 +48,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 48
+exp_num = 52
 
 log_path = '/data/logs/lstm_attn'
 
@@ -71,7 +71,7 @@ train_list, val_list = train_test_split(idx_list, test_size=0.1, random_state=12
 
 test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
-b_size = 16
+b_size = 256
 
 num_epochs = 1000
 
@@ -111,17 +111,17 @@ if __name__ == '__main__':
  'dropout': 0.35,
  'hidden_size': 64,
  'num_layers': 5,
- 'seq_len': t_samples, 
+ 'seq_len': int(dur/cad*DAY2MIN), 
  "num_classes": 4,
     'stride': 4,
     'kernel_size': 4,
-    'image': True,}
+    'image': False,}
 
     backbone= { 'in_channels':1,
  'dropout': 0.35,
  'hidden_size': 64,
  'num_layers': 5,
- 'seq_len': t_samples, 
+ 'seq_len': int(dur/cad*DAY2MIN), 
  "num_classes": 4,
     'stride': 4,
     'kernel_size': 4}
@@ -153,11 +153,11 @@ if __name__ == '__main__':
                         ])
     test_transform = Compose([Detrend(), Slice(0, int(dur/cad*DAY2MIN))])
 
-    image_transform = torchvision.transforms.Compose([
-    torchvision.transforms.RandomHorizontalFlip(p=0.5),
-    # torchvision.transforms.ToDtype(torch.float32, scale=True),
-    torchvision.transforms.Normalize(mean=[0.445], std=[0.269]),
-])
+#     image_transform = torchvision.transforms.Compose([
+#     torchvision.transforms.RandomHorizontalFlip(p=0.5),
+#     # torchvision.transforms.ToDtype(torch.float32, scale=True),
+#     torchvision.transforms.Normalize(mean=[0.445], std=[0.269]),
+# ])
 
 #     image_test_transform = torchvision.transforms.Compose([
 #     # torchvision.transforms.ToDtype(torch.float32, scale=True),
@@ -188,11 +188,12 @@ if __name__ == '__main__':
     train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler, \
                                                num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True)
 
-    train_weights = dataset_weights(train_dataloader, Nlc)
+    # print("calculating weights...")
+    # train_weights = dataset_weights(train_dataloader, Nlc)
 
-    train_sampler_weighted = DistributedSamplerWrapper(sampler=WeightedRandomSampler(train_weights, len(train_weights)),
-                                                num_replicas=world_size, rank=rank)
-    train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler_weighted, \
+    # train_sampler_weighted = DistributedSamplerWrapper(sampler=WeightedRandomSampler(train_weights, len(train_weights)),
+    #                                             num_replicas=world_size, rank=rank)
+    train_dataloader = DataLoader(train_dataset, batch_size=b_size, \
                                                   num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True) 
 
     val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
@@ -227,10 +228,10 @@ if __name__ == '__main__':
 
    
 
-    # model, net_params, _ = load_model(f'{log_path}/exp29', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
+    model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
     
     # model = LSTM(**net_params)
-    model = LSTM_ATTN2(**net_params)
+    # model = LSTM_ATTN(**net_params)
 
     # print(model)
     # features_ext = LSTMFeatureExtractor(**backbone)
@@ -253,7 +254,8 @@ if __name__ == '__main__':
     model = DDP(model, device_ids=[local_rank])
     print("number of params:", count_params(model))
     
-    loss_fn = nn.MSELoss()
+    loss_fn = nn.L1Loss()
+    # loss_fn = nn.MSELoss()
     # loss_fn = WeightedMSELoss(factor=1.2)
 
     # qs = [0.1, 0.2, 0.5, 0.8, 0.9]
@@ -261,7 +263,7 @@ if __name__ == '__main__':
     # loss_fn = nn.CrossEntropyLoss()
 
     optimizer = optim.AdamW(model.parameters(), **optim_params)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=20, verbose=True, factor=0.1)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=40, verbose=True, factor=0.1)
 
     data_dict = {'dataset': train_dataset.__class__.__name__, 'transforms': transform, 'batch_size': b_size,
      'num_epochs':num_epochs, 'checkpoint_path': f'{log_path}/exp{exp_num}', 'loss_fn': loss_fn.__class__.__name__,
@@ -278,7 +280,7 @@ if __name__ == '__main__':
                         exp_name="lstm_attn")
     
 
-    fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank, early_stopping=25, only_p=False, best='loss', conf=True)
+    fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank, early_stopping=40, only_p=False, best='loss', conf=True)
 
     
     output_filename = f'{log_path}/exp{exp_num}/lstm_attn.json'

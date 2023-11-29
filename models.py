@@ -268,19 +268,19 @@ class LSTMFeatureExtractor(nn.Module):
         """
         # Make sure to not mess up the random state.
         rng_state = torch.get_rng_state()
-        try:
-            if not self.image:
-                dummy_input = torch.randn(2,self.in_channels, self.seq_len)
-            else:
-                dummy_input = torch.randn(2,self.in_channels, self.seq_len, self.seq_len)
-            x = self.drop(self.pool(self.activation(self.batchnorm1(self.conv1(dummy_input)))))
-            x = x.view(x.shape[0], x.shape[1], -1).swapaxes(1,2)
-            x_f,(h_f,_) = self.lstm(x)
-            h_f = h_f.transpose(0,1).transpose(1,2)
-            h_f = h_f.reshape(h_f.shape[0], -1)
-            return h_f.shape[1] 
-        finally:
-            torch.set_rng_state(rng_state)
+        # try:
+        if not self.image:
+            dummy_input = torch.randn(2,self.in_channels, self.seq_len)
+        else:
+            dummy_input = torch.randn(2,self.in_channels, self.seq_len, self.seq_len)
+        x = self.drop(self.pool(self.activation(self.batchnorm1(self.conv1(dummy_input)))))
+        x = x.view(x.shape[0], x.shape[1], -1).swapaxes(1,2)
+        x_f,(h_f,_) = self.lstm(x)
+        h_f = h_f.transpose(0,1).transpose(1,2)
+        h_f = h_f.reshape(h_f.shape[0], -1)
+        return h_f.shape[1] 
+        # finally:
+        #     torch.set_rng_state(rng_state)
 
     def forward(self, x, return_cell=False):
         if len(x.shape) == 2:
@@ -520,7 +520,183 @@ class CNN1DBackBone(nn.Module):
         # x = x.view(x.size(0), -1)  # Flatten the output
         
         return x
+
+class CNN(nn.Module):
+    """
+    1D CNN model architecture.
     
+    Attributes
+    ----------
+    num_in : int
+        Exposure in seconds.
+        
+    log : _io.TextIOWrapper
+        Log file.
+    
+    kernel1, kernel2 : int
+        Kernel width of first and second convolution, respectively.
+    stride1, stride2 : int
+        Stride of first and second convolution, respectively.
+    
+    padding1, padding2 : int
+        Zero-padding of first and second convolution, respectively.
+    dropout : float
+        Dropout probability applied to fully-connected part of network.
+    
+    hidden1, hidden2, hidden3 : int
+        Number of hidden units in the first, second, and third fully-connected
+        layers, respectively.
+    
+    Methods
+    -------
+    forward(x)
+        Forward pass through the model architecture.
+    """
+    def __init__(self, t_samples, kernel1=3, kernel2=3, stride1=1, stride2=1, \
+                 padding1=1, padding2=1, dropout=0.2, hidden1=2048, hidden2=1024, \
+                 hidden3=256, out_channels1=64, out_channels2=16, out_dim=1):
+    
+        super(CNN, self).__init__()
+        
+        self.dropout = nn.Dropout(p=dropout)
+        self.num_in = t_samples
+
+        self.out_channels_1 = out_channels1
+        dilation1 = 1
+        poolsize1 = 4
+        
+        self.out_channels_2 = out_channels2
+        dilation2 = 1
+        poolsize2 = 2
+
+        # first convolution
+        self.conv1 = nn.Conv1d(in_channels=1,
+                               out_channels=self.out_channels_1,
+                               kernel_size=kernel1,
+                               dilation=dilation1,
+                               stride=stride1,
+                               padding=padding1)
+        self.num_out = ((self.num_in+2*padding1-dilation1* \
+                         (kernel1-1)-1)/stride1)+1
+        assert str(self.num_out)[-1] == '0'
+
+        self.bn1 = nn.BatchNorm1d(num_features=self.out_channels_1)
+        self.pool1 = nn.AvgPool1d(kernel_size=poolsize1)
+        self.num_out = (self.num_out/poolsize1)
+        assert str(self.num_out)[-1] == '0'
+
+        
+        # hidden convolution
+        self.conv_hidden = nn.Conv1d(in_channels=self.out_channels_1,
+                               out_channels=self.out_channels_1,
+                               kernel_size=kernel2,
+                               stride=stride2,
+                               padding=padding2)
+        self.bn_hidden = nn.BatchNorm1d(num_features=self.out_channels_1)
+        self.pool_hidden = nn.AvgPool1d(kernel_size=poolsize2)
+
+        self.conv2 = nn.Conv1d(in_channels=self.out_channels_1,
+                               out_channels=self.out_channels_2,
+                               kernel_size=kernel2,
+                               stride=stride2,
+                               padding=padding2)
+        self.num_out = ((self.num_out+2*padding2-dilation2* \
+                         (kernel2-1)-1)/stride2)+1
+        assert str(self.num_out)[-1] == '0'
+        self.bn2 = nn.BatchNorm1d(num_features=self.out_channels_2)
+        self.pool2 = nn.AvgPool1d(kernel_size=poolsize2)
+        self.num_out = (self.num_out/(poolsize2**5))
+        assert str(self.num_out)[-1] == '0'
+        
+        # fully-connected network
+        self.num_out = self.out_channels_2*self.num_out
+        assert str(self.num_out)[-1] == '0'
+        self.num_out = int(self.num_out)
+        self.linear1 = nn.Linear(2*self.num_out, hidden1)
+        self.linear2 = nn.Linear(hidden1, hidden2)
+        self.linear3 = nn.Linear(hidden2, hidden3)
+        
+        # output prediction
+        self.predict = nn.Linear(hidden3, out_dim)
+    
+
+    def forward(self, x):
+        """
+        Forward pass through the model architecture.
+            
+        Parameters
+        ----------
+        x : array_like
+            Input time series data.
+            
+        s : array_like
+            Standard deviation array.
+            
+        Returns
+        ----------
+        x : array_like
+            Output prediction.
+        """
+        s = torch.ones((x.shape[0], self.num_out),device=x.device)*torch.std(x)
+        # print("s.shape", s.shape,   "x.shape", x.shape)
+        x = self.pool1(F.relu(self.bn1((self.dropout((self.conv1(x)))))))
+        x = self.pool_hidden(F.relu(self.bn_hidden((self.dropout((self.conv_hidden(x)))))))
+        x = self.pool_hidden(F.relu(self.bn_hidden((self.dropout((self.conv_hidden(x)))))))
+        x = self.pool_hidden(F.relu(self.bn_hidden((self.dropout((self.conv_hidden(x)))))))
+        x = self.pool_hidden(F.relu(self.bn_hidden((self.dropout((self.conv_hidden(x)))))))
+        x = self.pool2(F.relu(self.bn2((self.dropout((self.conv2(x)))))))
+       
+        x = x.view(-1, self.num_out)
+        x = torch.cat((x, s), 1)
+
+        x = self.dropout(F.relu(self.linear1(x)))
+        x = self.dropout(F.relu(self.linear2(x)))
+        x = F.relu(self.linear3(x))
+        x = self.predict(x)
+        
+        return x.float()
+    
+
+class FeedForward(nn.Module):
+    def __init__(self, t_samples, input_size_parameters, hidden_size=256, predict_size=64, out_dim=1):
+        super(FeedForward, self).__init__()
+
+        # Branch for processing time series data
+        self.branch_time_series = nn.Sequential(
+            nn.Linear(t_samples, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+        )
+
+        # Branch for processing additional parameters
+        self.branch_parameters = nn.Sequential(
+            nn.Linear(input_size_parameters, input_size_parameters*2),
+            nn.ReLU(),
+            nn.Linear(input_size_parameters*2, input_size_parameters),
+            nn.ReLU(),
+        )
+
+        # Fully connected layers after concatenating the outputs from both branches
+        self.fc = nn.Sequential(
+            nn.Linear(hidden_size + input_size_parameters, predict_size),
+            nn.ReLU(),
+            nn.Linear(predict_size, out_dim),
+        )
+
+    def forward(self, x_time_series, x_parameters):
+        # print('nans before all: ', torch.any(torch.isnan(x_time_series)).item(), torch.any(torch.isnan(x_parameters)).item())
+        out_time_series = self.branch_time_series(x_time_series)
+        out_parameters = self.branch_parameters(x_parameters)
+        # Concatenate the outputs from both branches
+        out = torch.cat((out_time_series, out_parameters), dim=1)
+        # print('nans after cat: ', torch.any(torch.isnan(out)).item())
+
+
+        # Pass through fully connected layers
+        out = self.fc(out)
+        return out
+       
 class TransformerModel(nn.Module):
 
     def __init__(self, ntoken: int, d_model: int, nhead: int,

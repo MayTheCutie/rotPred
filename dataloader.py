@@ -1,6 +1,7 @@
 import copy
 import torch
 from torch.utils.data import Dataset, DataLoader
+import torch.nn.functional as F
 import os
 import numpy as np
 import pandas as pd
@@ -14,6 +15,7 @@ from lightPred.utils import fill_nan_np
 from pyts.image import GramianAngularField
 from scipy.signal import stft, correlate2d
 import time
+from scipy.signal import find_peaks, peak_prominences, peak_widths
 
 
 
@@ -306,16 +308,18 @@ class KeplerDataset(TimeSsl):
     else:
       x, meta =  self.read_data(idx).float()
       x /= x.max()
-    
     info = dict()
     if self.transforms is not None:
           x, _, info = self.transforms(x, mask=None, info=info)
+          x = x.squeeze()
     if self.acf:
       xcf = torch.tensor(A(x, nlags=len(x)))
       if self.return_raw:
         x = torch.stack([x,torch.tensor(xcf)])
       else:
-        x = torch.tensor(xcf).unsqueeze(-1)
+        x = torch.tensor(xcf).unsqueeze(0)
+    else:
+       x = x.unsqueeze(0)
     if self.norm == 'std':
       x = (x - x.mean())/(x.std()+1e-8)
     elif self.norm == 'median':
@@ -357,6 +361,28 @@ class KeplerLabeledDataset(KeplerDataset):
       y = {'i': torch.tensor(row['i'])/max_i} 
     return x.float(), y, inv_mask, info
 
+class TFCKeplerDataset(KeplerDataset):
+  def __init__(self, root_dir, path_list, **kwargs):
+      super().__init__(root_dir, path_list, **kwargs)    
+  def __len__(self):
+      return self.length
+  
+  def __getitem__(self, idx):
+      x_t, masked_x, inv_mask, info = super().__getitem__(idx)
+      x_f = torch.fft.fft(x_t[0]).abs().unsqueeze(0) # add channel dimension
+      # if self.norm == 'std':
+      #   x = ((x-x.mean())/(x.std()+1e-8))
+      # elif self.norm == 'median':
+      #   x /= x.median()
+      # elif self.norm == 'minmax':
+      #   x = (x-x.min())/(x.max()-x.min())
+      
+      return x_t.float(), x_f.float(), info
+
+  def get_labels(self, sample_idx):
+      y = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
+      y = torch
+
 class DenoisingDataset(Dataset):
 
   def __init__(self, root_dir, idx_list, t_samples=512, norm='std', noise_factor=4):
@@ -391,7 +417,7 @@ class DenoisingDataset(Dataset):
 
 class TimeSeriesDataset(Dataset):
   def __init__(self, root_dir, idx_list, t_samples=512, norm='std', num_classes=2, transforms=None,
-                noise=False, noise_factor=4):
+                noise=False, noise_factor=4, all_labels=False):
       self.idx_list = idx_list
       self.length = len(idx_list)
       self.targets_path = os.path.join(root_dir, "simulation_properties.csv")
@@ -402,6 +428,7 @@ class TimeSeriesDataset(Dataset):
       self.transforms = transforms
       self.noise = noise
       self.noise_factor = noise_factor
+      self.all_labels = all_labels
       if self.noise:
         self.non_p_df = create_kepler_df(kepler_path, non_period_table_path)
       
@@ -417,7 +444,8 @@ class TimeSeriesDataset(Dataset):
         f = interp1d(x[:,0], x[:,1])
         new_t = np.linspace(x[:,0][0], x[:,0][-1], self.seq_len)
         x = np.concatenate((new_t[:,None], f(new_t)[:,None]), axis=1)
-      x = torch.tensor(x.astype(np.float32))[:,1]
+      x = fill_nan_np(x[:,1], interpolate=True)
+      x = torch.tensor(x.astype(np.float32))
 
       
       if self.transforms is not None:
@@ -431,16 +459,24 @@ class TimeSeriesDataset(Dataset):
         x /= x.median()
       elif self.norm == 'minmax':
         x = (x-x.min())/(x.max()-x.min())
-      
-      y = self.get_labels(sample_idx)
+      x = x.nan_to_num(0)
+      if not self.all_labels:
+        y = self.get_labels(sample_idx).squeeze(0).squeeze(-1).float()
+      else:
+        y = self.get_all_labels(sample_idx)
 
-      return x.float(), y.squeeze(0).squeeze(-1).float(), torch.ones_like(x), info
+      return x.float(), y, torch.ones_like(x), info
+  
+  def get_all_labels(self, sample_idx):
+    y = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
+    return y
 
   def get_labels(self, sample_idx):
       y = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
       y = torch.tensor([y['Inclination'], y['Period'], y['Decay Time']])
       y[1] = (y[1] - min_p)/(max_p-min_p)
-      y[0] = (y[0] - min_i)/(max_i-min_i)
+      # y[0] = (y[0] - min_i)/(max_i-min_i)
+      y[0] = np.sin(y[0])
       y[2] = (y[2] - min_tau)/(max_tau-min_tau)
       y = y[:self.num_classes]
       return y
@@ -451,7 +487,6 @@ class TimeSeriesClassifierDataset(TimeSeriesDataset):
     self.cls = num_classes
   def __getitem__(self, idx):
     x,y = super().__geti
-    tem__(idx)
     y1 = quantize_tensor(y[0].unsqueeze(0), self.cls)
     y2 = quantize_tensor(y[1].unsqueeze(0), self.cls)
     return x.float(), torch.cat([y1,y2], dim=-1).float().squeeze(0)
@@ -580,4 +615,52 @@ class ACFImageDataset(TimeSeriesDataset):
       y = super().get_labels(sample_idx)
 
       return x_im.float(), y.squeeze(0).squeeze(-1).float(), torch.ones_like(x_im), info
-      
+
+class LatDataset(TimeSeriesDataset):
+  def __init__(self, root_dir, idx_list, t_samples=1024, norm='minmax', transforms=None, vocab_size=1024, mask_prob = 0.15, mask_val= -1,
+                cls_val = 0):
+    super().__init__(root_dir, idx_list, t_samples, norm=norm, transforms=transforms)
+    self.vocab_size = vocab_size
+    self.mask_prob = mask_prob
+    self.mask_val = mask_val
+    self.cls_val = cls_val
+    self.transforms = transforms
+
+  def __getitem__(self, idx):
+    sample_idx = remove_leading_zeros(self.idx_list[idx])
+    x,_, mask, info = super().__getitem__(idx)
+    y = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
+    y = torch.tensor(y['Spot Max']) > 45
+    return x.float().unsqueeze(0), y.long().squeeze(), mask, info
+  
+class IncDataset(TimeSeriesDataset):
+  def __init__(self, root_dir, idx_list, t_samples=1024, norm='minmax', transforms=None, vocab_size=1024, mask_prob = 0.15, mask_val= -1,
+                cls_val = 0):
+    super().__init__(root_dir, idx_list, t_samples, norm=norm, transforms=transforms)
+    self.vocab_size = vocab_size
+    self.mask_prob = mask_prob
+    self.mask_val = mask_val
+    self.cls_val = cls_val
+    self.transforms = transforms
+
+  def __getitem__(self, idx):
+    sample_idx = remove_leading_zeros(self.idx_list[idx])
+    x,_, mask, info = super().__getitem__(idx)
+    ratio = self.get_depth_width(x)
+    
+
+    row = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
+    y = torch.tensor(row['Inclination'])
+    params = torch.tensor([ratio, row['Period'], row['Decay Time'], row['Cycle Length'], row['Spot Max'], row['Activity Rate'],
+                           row["Butterfly"]])
+    params = params.nan_to_num(0)
+    return x.float(), y.float(), params.float(), info
+  
+  def get_depth_width(self, x):
+    peaks = find_peaks(x, prominence=0.1)[0]
+    prominences = peak_prominences(x, peaks)[0]
+    highest_idx = np.argsort(prominences)[-10:]
+    prominences = prominences[highest_idx]
+    widths = peak_widths(x, peaks[highest_idx], rel_height=0.1)[0]
+    ratio = prominences / widths
+    return ratio.mean()

@@ -7,6 +7,7 @@ import yaml
 from matplotlib import pyplot as plt
 import glob
 from collections import OrderedDict
+from tqdm import tqdm
 
 # import NamedTuple
 # import List
@@ -575,6 +576,166 @@ class ClassifierTrainer(Trainer):
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
         return preds, targets, np.zeros((0, self.num_classes))
 
+
+class latTrainer(Trainer):
+    def __init__(self, num_classes=2, **kwargs):
+        super().__init__(**kwargs)
+        self.num_classes = num_classes
+    def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
+        """
+        Trains the model for one epoch.
+        """
+        self.model.train()
+        train_loss = []
+        train_acc = 0
+        for i,(x, y, _,_)  in enumerate(self.train_dl):
+            x, y = x.to(device), y.to(device)
+            if torch.any(torch.isnan(x)):
+                print("nan x")
+            if torch.any(torch.isnan(y)):
+                print("nan y")
+            self.optimizer.zero_grad()
+            y_pred = self.model(x)
+            # print("train: ", y_pred[:10], y[:10])           
+
+            # print(self.model.named_parameters()[0][1].grad()[:10])
+            # print("y_pred: ", y_pred[:10], "y: ", y[:10])
+            loss = self.criterion(y_pred, y)
+            
+            self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
+            self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
+            loss.backward()
+            # for name, param in self.model.named_parameters():
+            #     print(f'Parameter: {name}, Gradient flag: {param.requires_grad}, Value: {param.grad}')
+            self.optimizer.step()
+            acc = (y_pred.argmax(-1) == y).sum().item()
+            train_loss.append(loss.item())
+            train_acc += acc
+        print("number of train_acc: ", train_acc)
+        return train_loss, train_acc/len(self.train_dl.dataset) 
+    
+    def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
+        """
+        Evaluates the model for one epoch.
+        """
+        self.model.eval()
+        val_loss = []
+        val_acc = 0
+        for i, (x, y, _, _) in enumerate(self.val_dl):
+            x, y = x.to(device), y.to(device)
+            # with torch.no_grad():
+            y_pred = self.model(x)
+            loss = self.criterion(y_pred, y)
+            self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.val_dl))
+            acc = (y_pred.argmax(-1) == y).sum().item()
+            val_loss.append(loss.item())
+            val_acc += acc
+        print("number of val_acc: ", val_acc)
+        return val_loss, val_acc/len(self.val_dl.dataset)
+    
+    def predict(self, test_dataloader, device, conf=False, load_best=False):
+        """
+        Returns the predictions of the model on the given dataset.
+        """
+        if self.best_state_dict is not None:
+            self.model.load_state_dict(self.best_state_dict)
+        if load_best:
+            self.load_best_model()
+        self.model.eval()
+        preds = np.zeros((0, self.num_classes))
+        targets = np.zeros((0, self.num_classes))
+        for x, y, _, _ in test_dataloader:
+            x = x.to(device)
+            with torch.no_grad():
+                y_pred = self.model(x)
+                # y_pred = torch.cat((y_pred_p, y_pred_i), dim=1)
+            preds = np.concatenate((preds, y_pred.cpu().numpy()))
+            targets = np.concatenate((targets, y.cpu().numpy()))
+        print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
+        return preds, targets, np.zeros((0, self.num_classes))
+    
+
+class IncTrainer(Trainer):
+    def __init__(self, num_classes=2, **kwargs):
+        super().__init__(**kwargs)
+        self.num_classes = num_classes
+    def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
+        """
+        Trains the model for one epoch.
+        """
+        self.model.train()
+        train_loss = []
+        train_acc = 0
+        pbar = tqdm(self.train_dl)
+        for i,(x, y, params,_)  in enumerate(pbar):
+            x, y = x.to(device), y.to(device)
+            if torch.any(torch.isnan(x)):
+                print("nan x")
+            if torch.any(torch.isnan(y)):
+                print("nan y")
+            self.optimizer.zero_grad()
+            # print('nans: ', torch.any(torch.isnan(x)).item(), torch.any(torch.isnan(params)).item())
+            y_pred = self.model(x, params)
+
+            # print("train: ", y_pred[:10], y[:10])           
+
+            # print(self.model.named_parameters()[0][1].grad()[:10])
+            # print("y_pred: ", y_pred[:10], "y: ", y[:10])
+            loss = self.criterion(y_pred, y)
+            
+            self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
+            self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
+            loss.backward()
+            # for name, param in self.model.named_parameters():
+            #     print(f'Parameter: {name}, Gradient flag: {param.requires_grad}, Value: {param.grad}')
+            self.optimizer.step()
+            diff = torch.abs(y_pred - y)
+            acc = (diff < (y/10)).sum().item() 
+            train_loss.append(loss.item())
+            train_acc += acc
+            pbar.set_description(f"train_acc: {acc}, train_loss:  {loss.item()}")
+        return train_loss, train_acc/len(self.train_dl.dataset) 
+    
+    def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
+        """
+        Evaluates the model for one epoch.
+        """
+        self.model.eval()
+        val_loss = []
+        val_acc = 0
+        for i, (x, y, params, _) in enumerate(self.val_dl):
+            x, y = x.to(device), y.to(device)
+            # with torch.no_grad():
+            y_pred = self.model(x, params)
+            loss = self.criterion(y_pred, y)
+            self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.val_dl))
+            diff = torch.abs(y_pred - y)
+            acc = (diff < (y/10)).sum().item()
+            val_loss.append(loss.item())
+            val_acc += acc
+        print("number of val_acc: ", val_acc)
+        return val_loss, val_acc/len(self.val_dl.dataset)
+    
+    def predict(self, test_dataloader, device, conf=False, load_best=False):
+        """
+        Returns the predictions of the model on the given dataset.
+        """
+        if self.best_state_dict is not None:
+            self.model.load_state_dict(self.best_state_dict)
+        if load_best:
+            self.load_best_model()
+        self.model.eval()
+        preds = np.zeros((0, self.num_classes))
+        targets = np.zeros((0, self.num_classes))
+        for x, y, params, _ in test_dataloader:
+            x = x.to(device)
+            with torch.no_grad():
+                y_pred = self.model(x, params)
+                # y_pred = torch.cat((y_pred_p, y_pred_i), dim=1)
+            preds = np.concatenate((preds, y_pred.cpu().numpy()))
+            targets = np.concatenate((targets, y.cpu().numpy()))
+        print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
+        return preds, targets, np.zeros((0, self.num_classes))
 
 class SiameseTrainer(Trainer):
     def __init__(self, **kwargs):
