@@ -30,12 +30,14 @@ from lightPred.transforms import Compose, StandardScaler, Mask, RandomCrop, Down
 
 from lightPred.dataloader import *
 from lightPred.models import *
+from lightPred.Informer2020.models.model import Informer
 from lightPred.utils import *
 from lightPred.train import *
 from lightPred.eval import eval_model, eval_results, eval_quantiled_results
 from lightPred.optim import WeightedMSELoss, QuantileLoss
 from lightPred.transforms import *
 from lightPred.sampler import DistributedSamplerWrapper
+from lightPred.LightCurves.cnn import Lightcurves_Net
 print(f"python path {os.sys.path}")
 
 torch.manual_seed(1234)
@@ -48,15 +50,19 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 52
+exp_num = 79
 
 log_path = '/data/logs/lstm_attn'
+if not os.path.exists(f'{log_path}/exp{exp_num}'):
+    try:
+        print("****making dir*******")
+        os.makedirs(f'{log_path}/exp{exp_num}')
+    except OSError as e:
+        print(e)
 
-chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
-# checkpoint_path = '/data/logs/lstm_attn/exp29'
-data_folder = "/data/butter/data2"
+data_folder = "/data/butter/data_cos"
 
-test_folder = "/data/butter/test2"
+test_folder = "/data/butter/test_cos"
 
 Nlc = 50000
 
@@ -71,7 +77,7 @@ train_list, val_list = train_test_split(idx_list, test_size=0.1, random_state=12
 
 test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
-b_size = 256
+b_size = 180
 
 num_epochs = 1000
 
@@ -79,15 +85,9 @@ cad = 30
 
 DAY2MIN = 24*60
 
-dur = 200
+dur = 360
 
-t_samples = 512
-
-if torch.cuda.current_device() == 0:
-    if not os.path.exists(log_path):
-        os.makedirs(log_path)
-    if not os.path.exists(f'{log_path}/exp{exp_num}'):
-        os.makedirs(f'{log_path}/exp{exp_num}')
+class_labels = ['Inclination', 'Period']    
 
 def setup(rank, world_size):
     # initialize the process group
@@ -106,25 +106,19 @@ if __name__ == '__main__':
     }
 
     net_params = {
-         'in_channels':1,
-        'predict_size':128,
- 'dropout': 0.35,
- 'hidden_size': 64,
- 'num_layers': 5,
- 'seq_len': int(dur/cad*DAY2MIN), 
- "num_classes": 4,
-    'stride': 4,
-    'kernel_size': 4,
-    'image': False,}
+        'dropout': 0.35,
+        'hidden_size': 64,
+        'image': false,
+        'in_channels': 1
+        'kernel_size': 4
+        'num_classes': len(class_labels)*2
+        'num_layers': 5
+        'predict_size': 128
+        'seq_len': int(dur/cad*DAY2MIN)
+        'stride': 4}
+    # 'num_att_layers':2,
+    # 'n_heads': 4,}
 
-    backbone= { 'in_channels':1,
- 'dropout': 0.35,
- 'hidden_size': 64,
- 'num_layers': 5,
- 'seq_len': int(dur/cad*DAY2MIN), 
- "num_classes": 4,
-    'stride': 4,
-    'kernel_size': 4}
       
     world_size    = int(os.environ["WORLD_SIZE"])
     rank          = int(os.environ["SLURM_PROCID"])
@@ -142,58 +136,36 @@ if __name__ == '__main__':
     torch.cuda.set_device(local_rank)
     print(f"rank: {rank}, local_rank: {local_rank}")
 
-
-   
+    kepler_data_folder = "/data/lightPred/data"
+    non_ps = pd.read_csv('/data/lightPred/tables/non_ps.csv')
+    kepler_df = multi_quarter_kepler_df(kepler_data_folder, table_path=None, Qs=[4,5,6,7])
+    kepler_df = kepler_df[kepler_df['number_of_quarters']==4]
+    kep_transform = Compose([RandomCrop(int(dur/cad*DAY2MIN))])
+    merged_df = pd.merge(kepler_df, non_ps, on='KID', how='inner')
+    noise_ds = KeplerNoiseDataset(kepler_data_folder, path_list=None, df=merged_df,
+    transforms=kep_transform, acf=False, norm='none')
     
-
+    if torch.distributed.get_rank() == 0:
+        if not os.path.exists(log_path):
+            os.makedirs(log_path)
     # transform_train = Compose([ AddGaussianNoise(sigma=0.005),
     #                     ])
 
-    transform = Compose([Detrend(), RandomCrop(width=int(dur/cad*DAY2MIN))
-                        ])
-    test_transform = Compose([Detrend(), Slice(0, int(dur/cad*DAY2MIN))])
+    transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)), KeplarNoise(noise_ds, min_ratio=0.1, max_ratio=0.5),
+     moving_avg(49), Detrend()])
+    test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)), KeplarNoise(noise_ds, min_ratio=0.1, max_ratio=0.5),
+     moving_avg(49), Detrend()])
 
-#     image_transform = torchvision.transforms.Compose([
-#     torchvision.transforms.RandomHorizontalFlip(p=0.5),
-#     # torchvision.transforms.ToDtype(torch.float32, scale=True),
-#     torchvision.transforms.Normalize(mean=[0.445], std=[0.269]),
-# ])
+    train_dataset = TimeSeriesDataset(data_folder, train_list, transforms=transform,
+    init_frac=0.4, acf=True, prepare=True, dur=dur)
+    val_dataset = CleanDataset(data_folder, val_list,  transforms=transform,
+     init_frac=0.4, acf=True, prepare=True, dur=dur)
+    test_dataset = CleanDataset(test_folder, test_idx_list, transforms=transform,
+    init_frac=0.4, acf=True, prepare=True, dur=dur)
 
-#     image_test_transform = torchvision.transforms.Compose([
-#     # torchvision.transforms.ToDtype(torch.float32, scale=True),
-#     torchvision.transforms.Normalize(mean=[0.445], std=[0.269]),
-# ])
-    
-    # train_dataset = ACFImageDataset(data_folder, train_list, t_samples=t_samples, transforms=transform, image_transform=image_transform)
-    # val_dataset = ACFImageDataset(data_folder, val_list, t_samples=t_samples, transforms=transform, image_transform=image_transform)
-    # test_dataset = ACFImageDataset(data_folder, val_list, t_samples=t_samples, transforms=test_transform, image_transform=image_test_transform)
-
-    train_dataset = ACFDataset(data_folder, train_list, t_samples=None, transforms=transform, return_raw=False)
-    val_dataset = ACFDataset(data_folder, val_list, t_samples=None, transforms=transform, return_raw=False)
-    test_dataset = ACFDataset(test_folder, test_idx_list, t_samples=None, transforms=test_transform, return_raw=False)
-
-    # train_dataset = ACFClassifierDataset(data_folder, train_list, t_samples=None, transforms=transform, return_raw=False)
-    # val_dataset = ACFClassifierDataset(data_folder, val_list, t_samples=None, transforms=transform, return_raw=False)
-    # test_dataset = ACFClassifierDataset(test_folder, test_idx_list, t_samples=None, transforms=transform, return_raw=False)
-   
-    # train_dataset = TimeSeriesDataset(data_folder, train_list, t_samples=None, num_classes=net_params['num_classes']//2,
-    #                                  transforms=transform)
-    # val_dataset = TimeSeriesDataset(data_folder, val_list, t_samples=None,num_classes=net_params['num_classes']//2,
-    #                                 transforms=transform)
-    # test_dataset = TimeSeriesDataset(test_folder, test_idx_list, t_samples=None, num_classes=net_params['num_classes']//2,
-    #                                 transforms=transform)
-
-
-    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
-    train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler, \
-                                               num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True)
-
-    # print("calculating weights...")
-    # train_weights = dataset_weights(train_dataloader, Nlc)
-
-    # train_sampler_weighted = DistributedSamplerWrapper(sampler=WeightedRandomSampler(train_weights, len(train_weights)),
-    #                                             num_replicas=world_size, rank=rank)
-    train_dataloader = DataLoader(train_dataset, batch_size=b_size, \
+    train_weights = train_dataset.weights()
+    train_sampler_weighted = DistributedSamplerWrapper(sampler=WeightedRandomSampler(train_weights, len(train_weights)),
+                                                num_replicas=world_size, rank=rank)    train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler,\
                                                   num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True) 
 
     val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
@@ -206,19 +178,12 @@ if __name__ == '__main__':
 
     print("dataset length: ", len(train_dataset), len(val_dataset), len(test_dataset))
 
-    # print("check weights...")
-    # incs = torch.zeros(0)
-    # for i, (x,y,_,_) in enumerate(test_dataloader):
-    #     print(i)
-    #     incs = torch.cat((incs, y[:,0]*90), dim=0)
-    # plt.hist(incs.squeeze(), 80)
-    # plt.savefig('/data/tests/incs_hist_test_lstm_attn.png')
-    # plt.clf()
-    # print("done")
-    # train_dataset = TimeSeriesDataset(data_folder, train_list, t_samples=net_params['seq_len'])
-    # val_dataset = TimeSeriesDataset(data_folder, val_list, t_samples=net_params['seq_len'])
-    # test_dataset = TimeSeriesDataset(test_folder, test_idx_list, t_samples=net_params['seq_len'])
-
+    for i, (x,y,_,_) in enumerate(test_dataloader):
+        print(x.shape, y.shape)
+        if i == 1:
+            break
+    print("done")
+    
 
     # train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
     # train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler, \
@@ -228,26 +193,10 @@ if __name__ == '__main__':
 
    
 
-    model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
+    # model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
     
-    # model = LSTM(**net_params)
-    # model = LSTM_ATTN(**net_params)
-
-    # print(model)
-    # features_ext = LSTMFeatureExtractor(**backbone)
-    # sims = SimSiam(features_ext)
-    # state_dict = torch.load(chekpoint_path, map_location=f'cuda:{local_rank}')
-    # new_state_dict = OrderedDict()
-    # for key, value in state_dict.items():
-    #     # print(key)
-    #     if key.startswith('module.'):
-    #         new_state_dict[key[7:]] = value
-    #     else:
-    #         new_state_dict[key] = value
-    # state_dict = new_state_dict
-    # sims.load_state_dict(state_dict, strict=False)
-    # sims = sims.to(local_rank)
-    # model.feature_extractor = sims.backbone
+    model = LSTM_ATTN(**net_params)
+    # model = Informer(**net_params)
 
     model = model.to(local_rank)
 
@@ -256,7 +205,9 @@ if __name__ == '__main__':
     
     loss_fn = nn.L1Loss()
     # loss_fn = nn.MSELoss()
+    # loss_fn = nn.SmoothL1Loss(beta=0.0005)
     # loss_fn = WeightedMSELoss(factor=1.2)
+    # loss_fn = nn.GaussianNLLLoss()
 
     # qs = [0.1, 0.2, 0.5, 0.8, 0.9]
     # loss_fn = QuantileLoss()
@@ -268,13 +219,15 @@ if __name__ == '__main__':
     data_dict = {'dataset': train_dataset.__class__.__name__, 'transforms': transform, 'batch_size': b_size,
      'num_epochs':num_epochs, 'checkpoint_path': f'{log_path}/exp{exp_num}', 'loss_fn': loss_fn.__class__.__name__,
      'model': model.module.__class__.__name__, 'optimizer': optimizer.__class__.__name__,
-     'data_folder': data_folder, 'test_folder': test_folder}
+     'data_folder': data_folder, 'test_folder': test_folder, }
 
     with open(f'{log_path}/exp{exp_num}/data_params.yml', 'w') as outfile:
         yaml.dump(data_dict, outfile, default_flow_style=False)
 
+    print("data params: ", data_dict)
+
     
-    trainer = Trainer(model=model, optimizer=optimizer, criterion=loss_fn, num_classes=net_params['num_classes']//2,
+    trainer = Trainer(model=model, optimizer=optimizer, criterion=loss_fn, 
                        scheduler=scheduler, train_dataloader=train_dataloader, val_dataloader=val_dataloader,
                         device=local_rank, optim_params=optim_params, net_params=net_params, exp_num=exp_num, log_path=log_path,
                         exp_name="lstm_attn")
@@ -294,7 +247,8 @@ if __name__ == '__main__':
 
     preds, targets, confs = trainer.predict(test_dataloader, device=local_rank, conf=True, load_best=True)
 
-    eval_results(preds, targets, confs, data_dir=f'{log_path}/exp{exp_num}', model_name=model.module.__class__.__name__)
+    eval_results(preds, targets, confs, labels=class_labels, data_dir=f'{log_path}/exp{exp_num}', model_name=model.module.__class__.__name__,
+     num_classes=net_params['num_classes']//2)
 
 
     # eval_model(f'{log_path}/exp{exp_num}',model=LSTM_ATTN, test_dl=val_dataloader,

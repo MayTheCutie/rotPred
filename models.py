@@ -12,7 +12,9 @@ from lightPred.Informer2020.models.attn import FullAttention, ProbAttention, Att
 from lightPred.Informer2020.models.embed import DataEmbedding
 from lightPred.Autoformer.layers.Autoformer_EncDec import Encoder as AutoformerEncoder, EncoderLayer as AutoformerEncoderLayer, my_Layernorm as AutoformerLayerNorm, series_decomp
 from lightPred.Autoformer.layers.AutoCorrelation import AutoCorrelation, AutoCorrelationLayer
-
+from torchvision.models.swin_transformer import SwinTransformer
+from lightPred.conformer.conformer.convolution import ConformerConvModule, Conv2dSubampling
+from lightPred.conformer.conformer.encoder import ConformerBlock
 
 
 def D(p, z, version='simplified'): # negative cosine similarity
@@ -226,7 +228,7 @@ class ConvBlock(nn.Module):
         return x
 
 class LSTMFeatureExtractor(nn.Module):
-    def __init__(self, seq_len=1024, hidden_size=256, num_layers=4, num_classes=4,
+    def __init__(self, seq_len=1024, hidden_size=256, num_layers=5, num_classes=4,
                  in_channels=1, channels=256, dropout=0.2, kernel_size=4 ,stride=4, image=False):
         super(LSTMFeatureExtractor, self).__init__()
         self.seq_len = seq_len
@@ -234,8 +236,10 @@ class LSTMFeatureExtractor(nn.Module):
         self.hidden_size = hidden_size
         self.num_classes = num_classes
         self.image = image
+        self.stride = stride
+        self.t_features = self.seq_len//self.stride
         print("image: ", image)
-        # self.conv = ConvBlock(in_channels=in_channels, out_channels=channels, kernel_size=kernel_size, padding=1, stride=stride, dropout=dropout)
+        # self.conv = Conv2dSubampling(in_channels=in_channels, out_channels=channels)
         if not image:
             self.conv1 = nn.Conv1d(in_channels=in_channels, out_channels=channels, kernel_size=kernel_size, padding='same', stride=1)
             self.pool = nn.MaxPool1d(kernel_size=stride)
@@ -269,15 +273,21 @@ class LSTMFeatureExtractor(nn.Module):
         # Make sure to not mess up the random state.
         rng_state = torch.get_rng_state()
         # try:
+        print("calculating out shape")
         if not self.image:
             dummy_input = torch.randn(2,self.in_channels, self.seq_len)
         else:
             dummy_input = torch.randn(2,self.in_channels, self.seq_len, self.seq_len)
+        # dummy_input = torch.randn(2,self.seq_len, self.in_channels)
+        input_length = torch.ones(2, dtype=torch.int64)*self.seq_len
+        print("dummy_input: ", dummy_input.shape)
         x = self.drop(self.pool(self.activation(self.batchnorm1(self.conv1(dummy_input)))))
+        # x = self.conv(dummy_input, input_length)
         x = x.view(x.shape[0], x.shape[1], -1).swapaxes(1,2)
         x_f,(h_f,_) = self.lstm(x)
         h_f = h_f.transpose(0,1).transpose(1,2)
         h_f = h_f.reshape(h_f.shape[0], -1)
+        print("finished")
         return h_f.shape[1] 
         # finally:
         #     torch.set_rng_state(rng_state)
@@ -287,11 +297,14 @@ class LSTMFeatureExtractor(nn.Module):
             x = x.unsqueeze(1)
         elif len(x.shape) == 3 and x.shape[-1] == 1:
             x = x.transpose(-1,-2)
+        # if len(x.shape) == 2:
+        #     x = x.unsqueeze(-1)
+        # elif len(x.shape) == 3 and x.shape[1] == 1:
+        #     x = x.transpose(-1,-2)
+        # input_length = torch.ones(x.shape[0], dtype=torch.int64)*self.seq_len
+        # x = self.conv(x, input_length)
         skip = self.skip(x)
-        # x = self.conv(x)
         x = self.drop(self.pool(self.activation(self.batchnorm1(self.conv1(x)))))
-        # x = self.drop(self.activation(self.batchnorm2(self.conv2(x))))
-        # x = self.drop(self.activation(self.batchnorm3(self.conv3(x))))
         x = x + skip
         # x = self.conv(x)
         x = x.view(x.shape[0], x.shape[1], -1).swapaxes(1,2)
@@ -304,8 +317,8 @@ class LSTMFeatureExtractor(nn.Module):
         return h_f
     
 class LSTM(nn.Module):
-    def __init__(self, seq_len=1024, hidden_size=256, num_layers=4, num_classes=4,
-                 in_channels=1, predict_size=256, channels=256, dropout=0.2, kernel_size=4,stride=4, image=False):
+    def __init__(self, seq_len=1024, hidden_size=64, num_layers=5, num_classes=4,
+                 in_channels=1, predict_size=128, channels=256, dropout=0.35, kernel_size=4,stride=4, image=False):
         super(LSTM, self).__init__()
         self.activation = nn.GELU()
         self.feature_extractor = LSTMFeatureExtractor(seq_len=seq_len, hidden_size=hidden_size, num_layers=num_layers, num_classes=num_classes,in_channels=in_channels,
@@ -365,24 +378,36 @@ class LSTM_ATTN(LSTM):
         return out
 
 class LSTM_ATTN2(LSTM):
-    def __init__(self, attn='prob',n_heads=8, factor=5, dropout=0.1, output_attention=False, **kwargs):
+    def __init__(self, attn='prob',n_heads=4, factor=5, dropout=0.35, output_attention=False, num_att_layers=4, **kwargs):
         super(LSTM_ATTN2, self).__init__(**kwargs)
-        self.fc1 = nn.Linear(self.feature_extractor.hidden_size*2, self.predict_size)
+        self.fc1 = nn.Linear(self.feature_extractor.hidden_size*self.feature_extractor.hidden_size*2, self.predict_size)
         self.fc2 = nn.Linear(self.predict_size, self.num_classes)
-        Attn = ProbAttention if attn=='prob' else FullAttention
-        self.attention = AttentionLayer(Attn(False, factor, attention_dropout=dropout, output_attention=output_attention), 
-                                d_model=self.feature_extractor.hidden_size*2, n_heads=n_heads, mix=False)
+        self.pool = nn.AdaptiveMaxPool1d(self.feature_extractor.hidden_size)
+        self.layers = nn.ModuleList([ConformerBlock(
+            encoder_dim=self.feature_extractor.hidden_size*2,
+            num_attention_heads=n_heads,
+            feed_forward_dropout_p=dropout,
+            attention_dropout_p=dropout,
+            conv_dropout_p=dropout,
+        ) for _ in range(num_att_layers)])
+        # Attn = ProbAttention if attn=='prob' else FullAttention
+        # self.attention = AttentionLayer(Attn(False, factor, attention_dropout=dropout, output_attention=output_attention), 
+        #                         d_model=self.feature_extractor.hidden_size*2, n_heads=n_heads, mix=False)
     def forward(self, x):
         if len(x.shape) == 2:
             x = x.unsqueeze(1)  
-        x_f, h_f, c_f = self.feature_extractor(x, return_cell=True)
-        c_f = torch.cat([c_f[-1], c_f[-2]], dim=1)
+        outputs, h_f, c_f = self.feature_extractor(x, return_cell=True)
+        # print("x_f: ", x_f.shape)
+        for layer in self.layers:
+            outputs = layer(outputs)
+        outputs = self.pool(outputs.permute(0,2,1)).reshape(outputs.shape[0], -1)
+        # c_f = torch.cat([c_f[-1], c_f[-2]], dim=1)
 
-        values, _ = self.attention(x_f, x_f, x_f, attn_mask=None) 
-        out = self.fc2(self.activation(self.fc1(values.max(dim=1).values)))
+        # values, _ = self.attention(x_f, x_f, x_f, attn_mask=None) 
+        outputs = self.fc2(self.activation(self.fc1(outputs)))
         # values = (values[...,None] + out[:,None,:]).view(out.shape[0], -1)
         # conf = self.fc4(self.activation(self.fc3(values)))
-        return out
+        return outputs
 
 class LSTM_ATTN_QUANT(LSTM):
     def __init__(self, attn='prob',n_heads=8, factor=5, dropout=0.1, output_attention=False, n_q=3, **kwargs):
@@ -406,6 +431,31 @@ class LSTM_ATTN_QUANT(LSTM):
         # conf = self.fc4(self.activation(self.fc3(values)))
         return out.transpose(1,2)
 
+class LSTM_SWIN(LSTM_ATTN):
+    def __init__(self, patch_size=[16,16], im_embed_dim=64, depths=[4,6,6,4], num_heads=[4,8,8,4],
+     window_size=[8,8], im_dropout=0.3, swin_weight=1, **kwargs):
+        super(LSTM_SWIN, self).__init__(**kwargs)
+        self.swin = SwinTransformer(patch_size=patch_size, embed_dim=im_embed_dim, depths=depths, num_heads=num_heads,
+                                     window_size=window_size, dropout=im_dropout)
+        self.swin.head = nn.Identity()
+        num_swin_features =  im_embed_dim * 2 ** (len(depths) - 1)
+        num_lstm_features = self.feature_extractor.hidden_size*2
+        self.swin_weight = swin_weight
+        self.fc1 = nn.Linear(num_swin_features + num_lstm_features, self.predict_size)
+
+        
+    def forward(self, x_im, x_t):
+        if len(x_t.shape) == 2:
+            x_t = x_t.unsqueeze(1)
+        if x_im.shape[1] == 1:
+            x_im = x_im.repeat(1,3,1,1) # RGB like
+        x_f, h_f, c_f = self.feature_extractor(x_t, return_cell=True)
+        c_f = torch.cat([c_f[-1], c_f[-2]], dim=1)
+        t_features = self.attention(c_f, x_f, x_f) 
+        im_features = self.swin_weight*self.swin(x_im)
+        values = torch.cat([t_features, im_features], dim=1)
+        out = self.fc2(self.activation(self.fc1(values)))
+        return out
 
 class BERTEncoder(nn.Module):
     def __init__(self, ntoken=1024, vocab_size=1024, d_model=768, nhead=12, nlayers=12, in_channels=1, dropout=0.2, num_classes=4):
@@ -456,23 +506,46 @@ class BERTEncoder(nn.Module):
         
     
 class EncoderDecoder(nn.Module):
-    def __init__(self, seq_len, hidden_size, num_layers, vocab_size, predict_size=256):
+    def __init__(self, dropout=0.2):
         super(EncoderDecoder, self).__init__()
-        self.model = TransformerEncoderDecoder( vocab_size,  vocab_size, hidden_size, num_layers)
-        self.fc1 = nn.Linear(hidden_size*seq_len, predict_size)
-        self.fc2 = nn.Linear(predict_size, 2)
-        self.activation = nn.GELU()
+        # Encoder
+        self.encoder = nn.Sequential(
+            nn.Conv1d(1, 16, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Dropout(p=dropout),
+            nn.Conv1d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Dropout(p=dropout),
+            nn.Conv1d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Dropout(p=dropout),
+            nn.Conv1d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+        )
 
+        # Decoder
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose1d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.Dropout(p=dropout),
+            nn.ConvTranspose1d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.Dropout(p=dropout),
+            nn.ConvTranspose1d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.Dropout(p=dropout),
+            nn.ConvTranspose1d(16, 1, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.Sigmoid(),
+        )
 
-    def forward(self, x, return_logits=False):
-        x = x.long()
-        # print("X", x.shape)
-        logits, memory_bank = self.model(x[:,0,:], x[:,0,:])
-        # print("memory_bank: ", memory_bank.shape)
-        prediction = memory_bank.view(memory_bank.shape[0], -1)
-        # print("prediction: ", prediction.shape)
-        prediction = F.softmax(self.fc2(self.activation(self.fc1(prediction))), dim=-1)
-        return prediction, logits
+    def forward(self, x):
+        if len(x.shape) == 2:
+            x = x.unsqueeze(1)
+        if len(x.shape) == 3 and x.shape[-1] == 1:
+            x = x.transpose(-1,-2)
+        x = self.encoder(x)
+        x = self.decoder(x)
+        return x
 
 
 class CNN1DBackBone(nn.Module):
@@ -662,12 +735,15 @@ class FeedForward(nn.Module):
         super(FeedForward, self).__init__()
 
         # Branch for processing time series data
-        self.branch_time_series = nn.Sequential(
-            nn.Linear(t_samples, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-        )
+        # self.branch_time_series = nn.Sequential(
+        #     nn.Linear(t_samples, hidden_size),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_size, hidden_size),
+        #     nn.ReLU(),
+        # )
+
+        self.branch_time_series = LSTM_ATTN(seq_len=t_samples, hidden_size=hidden_size, num_layers=5, num_classes=out_dim,
+                 in_channels=1, predict_size=predict_size, channels=256, dropout=0.2, kernel_size=4,stride=4, image=False)
 
         # Branch for processing additional parameters
         self.branch_parameters = nn.Sequential(
@@ -679,16 +755,22 @@ class FeedForward(nn.Module):
 
         # Fully connected layers after concatenating the outputs from both branches
         self.fc = nn.Sequential(
-            nn.Linear(hidden_size + input_size_parameters, predict_size),
+            nn.Linear(predict_size + input_size_parameters, predict_size),
             nn.ReLU(),
             nn.Linear(predict_size, out_dim),
         )
 
     def forward(self, x_time_series, x_parameters):
         # print('nans before all: ', torch.any(torch.isnan(x_time_series)).item(), torch.any(torch.isnan(x_parameters)).item())
-        out_time_series = self.branch_time_series(x_time_series)
+        x_f, h_f, c_f = self.branch_time_series.feature_extractor(x_time_series, return_cell=True)
+        c_f = torch.cat([c_f[-1], c_f[-2]], dim=1)
+
+        values = self.branch_time_series.attention(c_f, x_f, x_f) 
+        out_time_series = self.branch_time_series.activation(self.branch_time_series.fc1(values))
+        # out_time_series = self.branch_time_series(x_time_series)
         out_parameters = self.branch_parameters(x_parameters)
         # Concatenate the outputs from both branches
+
         out = torch.cat((out_time_series, out_parameters), dim=1)
         # print('nans after cat: ', torch.any(torch.isnan(out)).item())
 
@@ -848,6 +930,12 @@ class InformerEncoder(nn.Module):
             return enc_out.max(dim=1).values
         enc_out = self.projection(enc_out.max(dim=1).values)
         return enc_out
+
+# class ConformerEncoder(nn.Module):
+#     def __init__(self, channels ):
+#         super(ConformerEncoder, self).__init__()
+#         self.conv = Conv2dSubampling(in_channels=1, out_channels=channels)
+
 
 class Informer(nn.Module):
     def __init__(self, enc_in, dec_in, c_out, seq_len, label_len, out_len, 
@@ -1152,67 +1240,22 @@ class TemporalConvNet(nn.Module):
 
 
 
-class ResidualNet(nn.Module):
-    def __init__(self, backbone, predict_size):
-        super(ResidualNet, self).__init__()
-        self.network = backbone
-        self.num_features = self.network.num_features
-        self.hidden2output = nn.Linear(self.num_features, predict_size)
-        self.batchnorm = nn.BatchNorm1d(predict_size)
-        self.p_head = nn.Linear(predict_size, 1)
-        self.i_head = nn.Linear(predict_size, 1)
-        self.activation = nn.GELU()
-    def forward(self, x):
-        p = analyze_lc_torch(x[:,1,:]).to(x.device).unsqueeze(-1)
-        # with torch.no_grad():
-        #     out = self.activation(self.batchnorm(self.hidden2output(self.network(x))))
-        #     p  = self.p_head(out)
-        residuals = residual_by_period(x[:,0,:].clone(), p)
-        x[:,0,:] = residuals
-        out =  self.activation(self.batchnorm(self.hidden2output(self.network(x))))
-        i = self.i_head(out)
-        return i.float()
-        # return torch.concat([i,p], dim = -1).float()
-
-
-class Autoencoder(nn.Module):
-    def __init__(self):
-        super(Autoencoder, self).__init__()
-        
-        # Encoder
-        self.encoder = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=16, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2),
-            
-            nn.Conv1d(in_channels=16, out_channels=32, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2),
-            
-            nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2),
-            
-            nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2)
-        )
-        
-        # Decoder
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose1d(in_channels=128, out_channels=64, kernel_size=2, stride=2),
-            nn.ReLU(),
-            nn.ConvTranspose1d(in_channels=64, out_channels=32, kernel_size=2, stride=2),
-            nn.ReLU(),
-            nn.ConvTranspose1d(in_channels=32, out_channels=16, kernel_size=2, stride=2),
-            nn.ReLU(),
-            nn.ConvTranspose1d(in_channels=16, out_channels=1, kernel_size=2, stride=2),
-            nn.ReLU()
-        )
-    
-    def forward(self, x):
-        encoded = self.encoder(x)
-        decoded = self.decoder(encoded)
-        return decoded
-
-    
+# class ResidualNet(nn.Module):
+#     def __init__(self, backbone, predict_size):
+#         super(ResidualNet, self).__init__()
+#         self.network = backbone
+#         self.num_features = self.network.num_features
+#         self.hidden2output = nn.Linear(self.num_features, predict_size)
+#         self.batchnorm = nn.BatchNorm1d(predict_size)
+#         self.p_head = nn.Linear(predict_size, 1)
+#         self.i_head = nn.Linear(predict_size, 1)
+#         self.activation = nn.GELU()
+#     def forward(self, x):
+#         p = analyze_lc_torch(x[:,1,:]).to(x.device).unsqueeze(-1)
+#         # with torch.no_grad():
+#         #     out = self.activation(self.batchnorm(self.hidden2output(self.network(x))))
+#         #     p  = self.p_head(out)
+#         residuals = residual_by_period(x[:,0,:].clone(), p)
+#         x[:,0,:] = residuals
+#         out =  self.activation(self.batchnorm(self.hidden2output(self.network(x))))
+#         i = self.i_head(out)

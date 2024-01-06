@@ -254,14 +254,48 @@ class moving_avg():
         self.kernel_size = kernel_size
         self.avg = torch.nn.AvgPool1d(kernel_size=kernel_size, stride=stride, padding=0)
 
-    def __call__(self, x, mask=None, info=None):
+    def __call__(self, x, mask=None, info=dict()):
         # padding on the both ends of time series
-        x = x.unsqueeze(-1).unsqueeze(0)
-        front = x[:, 0:1, :].repeat(1,(self.kernel_size - 1) // 2, 1)
-        end = x[:, -1:, :].repeat(1, (self.kernel_size - 1) // 2, 1)
-        x = torch.cat([front, x, end], dim=1)
-        x = self.avg(x.permute(0, 2, 1))
-        x = x.permute(0, 2, 1)
         info['moving_avg'] = self.kernel_size
-        return x.squeeze(), mask, info
+        if isinstance(x, np.ndarray):
+            # x = F_np.moving_avg(x, self.kernel_size)
+            # return x, mask, info
+            x = torch.from_numpy(x)
+        if len(x.shape) == 2:
+            flux = x[:,1].unsqueeze(-1).unsqueeze(0)
+        else:
+            flux = x.unsqueeze(-1).unsqueeze(0)
+        front = flux[:, 0:1, :].repeat(1,(self.kernel_size - 1) // 2, 1)
+        end = flux[:, -1:, :].repeat(1, (self.kernel_size - 1) // 2, 1)
+        flux = torch.cat([front, flux, end], dim=1)
+        flux = self.avg(flux.permute(0, 2, 1))
+        flux = flux.permute(0, 2, 1)
+        if len(x.shape) == 2:
+            x[:,1] = flux.squeeze().float()
+        else:
+            x = flux.squeeze()
+        return x.numpy(), mask, info
 
+class KeplerNoise():
+    def __init__(self, noise_dataset, max_ratio=1, min_ratio=0.5):
+        self.noise_dataset = noise_dataset
+        self.max_ratio = max_ratio
+        self.min_ratio = min_ratio
+
+    def __call__(self, x, mask=None, info=None):
+        if len(x.shape) == 2:
+            std = x[:, 1].std()
+        else:
+            std = x.std()
+        idx = np.random.randint(0, len(self.noise_dataset))
+        x_noise,_,_,noise_info = self.noise_dataset[idx]
+        noise_std = np.random.uniform(std*self.min_ratio, std*self.max_ratio)
+        x_noise = (x_noise - x_noise.mean()) / (x_noise.std() + 1e-8) *  noise_std + 1 
+        if len(x.shape) == 1:
+            x = x*x_noise.squeeze().numpy()
+        else:
+            x[:,1] = x[:,1]*x_noise.squeeze().numpy()
+        info['noise_std'] = noise_std
+        info['std'] = std
+        info['noise_KID'] = noise_info['KID']
+        return x, mask, info

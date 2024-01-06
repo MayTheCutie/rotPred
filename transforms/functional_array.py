@@ -117,3 +117,19 @@ def create_mask_1d(seq_len, mask_ratio, block_len=None, block_mode='geom', inter
         k += intervals[i]
         i += 1
     return mask
+
+def moving_avg(x, window_size):
+    """Compute moving average of x with window size."""
+    if len(x.shape) == 2:
+        flux = x[:, 1]
+    else:
+        flux = x
+    pad_width = ((window_size - 1) // 2, (window_size - 1) // 2)
+    flux = np.pad(flux, pad_width , 'constant', constant_values=(flux[0], flux[-1]))
+    cumsum = np.cumsum(np.insert(flux, 0, 0))
+    avg = (cumsum[window_size:] - cumsum[:-window_size]) / window_size
+    if len(x.shape) == 2:
+        x[:, 1] = avg
+        return x
+    else:
+        return avg

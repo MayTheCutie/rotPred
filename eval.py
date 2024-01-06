@@ -42,7 +42,12 @@ test_data_folder = "/data/butter/test2"
 
 max_p, min_p = 60, 0
 max_i, min_i = np.pi/2, 0
-max_tau,min_tau = 10,1
+min_cycle, max_cycle = 1, 10
+min_tau, max_tau = 1,10
+min_lat, max_lat = 0, 80
+
+boundary_values_dict = {'Period': (min_p, max_p), 'Inclination': (min_i, max_i),
+ 'Decay Time': (min_tau, max_tau), 'Cycle Length': (min_cycle, max_cycle), 'Spot Max': (min_lat, max_lat),}
 
 # filtered_idx = filter_p( os.path.join(data_folder, "simulation_properties.csv"), max_p)
 
@@ -287,55 +292,36 @@ def eval_model(data_dir, model, test_dl, data_folder=None, scale_target=True, sc
         plot_kepler_df(df, data_dir)
 
 
-def eval_results(output, target, conf, data_dir, model_name, cls=False, num_classes=2, only_one=False, test_df=None,
+def eval_results(output, target, conf, data_dir, model_name, cls=False, labels=['Inclination', 'Period'], num_classes=2, only_one=False, test_df=None,
                 scale_target=True, scale_output=True, kepler=False):
-
+    num_classes = len(labels) if not cls else num_classes
     if not cls:
         if scale_target:
             print("scaling target")
-            # target[:,2] = target[:,2] * (max_tau - min_tau) + min_tau
-            print('before', target[:,1], target[:,0])
-            target[:,1] = target[:,1] * (max_p - min_p) + min_p
-            target[:,0] = (target[:,0] * (max_i - min_i) + min_i)*180/np.pi
-            print('after', target[:,1], target[:,0])
-
+            for i in range(len(labels)):
+                target[:,i] = target[:,i] * (boundary_values_dict[labels[i]][1] - boundary_values_dict[labels[i]][0]) + boundary_values_dict[labels[i]][0]
             
         if scale_output:
             print("scaling output")
-            # output[:,2] = output[:,2] * (max_tau - min_tau) + min_tau
-            print('before', output[:,1], output[:,0])
-            output[:,1] = output[:,1] * (max_p - min_p)+ min_p
-            output[:,0] = (output[:,0] * (max_i - min_i)+ min_i)*180/np.pi
-            print('after', output[:,1], output[:,0])
+            for i in range(len(labels)):
+                print(labels[i], "before ", output[:,i].max(), output[:,i].min())
+                output[:,i] = output[:,i] * (boundary_values_dict[labels[i]][1] - boundary_values_dict[labels[i]][0]) + boundary_values_dict[labels[i]][0]
+                print(labels[i], "after ", output[:,i].max(), output[:,i].min())
 
+        df, diff =calc_diff(target, output, conf, test_df=test_df, cls=cls, labels=labels, num_classes=num_classes)
 
-        df, diff =calc_diff(target, output, conf, test_df=test_df, cls=cls, num_classes=num_classes)
-
-        plot_diffs(data_dir, model_name, target, output, diff, conf)
+        # plot_diffs(data_dir, model_name, target, output, diff, conf)
 
         # print("plotting results:")
-        thresholds = [0] if not len(conf) else [0,0.8,0.83, 0.85,0.87,0.88,0.89,0.9,0.91, 0.92]
-        for thresh in thresholds:
-            print('inc-thresh', thresh)
-            high_conf = np.where(1 - conf[:,0] > thresh)[0] if len(conf) else np.arange(len(target))
-            name = f'{model_name}-Inclination'
-            if len(high_conf > 1):
-                plot_results(data_dir, name, target[:,0][high_conf], output[:,0][high_conf], conf=thresh)
-        thresholds = [0] if not len(conf) else [0,0.8,0.85,0.92,0.94, 0.96, 0.98]
-        for thresh in thresholds:
-            print('period-thresh', thresh)
-            high_conf = np.where(1 - conf[:,1] > thresh)[0] if len(conf) else np.arange(len(target))
-            name = f'{model_name}-Period'
-            if len(high_conf > 1):
-                plot_results(data_dir, name, target[:,1][high_conf], output[:,1][high_conf], conf=thresh)
-            # for thresh in thresholds:
-            #     print('tau-thresh', thresh)
-            #     high_conf = np.where(1 - conf[:,2] > thresh)[0] if len(conf) else np.arange(len(target))
-            #     name = f'{model_name}-tau'
-            #     if len(high_conf > 1):
-            #         plot_results(data_dir, name, target[:,2][high_conf], output[:,2][high_conf], conf=thresh)
+        for i in range(len(labels)):            
+            thresholds = [0] if not len(conf) else [0,0.8,0.83, 0.85,0.87,0.88,0.89,0.9,0.91, 0.92, 0.94,0.96,0.98]
+            for thresh in thresholds:
+                high_conf = np.where(1 - np.abs(conf[:,i]) > thresh)[0] if len(conf) else np.arange(len(target))
+                name = f'{model_name}-{labels[i]}'
+                if len(high_conf > 1):
+                    plot_results(data_dir, name, target[:,i][high_conf], output[:,i][high_conf], conf=thresh)
         if not kepler:
-            plot_df(df, data_dir)
+            plot_df(df, data_dir, labels=labels)
         else:
             plot_kepler_df(df, data_dir)
             
@@ -361,6 +347,21 @@ def eval_results(output, target, conf, data_dir, model_name, cls=False, num_clas
             test_acc = num_correct / len(tar)
             plot_results_cls(data_dir, model_name, tar, out, test_acc, "Period")
             plot_confusion_mat(tar, out, data_dir, model_name, "Period", data_dir)
+
+
+def eval_lat_results(output, target, data_dir, model_name):
+    # out_, tar_, correct, correct_thresh, len_thresh = eval_predictions_thresholded(torch.tensor(output), torch.tensor(target))
+    # plot_thresholded_acc(correct_thresh, len_thresh, len(tar), data_dir, model_name, "Inclination")
+    # plt.close('all')
+    out, tar = np.round(output), target
+    num_correct = (out == tar).sum().item() 
+    test_acc = num_correct / len(tar)
+    print("test acc: ", test_acc)
+    # plot_results_cls(data_dir, model_name, tar, out, test_acc, "Inclinaiton")
+    # plt.close('all')
+    plot_confusion_mat(tar, out, data_dir, model_name, "Inclination", data_dir)
+    plt.close('all')
+    
 
 def eval_quantiled_results(output, target, qs, data_dir, model_name, cls=False, num_classes=2, test_df=None,
                 scale_target=True, scale_output=True, kepler=False):
@@ -468,12 +469,12 @@ def plot_results(data_dir, name, target, output, conf=''):
     plt.scatter(target, output, label=f'confidence > {conf} ({len(target)} points)')
     plt.plot(target, 0.9*target, color='red')
     plt.plot(target, 1.1*target, color='red')
-    if max(target) < 100:
-        plt.xlim(0, max(target) + 5)
-        plt.ylim(0, max(target) + 5)
-    else:
-        plt.xlim(0, 60)
-        plt.ylim(0, 60)
+    # if max(target) < 100:
+    #     plt.xlim(0, max(target) + 5)
+    #     plt.ylim(0, max(target) + 5)
+    # else:
+    #     plt.xlim(0, 60)
+    #     plt.ylim(0, 60)
     plt.title(f"{name} acc6={acc_6:.2f} acc10={acc_10:.2f} acc10p={acc_10p:.2f}, mean error(%)={mean_error:.2f}")
     plt.xlabel("True ")
     plt.ylabel("Predicted")
@@ -514,45 +515,54 @@ def plot_kepler_df(df, save_dir):
     df.to_csv(f"{save_dir}/kepler_eval.csv")
     plt.clf()
 
-def plot_df(df, save_dir):
+def plot_df(df, save_dir, labels):
     num_cols = len(df.columns)
     plt.figure(figsize=(12, 7))   
-    plt.subplot2grid((2, 4), (0, 0))
-    plt.hist(df['Period'], 20, color="C0")
-    plt.xlabel("Rotation Period (days")
-    plt.ylabel("N")
     # if "predicted period" in df.columns:
-    plt.subplot2grid((2, 4), (0, 1))
-    plt.hist(df['predicted period'], 20, color="C0")
-    plt.xlabel("Predicted Period (days")
-    plt.ylabel("N")
-    plt.subplot2grid((2, 4), (1, 0))
-    plt.hist(df['Inclination'], 20, color="C3")
-    plt.xlabel("Stellar inclincation (deg)")
-    plt.ylabel("N")
-    # if "predicted inclination" in df.columns:
-    plt.subplot2grid((2, 4), (1, 1))
-    plt.hist(df['predicted inclination'], 20, color="C3")
-    plt.xlabel("Predicted Inclination (deg)")
-    plt.ylabel("N")
+    for i in range(len(labels)):
+        row = 0 
+        col = i 
+        plt.subplot2grid((2, 4), (row, col))
+        plt.hist(df[f'predicted {labels[i]}'], 20, color="C0")
+        plt.xlabel(f"Predicted {labels[i]}")
+        plt.ylabel("N")
+        row = 1 
+        plt.subplot2grid((2, 4), (row, col))
+        plt.hist(df[f'{labels[i]}'], 20, color="C1")
+        plt.xlabel(f"True {labels[i]}")
+        plt.ylabel("N")
 
-    if num_cols > 6:
-        plt.subplot2grid((2, 4), (0, 2))
-        plt.hist(df['Decay Time'], 20, color="C1")
-        plt.xlabel("Spot lifetime (Prot)")
-        plt.ylabel("N")
-        plt.subplot2grid((2, 4), (1, 2))
-        plt.hist(df['Activity Rate'], 20, color="C4")
-        plt.xlabel("Stellar activity rate (x Solar)")
-        plt.ylabel("N")
-        plt.subplot2grid((2, 4), (0, 3))
-        plt.hist(df['Shear'], 20, color="C5")
-        plt.xlabel(r"Differential Rotation Shear $\Delta \Omega / \Omega$")
-        plt.ylabel("N")
-        plt.subplot2grid((2, 4), (1, 3))
-        plt.hist(df['Spot Max'] - df['Spot Min'], 20, color="C6")
-        plt.xlabel("Spot latitude range")
-        plt.ylabel("N")
+    # plt.subplot2grid((2, 4), (0, 1))
+    # plt.hist(df['predicted period'], 20, color="C0")
+    # plt.xlabel("Predicted Period (days")
+    # plt.ylabel("N")
+    # plt.subplot2grid((2, 4), (1, 0))
+    # plt.hist(df['Inclination'], 20, color="C3")
+    # plt.xlabel("Stellar inclincation (deg)")
+    # plt.ylabel("N")
+    # if "predicted inclination" in df.columns:
+    # plt.subplot2grid((2, 4), (1, 1))
+    # plt.hist(df['predicted inclination'], 20, color="C3")
+    # plt.xlabel("Predicted Inclination (deg)")
+    # plt.ylabel("N")
+
+    # if num_cols > 6:
+    #     plt.subplot2grid((2, 4), (0, 2))
+    #     plt.hist(df['Decay Time'], 20, color="C1")
+    #     plt.xlabel("Spot lifetime (Prot)")
+    #     plt.ylabel("N")
+    #     plt.subplot2grid((2, 4), (1, 2))
+    #     plt.hist(df['Activity Rate'], 20, color="C4")
+    #     plt.xlabel("Stellar activity rate (x Solar)")
+    #     plt.ylabel("N")
+    #     plt.subplot2grid((2, 4), (0, 3))
+    #     plt.hist(df['Shear'], 20, color="C5")
+    #     plt.xlabel(r"Differential Rotation Shear $\Delta \Omega / \Omega$")
+    #     plt.ylabel("N")
+    #     plt.subplot2grid((2, 4), (1, 3))
+    #     plt.hist(df['Spot Max'] - df['Spot Min'], 20, color="C6")
+    #     plt.xlabel("Spot latitude range")
+    #     plt.ylabel("N")
     plt.tight_layout()
     plt.savefig(f"{save_dir}/distributions.png", dpi=150)
     df.to_csv(f"{save_dir}/eval.csv")
@@ -579,6 +589,7 @@ def eval_predictions_thresholded(predictions, targets):
     return pred, target, num_correct, correct_thresh, len_thresh
         
 def plot_confusion_mat(y, y_pred, data_dir, model_name, name, save_dir):
+    print(y[:10], y_pred[:10])
     cm = confusion_matrix(y, y_pred, normalize='true')
     plt.imshow(cm, cmap=plt.cm.Blues)
     plt.xlabel("Predicted labels")
@@ -612,33 +623,38 @@ def calc_diff_and_log(model_name, target, output, test_folder,conf, kepler_df, c
     # wandb.finish()
     return df, diff
 
-def calc_diff(target, output, conf, test_df=None, cls=False, num_classes=2):
+def calc_diff(target, output, conf, test_df=None, cls=False, labels=['Inclination', 'Period'], num_classes=2):
     if test_df is not None:
         df = test_df
     else:
         df = pd.DataFrame()
-    # else:
-    #     if test_folder is not None:
-    #         df = pd.read_csv(os.path.join(test_folder, "simulation_properties.csv"))
-    #     else:
-    # df = df[df['Period'] < max_p]
-    print("in calc_diff - output shape: ", output.shape, "target shape: ", target.shape)
-    out1 = output[:,0] if not cls else np.argmax(output[:,:num_classes//2], axis=1)
-    out2 = output[:,1] if not cls else np.argmax(output[:,num_classes//2:], axis=1)
-    tar1 = target[:,0] if not cls else np.argmax(target[:,:num_classes//2], axis=1)
-    tar2 = target[:,1] if not cls else np.argmax(target[:,num_classes//2:], axis=1)
-    df['predicted inclination'] = out1
-    df['predicted period'] = out2
-    df['Inclination'] = tar1
-    df['Period'] = tar2
-    if not cls:
-        if len(conf):
-            df['inclination confidence'] = conf[:, 0]
-            df['period confidence'] = conf[:, 1]
-        diff = np.abs(output[:,:2] - target[:,:2])
-    else:
-        diff = None
+    for i in range(len(labels)):
+        df[f"predicted {labels[i]}"] = output[:,i] if not cls else np.argmax(output[:,i*num_classes:(i+1)*num_classes], axis=1)
+        df[labels[i]] = target[:,i]
+        if not cls and len(conf):
+            df[f'{labels[i]} confidence'] = conf[:,i]
+    diff = np.abs(output[:,:len(labels)] - target[:,:len(labels)]) if not cls else None
     return df,diff
+
+    # out1 = output[:,0] if not cls else np.argmax(output[:,:num_classes//2], axis=1)
+    # out2 = output[:,1] if not cls else np.argmax(output[:,num_classes//2:], axis=1)
+    # tar1 = target[:,0] if not cls else np.argmax(target[:,:num_classes//2], axis=1)
+    # tar2 = target[:,1] if not cls else np.argmax(target[:,num_classes//2:], axis=1)
+    # df['predicted inclination'] = out1
+    # df['predicted period'] = out2
+    # df['Inclination'] = tar1
+    # df['Period'] = tar2
+    # if not cls:
+    #     if len(conf):
+    #         df['inclination confidence'] = conf[:, 0]
+    #         df['period confidence'] = conf[:, 1]
+        # if output[:,0].max() <= 1:
+        #     output[:,0] = np.sin(output[:,0]) * 180/np.pi
+        #     target[:,0] = np.sin(target[:,0]) * 180/np.pi
+    #     diff = np.abs(output[:,:2] - target[:,:2])
+    # else:
+    #     diff = None
+    # return df,diff
     # table = wandb.Table(data=data, columns = ["Predicted Period (days)", "Predicted Inclination (deg)", "True Period (days)", "True Inclination (deg)"])
     # wandb.log({f"{model_name}-Period" : wandb.plot.scatter(table, "True Period (days)", "Predicted Period (days)",
     #                              title=f"{model_name}-Period acc10: {ten_perc_p}, acc20: {twenty_perc_p}")})

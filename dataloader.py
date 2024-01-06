@@ -14,15 +14,24 @@ from matplotlib import pyplot as plt
 from lightPred.utils import fill_nan_np
 from pyts.image import GramianAngularField
 from scipy.signal import stft, correlate2d
+from scipy import signal
 import time
 from scipy.signal import find_peaks, peak_prominences, peak_widths
+import torchaudio.transforms as T
 
 
-
+cad = 30
+DAY2MIN = 24*60
 min_p, max_p = 0,60
+min_lat, max_lat = 0, 80
+min_cycle, max_cycle = 1, 10
 min_i, max_i = 0, np.pi/2
 min_tau, max_tau = 1,10 
+min_n, max_n = 0, 5000
 T_SUN = 5777
+boundary_values_dict = {'Period': (min_p, max_p), 'Inclination': (min_i, max_i),
+ 'Decay Time': (min_tau, max_tau), 'Cycle Length': (min_cycle, max_cycle), 'Spot Max': (min_lat, max_lat),
+ 'n_spots': (min_n, max_n),}
 
 non_period_table_path = "/data/lightPred/Table_2_Non_Periodic.txt"
 kepler_path = "/data/lightPred/data"
@@ -345,6 +354,21 @@ class KeplerDataset(TimeSsl):
     return x.float(), masked_x.squeeze().float(), inv_mask, info
 
 
+class KeplerNoiseDataset(KeplerDataset):
+  def __init__(self, root_dir, path_list, df=None, **kwargs ):
+    super().__init__(root_dir, path_list, df=df, acf=False, norm='none', **kwargs)
+    self.samples = []
+    print(f"preparing kepler data of {len(self.df)} samples...")
+    for i in range(len(self.df)):
+      if i % 1000 == 0:
+        print(i, flush=True)
+      x, masked_x, inv_mask, info = super().__getitem__(i)
+      self.samples.append((x, masked_x, inv_mask, info))
+
+  def __getitem__(self, idx):
+    x, masked_x, inv_mask, info = self.samples[idx]
+    return x.float(), masked_x.squeeze().float(), inv_mask, info 
+
 class KeplerLabeledDataset(KeplerDataset):
   def __init__(self, root_dir, path_list, **kwargs):
       super().__init__(root_dir, path_list, **kwargs)
@@ -416,9 +440,228 @@ class DenoisingDataset(Dataset):
 
 
 class TimeSeriesDataset(Dataset):
-  def __init__(self, root_dir, idx_list, t_samples=512, norm='std', num_classes=2, transforms=None,
-                noise=False, noise_factor=4, all_labels=False):
+  def __init__(self, root_dir, idx_list, labels=['Inclination', 'Period'], t_samples=512, norm='std', transforms=None,
+                noise=False, spectrogram=False, n_fft=1000, acf=False, return_raw=False,
+                 wavelet=False, freq_rate=1, init_frac=0.4, dur=360, kep_noise=None, prepare=True):
       self.idx_list = idx_list
+      self.labels = labels
+      self.length = len(idx_list)
+      self.targets_path = os.path.join(root_dir, "simulation_properties.csv")
+      self.lc_path = os.path.join(root_dir, "simulations")
+      self.seq_len = t_samples
+      self.norm=norm
+      self.num_classes = len(labels)
+      self.transforms = transforms
+      self.noise = noise
+      self.n_fft = n_fft
+      self.spec = spectrogram
+      self.acf = acf
+      self.return_raw = return_raw
+      self.wavelet = wavelet
+      self.freq_rate = freq_rate
+      self.init_frac = init_frac
+      self.dur = dur 
+      self.kep_noise = kep_noise
+      self.maxstds = 0.159
+      self.weights = torch.ones(self.length)
+      self.samples = []
+      if prepare:
+        self.prepare_data()
+      self.prepare = prepare
+
+  def add_kepler_noise(self, x, max_ratio=1, min_ratio=0.5):
+        std = x.std()
+        idx = np.random.randint(0, len(self.kep_noise))
+        x_noise,_,_,info = self.kep_noise[idx]
+        
+        noise_std = np.random.uniform(std*min_ratio, std*max_ratio)
+        x_noise = (x_noise - x_noise.mean()) / (x_noise.std() + 1e-8) *  noise_std + 1
+        x = x*x_noise.squeeze().numpy()
+        return x
+
+  def wavelet_from_np(self, lc, wavelet=signal.morlet2,
+                        w=6,
+                        period=None,
+                        minimum_period=None,
+                        maximum_period=None,
+                        sample_rate = 30/(24*60),
+                        period_samples=512):
+        time, flux = lc[:,0], lc[:,1]
+        time -= time[0]
+        flux -= flux.mean()
+        if sample_rate is None:
+            sample_rate = 0.5 * (1./(np.nanmedian(np.diff(time))))    
+        nyquist = 0.5 * (1./sample_rate)
+
+        if period is None:
+            if minimum_period is None:
+                minimum_period = 1/nyquist
+            if maximum_period is None:
+                maximum_period = time[-1]
+            # period = np.geomspace(minimum_period, maximum_period, period_samples)
+            period = np.linspace(minimum_period, maximum_period, period_samples)
+        else:
+            if any(b is not None for b in [minimum_period, maximum_period]):
+                print(
+                    "Both `period` and at least one of `minimum_period` or "
+                    "`maximum_period` have been specified. Using constraints "
+                    "from `period`.", RuntimeWarning)
+
+        widths = w * nyquist * period / np.pi
+        cwtm = signal.cwt(flux, wavelet, widths, w=w)
+        power = np.abs(cwtm)**2 / widths[:, np.newaxis]
+        phase = np.angle(cwtm)
+        return power, phase, period
+  
+  def interpolate(self, x):
+      f = interp1d(x[:,0], x[:,1])
+      new_t = np.linspace(x[:,0][0], x[:,0][-1], self.seq_len)
+      x = np.concatenate((new_t[:,None], f(new_t)[:,None]), axis=1)
+      return x
+  
+  def create_data(self, x):
+    if self.acf:
+      xcf = A(x[:,1], nlags=int(self.dur/self.freq_rate) - 1)
+      if self.wavelet:
+        power, phase, period = self.wavelet_from_np(x, period_samples=int(self.dur/self.freq_rate))
+        gwps = power.sum(axis=-1)
+        grad = 1 + np.gradient(gwps)/(2/period)
+        x = np.vstack((grad[None], xcf[None]))
+      elif self.return_raw:
+        x = np.vstack((x[:,1][None], xcf[None]))
+      else:
+        x = xcf 
+    elif self.wavelet:
+      power, phase, period = self.wavelet_from_np(x, period_samples=int(self.dur//self.freq_rate))
+      gwps = power.sum(axis=-1)
+      grad = 1 + np.gradient(gwps)/(2/period)
+      x = grad
+    else:
+      x = x[:,1]
+    return  torch.tensor(x.astype(np.float32))
+  
+  def normalize(self, x):
+    if self.norm == 'std':
+        m = x.mean(dim=-1).unsqueeze(-1)
+        s = x.std(dim=-1).unsqueeze(-1)
+        x = (x-m)/(s+1e-8)
+    elif self.norm == 'median':
+        x /= x.median(dim=-1)
+    elif self.norm == 'minmax':
+        mn = x.min(dim=-1).values.unsqueeze(-1)
+        mx = x.max(dim=-1).values.unsqueeze(-1)
+        x = (x-mn)/(mx-mn)
+    return x
+  
+  def get_labels(self, sample_idx):
+      y = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
+      if self.labels is None:
+        return y
+      y = torch.tensor([y[label] for label in self.labels])
+      # if 'Inclination' in self.labels:
+      #    y[self.labels.index('Inclination')] = np.sin(y[self.labels.index('Inclination')])
+      for i,label in enumerate(self.labels):
+        if label in boundary_values_dict.keys():
+          y[i] = (y[i] - boundary_values_dict[label][0])/(boundary_values_dict[label][1]-boundary_values_dict[label][0])
+      
+      if len(self.labels) == 1:
+        return y.squeeze(-1).float()
+      return y.squeeze(0).squeeze(-1).float()
+
+  def get_weight(self, y, weights, counts):
+      inc = y[self.labels.index('Inclination')]*180/np.pi 
+      w = 1/(counts[(y['Inclination']*180/np.pi).astype(np.int16)] + 1e-8)
+      weights = torch.cat((weights, torch.tensor(w)), dim=0)
+      return weights
+  
+  def prepare_data(self):
+      print("loading dataset...")
+      all_inclinations = np.arange(0, 91)
+      counts = np.zeros_like(all_inclinations)
+      incl = (np.arccos(np.random.uniform(0, 1, self.length))*180/np.pi).astype(np.int16)
+      unique, unique_counts = np.unique(incl, return_counts=True)
+      counts[unique] = unique_counts
+      weights = torch.ones(0) 
+      stds = []  
+      for i in range(self.length):
+        starttime= time.time()
+        if i % 1000 == 0:
+          print(i, flush=True)
+        # try:
+        sample_idx = remove_leading_zeros(self.idx_list[i])
+        x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[i]}.pqt")).values
+        x = x[int(self.init_frac*len(x)):,:]
+        time1 = time.time()
+        if self.seq_len:
+          x = self.interpolate(x)
+        time2 = time.time()
+        if self.transforms is not None:
+          x, _, info = self.transforms(x, mask=None, info=dict())
+          info['idx'] = i
+        time3 = time.time()
+        x[:,1] = fill_nan_np(x[:,1], interpolate=True)
+        time4 = time.time()
+        x = self.create_data(x)
+        time5 = time.time()
+        y = self.get_labels(sample_idx)
+        time6 = time.time()
+        # weights = self.get_weight(y, weights, counts)
+        stds.append(x.std().item())
+        self.samples.append((x,y, info))
+
+        # print("times: ", "\nread ", time1-starttime, "\ninterpolate ", time2-time1,
+        #        "\ntransforms ", time3-time2, "\nfill nans: ", time4-time3,
+        #          "\ncreate data ", time5-time4, "\nget labels ",  time6-time5, "\ntot time: ", time6-starttime)
+        # except Exception as e:
+        #   print("Exception: ", e)
+      # self.weights = weights
+      self.maxstds = np.max(stds)
+      return
+          
+      
+      
+  def __len__(self):
+      return self.length
+  
+  def __getitem__(self, idx):
+      # s = time.time()
+      if not self.prepare:
+        info = {'idx': idx}
+        sample_idx = remove_leading_zeros(self.idx_list[idx])
+        x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values
+        # t1 = time.time()
+        x = x[int(self.init_frac*len(x)):,:]
+        if self.seq_len:
+          x = self.interpolate(x)
+        x[:,1] = fill_nan_np(x[:,1], interpolate=True)
+        # t2 = time.time()
+        if self.transforms is not None:
+          x, _, info = self.transforms(x, mask=None, info=dict())
+          info['idx'] = idx
+        # t3 = time.time()
+        x = self.create_data(x)
+        x = self.normalize(x)
+        x = x.nan_to_num(0)
+        # t4 = time.time()
+        y = self.get_labels(sample_idx)
+      else:
+        x, y, info = self.samples[idx]
+        x = self.normalize(x)
+        x = x.nan_to_num(0)
+      if self.spec:
+        spec = T.Spectrogram(n_fft=self.n_fft, win_length=4, hop_length=4)
+        x_spec = spec(x)
+        # t6 = time.time()
+        return x_spec.unsqueeze(0), y, x.float(), info
+      # print("times: ", t1-s, t2-t1, t3-t2, t4-t3, t5-t4,  "tot time: ", t5-s)
+      return x.float(), y, torch.ones_like(x), info
+  
+
+class TimeSeriesDataset2(Dataset):
+  def __init__(self, root_dir, idx_list, labels=['Inclination', 'Period'], p_norm=True, t_samples=512, norm='std', num_classes=2, transforms=None,
+                noise=False, spectrogram=False, n_fft=1000, prepare=True):
+      self.idx_list = idx_list
+      self.labels = labels
       self.length = len(idx_list)
       self.targets_path = os.path.join(root_dir, "simulation_properties.csv")
       self.lc_path = os.path.join(root_dir, "simulations")
@@ -427,60 +670,142 @@ class TimeSeriesDataset(Dataset):
       self.num_classes = num_classes
       self.transforms = transforms
       self.noise = noise
-      self.noise_factor = noise_factor
-      self.all_labels = all_labels
-      if self.noise:
-        self.non_p_df = create_kepler_df(kepler_path, non_period_table_path)
+      self.n_fft = n_fft
+      self.spec = spectrogram
+      self.p_norm = p_norm
+      self.prepare = prepare
+      self.weights = torch.ones(self.length)
+      self.samples = []
+      if prepare:
+        self.prepare_data()
       
+  def prepare_data(self):
+      print("loading dataset...")
+      all_inclinations = np.arange(0, 91)
+      counts = np.zeros_like(all_inclinations)
+      incl = (np.arcsin(np.random.uniform(0, 1, self.length))*180/np.pi).astype(np.int16)
+      unique, unique_counts = np.unique(incl, return_counts=True)
+      counts[unique] = unique_counts
+      weights = torch.zeros(0)   
+      for i in range(self.length):
+        if i % 1000 == 0:
+          print(i)
+        try:
+          sample_idx = remove_leading_zeros(self.idx_list[i])
+          x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[i]}.pqt")).values
+          x = x[int(0.4*len(x)):,:]
+          if self.seq_len:
+            f = interp1d(x[:,0], x[:,1])
+            new_t = np.linspace(x[:,0][0], x[:,0][-1], self.seq_len)
+            x = np.concatenate((new_t[:,None], f(new_t)[:,None]), axis=1)
+          x = fill_nan_np(x[:,1], interpolate=True)
+          x = torch.tensor(x.astype(np.float32))
+          
+             
+          if self.transforms is not None:
+            x, _, info = self.transforms(x, mask=None, info=dict())
+            info['idx'] = i
+          if self.norm == 'std':
+            x = ((x-x.mean())/(x.std()+1e-8))
+          elif self.norm == 'median':
+            x /= x.median()
+          elif self.norm == 'minmax':
+            x = (x-x.min())/(x.max()-x.min())
+          x = x.nan_to_num(0)
+
+          y = self.get_labels(sample_idx)
+          y = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
+          w = 1/(counts[(y['Inclination']*180/np.pi).astype(np.int16)] + 1e-8)
+          weights = torch.cat((weights, torch.tensor(w)), dim=0)
+          if self.labels is None:
+            self.samples.append((x,y))
+            return 
+          y = torch.tensor([y[label] for label in self.labels])
+          if 'Inclination' in self.labels:
+            y[self.labels.index('Inclination')] = np.sin(y[self.labels.index('Inclination')])
+          for i,label in enumerate(self.labels):
+            if label in boundary_values_dict.keys():
+              y[i] = (y[i] - boundary_values_dict[label][0])/(boundary_values_dict[label][1]-boundary_values_dict[label][0])
+          if len(self.labels) == 1:
+            y =  y.squeeze(-1).float()
+          else:
+            y = y.squeeze(0).squeeze(-1).float()
+          self.samples.append((x,y))
+        except Exception as e:
+          print("Exception: ", e)
+      # self.weights = weights
+      return
+  
   def __len__(self):
       return self.length
-  
+
   def __getitem__(self, idx):
-      info = {'idx': idx}
-      sample_idx = remove_leading_zeros(self.idx_list[idx])
-      x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values
-      # x = x[int(0.4*len(x)):,:]
-      if self.seq_len:
-        f = interp1d(x[:,0], x[:,1])
-        new_t = np.linspace(x[:,0][0], x[:,0][-1], self.seq_len)
-        x = np.concatenate((new_t[:,None], f(new_t)[:,None]), axis=1)
-      x = fill_nan_np(x[:,1], interpolate=True)
-      x = torch.tensor(x.astype(np.float32))
-
+      # s = time.time()
       
-      if self.transforms is not None:
-        x, _, info = self.transforms(x, mask=None, info=dict())
-        info['idx'] = idx
-      if self.noise:
-        x = add_kepler_noise(x, self.non_p_df, factor=self.noise_factor)
-      if self.norm == 'std':
-        x = ((x-x.mean())/(x.std()+1e-8))
-      elif self.norm == 'median':
-        x /= x.median()
-      elif self.norm == 'minmax':
-        x = (x-x.min())/(x.max()-x.min())
-      x = x.nan_to_num(0)
-      if not self.all_labels:
-        y = self.get_labels(sample_idx).squeeze(0).squeeze(-1).float()
+      info = {'idx': idx}
+      if self.prepare:
+        x, y = self.samples[idx]
       else:
-        y = self.get_all_labels(sample_idx)
+        sample_idx = remove_leading_zeros(self.idx_list[idx])
+        x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values
+        # t1 = time.time()
+        x = x[int(0.5*len(x)):,:]
+        row = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
+        if self.p_norm:
+          t, x = self.preiod_norm(x, row['Period'].values[0], 10)
+        # x = fill_nan_np(x, interpolate=True)
+        x = torch.tensor(x[:,1].astype(np.float32))
 
+        # t2 = time.time()
+        if self.transforms is not None:
+          x, _, info = self.transforms(x, mask=None, info=dict())
+          info['idx'] = idx
+        # t3 = time.time()
+        if self.noise:
+          x = add_kepler_noise(x, self.non_p_df, factor=self.noise_factor)
+        if self.norm == 'std':
+          x = ((x-x.mean())/(x.std()+1e-8))
+        elif self.norm == 'median':
+          x /= x.median()
+        elif self.norm == 'minmax':
+          x = (x-x.min())/(x.max()-x.min())
+        x = x.nan_to_num(0)
+        # t4 = time.time()
+        y = self.get_labels(sample_idx)
+      # t5 = time.time()
+      if self.spec:
+        spec = T.Spectrogram(n_fft=self.n_fft, win_length=4, hop_length=4)
+        x_spec = spec(x)
+        # t6 = time.time()
+        # print("times: ", t1-s, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5, "tot time: ", t6-s)
+        return x_spec.unsqueeze(0), y, x.float(), info
+      # print("times: ", t1-s, t2-t1, t3-t2, t4-t3, t5-t4,  "tot time: ", t5-s)
       return x.float(), y, torch.ones_like(x), info
   
-  def get_all_labels(self, sample_idx):
-    y = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
-    return y
-
   def get_labels(self, sample_idx):
       y = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
-      y = torch.tensor([y['Inclination'], y['Period'], y['Decay Time']])
-      y[1] = (y[1] - min_p)/(max_p-min_p)
-      # y[0] = (y[0] - min_i)/(max_i-min_i)
-      y[0] = np.sin(y[0])
-      y[2] = (y[2] - min_tau)/(max_tau-min_tau)
-      y = y[:self.num_classes]
-      return y
+      if self.labels is None:
+        return y
+      y = torch.tensor([y[label] for label in self.labels])
+      if 'Inclination' in self.labels:
+         y[self.labels.index('Inclination')] = np.sin(y[self.labels.index('Inclination')])
+      for i,label in enumerate(self.labels):
+        if label in boundary_values_dict.keys():
+          y[i] = (y[i] - boundary_values_dict[label][0])/(boundary_values_dict[label][1]-boundary_values_dict[label][0])
+      
+      if len(self.labels) == 1:
+        return y.squeeze(-1).float()
+      return y.squeeze(0).squeeze(-1).float()
   
+  def preiod_norm(self, lc, period, num_ps):
+    # plt.plot(lc[:,0], lc[:,1])
+    time, flux = lc[:, 0], lc[:, 1]
+    time = time - time[0]
+    new_sampling_rate = period / 1000  
+    new_time = np.arange(0, period * num_ps, new_sampling_rate)
+    new_flux = np.interp(new_time, time, flux)
+    return new_time, new_flux
+
 class TimeSeriesClassifierDataset(TimeSeriesDataset):
   def __init__(self, root_dir, idx_list, num_classes=10, **kwargs):
     super().__init__(root_dir, idx_list, **kwargs)
@@ -490,11 +815,62 @@ class TimeSeriesClassifierDataset(TimeSeriesDataset):
     y1 = quantize_tensor(y[0].unsqueeze(0), self.cls)
     y2 = quantize_tensor(y[1].unsqueeze(0), self.cls)
     return x.float(), torch.cat([y1,y2], dim=-1).float().squeeze(0)
+ 
+class CleanDataset(TimeSeriesDataset):
+  def __init__(self, root_dir, idx_list, noise_ds, transforms):
+      self.idx_list = idx_list
+      self.length = len(idx_list)
+      self.targets_path = os.path.join(root_dir, "simulation_properties.csv")
+      self.lc_path = os.path.join(root_dir, "simulations")
+      self.transforms = transforms
+      self.kep_noise = noise_ds
   
-        
+  def __getitem__(self, idx):
+      x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values
+      x = x[int(0.4*len(x)):,:]
+      x = fill_nan_np(x[:,1], interpolate=True)
+      if self.transforms is not None:
+        x, _, info = self.transforms(x, mask=None, info=dict())
+        info['idx'] = idx
+      x = torch.tensor(x.astype(np.float32))
+      x = x.nan_to_num(0)
+      x_transf = self.add_kepler_noise(x)
+      x_transf = x_transf.nan_to_num(0)
+      return x_transf.unsqueeze(-1), x.unsqueeze(-1), x.unsqueeze(-1), info
+
+  def __len__(self):
+      return self.length
+  
+
+class FourierDataset(TimeSeriesDataset):
+  def __init__(self, root_dir, idx_list, labels=['Inclination', 'Period'], n_days=512, norm='none', transforms=None):
+    super().__init__(root_dir, idx_list, labels, t_samples=None, norm=norm,  transforms=transforms)
+    
+    self.rate = 48 #samples per day
+    self.dt = 1/self.rate
+    self.time = np.arange(0, n_days, self.dt)
+    self.n = len(self.time)
+    self.n_days = n_days
+    
+  def __getitem__(self, idx):
+      x,y,_,info = super().__getitem__(idx)
+      signal_fft = np.fft.fftshift(np.fft.fft(x, self.n))
+      PSD = np.abs(signal_fft)
+      Phase = np.angle(signal_fft)
+      freq = (1 / (self.dt * self.n)) * np.arange(-self.n//2, self.n//2)
+      dc = self.n_days * self.rate // 2
+      PSD[dc] = 0
+      fft_results = PSD[dc - self.n_days:dc + self.n_days]
+      fft_phase= Phase[dc - self.n_days:dc + self.n_days]
+      x_fft = torch.tensor(np.concatenate((fft_results, fft_phase)))
+      return x_fft.float(), y, torch.ones_like(x_fft), info
+          
+
 class ACFDataset(TimeSeriesDataset):
-  def __init__(self, root_dir, idx_list, t_samples=512, norm='std', num_classes=2, return_raw=True, transforms=None):
-    super().__init__(root_dir, idx_list, t_samples, norm=norm, num_classes=num_classes, transforms=transforms)
+  def __init__(self, root_dir, idx_list, labels=['Inclination', 'Period'], t_samples=512,
+                norm='std', return_raw=True, transforms=None, kep_noise=None):
+    super().__init__(root_dir, idx_list, labels, t_samples, norm=norm,
+                      transforms=transforms, acf=False, wavelet=False, kep_noise=kep_noise, prepare=False)
     self.return_raw = return_raw
 
   def __getitem__(self, idx):
@@ -502,23 +878,25 @@ class ACFDataset(TimeSeriesDataset):
       # print(idx, sample_idx)
       try:
         x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values
-        x = x[int(0.5*len(x)):,:]
+        # x = x[int(0.5*len(x)):,:]
         info = dict()
       except Exception as e:
          print("Exception: ", e)
          return torch.zeros((2,self.seq_len)), torch.zeros((2)), torch.zeros((2,self.seq_len)), dict()
       if self.seq_len:
-          f = interp1d(x[:,0], x[:,1])
-          new_t = np.linspace(x[:,0][0], x[:,0][-1], self.seq_len)
-          x = np.concatenate((new_t[:,None], f(new_t)[:,None]), axis=1)
+          x = self.interpolate(x)
+      else:
+        x = x[:,1]
       if self.transforms is not None:
         x, _, info = self.transforms(x, mask=None, info=dict())
-      x[:,1] = fill_nan_np(x[:,1], interpolate=True)
-      xcf = A(x[:,1], nlags=len(x[:,1]))
+      if self.kep_noise:
+        x = self.add_kepler_noise(x)
+      x = fill_nan_np(x, interpolate=True)
+      xcf = A(x, nlags=len(x))
       xcf = fill_nan_np(xcf, interpolate=True)
       if np.isnan(xcf).any():
         pass
-      x = torch.tensor(x[:,1])
+      x = torch.tensor(x)
       if self.return_raw:
         x = torch.stack([x,torch.tensor(xcf)])
       else:
@@ -539,7 +917,7 @@ class ACFDataset(TimeSeriesDataset):
       
       y = super().get_labels(sample_idx)
 
-      return x.float(), torch.squeeze(y,dim=-1).float(), torch.ones_like(x), info
+      return x.float(), y, torch.ones_like(x), info
 
   
 
@@ -577,6 +955,7 @@ class ACFImageDataset(TimeSeriesDataset):
     super().__init__(root_dir, idx_list, **kwargs)
     self.lags = lags
     self.image_transform = image_transform
+    print("image transform: ", self.image_transform)
       
   def __len__(self):
       return self.length
@@ -598,23 +977,22 @@ class ACFImageDataset(TimeSeriesDataset):
         f = interp1d(x[:,0], x[:,1])
         new_t = np.linspace(x[:,0][0], x[:,0][-1], self.seq_len)
         x = np.concatenate(f(new_t)[:,None])
-      t1 = time.time()
       if self.transforms is not None:
         x, _, info = self.transforms(x, mask=None, info=dict())
-      t2 = time.time()
-      # mean = x.mean()
-      # lags = self.lags if self.lags else len(x)
-      # x = np.tile(x, (lags, 1))
-      # x_im = correlate2d(x - mean, x - mean, mode='same')
-      x_im = self.auto_correlation_2d(torch.tensor(x))
-      x_im = (x_im - x_im.min()) / (x_im.max() - x_im.min()) 
-      t3 = time.time()
+
+      x_t = fill_nan_np(x.numpy(), interpolate=True)
+      xcf = A(x_t, nlags=len(x_t))
+      xcf = torch.tensor(xcf.astype(np.float32))
+      xcf = (xcf - xcf.mean())/(xcf.std() + 1e-8)
+
+      x_im = self.auto_correlation_2d(x)
+      # x_im = (x_im - x_im.min()) / (x_im.max() - x_im.min()) 
       if self.image_transform is not None:
         x_im = self.image_transform(x_im.unsqueeze(0)) 
       x_im = x_im.nan_to_num(0)
+      xcf = xcf.nan_to_num(0)
       y = super().get_labels(sample_idx)
-
-      return x_im.float(), y.squeeze(0).squeeze(-1).float(), torch.ones_like(x_im), info
+      return x_im.float(), y.squeeze(0).squeeze(-1).float(), xcf,  info
 
 class LatDataset(TimeSeriesDataset):
   def __init__(self, root_dir, idx_list, t_samples=1024, norm='minmax', transforms=None, vocab_size=1024, mask_prob = 0.15, mask_val= -1,
@@ -664,3 +1042,52 @@ class IncDataset(TimeSeriesDataset):
     widths = peak_widths(x, peaks[highest_idx], rel_height=0.1)[0]
     ratio = prominences / widths
     return ratio.mean()
+
+class PlagDataset(ACFDataset):
+  def __init__(self, root_dir, idx_list, dur, lag_len, **kwargs):
+    super().__init__(root_dir, idx_list, **kwargs)
+    self.dur = dur
+    self.lag_len = lag_len
+    self.time = np.arange(0, self.dur, cad / DAY2MIN)
+
+  def __getitem__(self, idx):
+    sample_idx = remove_leading_zeros(self.idx_list[idx])
+    x, y, mask, info = super().__getitem__(idx)
+    # p = x[:,0]*(boundary_values_dict['Period'][1] - boundary_values_dict['Period'][0]) + boundary_values_dict['Period'][0]
+    # p = y['Period'].values[0]
+    y_df = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
+    p = y_df['Period'].values[0]
+    if self.return_raw:
+      lag1_a, lag2_a = self.find_peaks_in_lag( x[1,:], self.time, p)
+      if lag1_a is None:
+        num_channels = (self.return_raw + 1)*2
+        return torch.zeros((num_channels, self.lag_len)), y, mask, info
+      pad1 = self.lag_len - len(lag1_a)
+      pad2 = self.lag_len - len(lag2_a)
+      lag_xcf = torch.tensor(np.vstack([np.pad(lag1_a, (0, pad1)), np.pad(lag2_a, (0, pad2))]))
+      lag1, lag2 = self.find_peaks_in_lag( x[0,:], self.time, p)
+      pad1 = self.lag_len - len(lag1)
+      pad2 = self.lag_len - len(lag2)
+      lag_x = torch.tensor(np.vstack([np.pad(lag1, (0, pad1))[None], np.pad(lag2, (0, pad2))[None]]))
+      lag_x = torch.vstack([lag_x, lag_xcf])
+    else:
+      lag1, lag2 = self.find_peaks_in_lag( x[0,:], self.time, p)
+      if lag1 is None:
+        num_channels = (self.return_raw + 1)*2
+        return torch.zeros((num_channels, self.lag_len)), y, mask, info
+      pad1 = self.lag_len - len(lag1)
+      pad2 = self.lag_len - len(lag2)
+      lag_x = torch.tensor(np.vstack([np.pad(lag1, (0, pad1))[None], np.pad(lag2, (0, pad2))[None]]))
+      lag_x = torch.vstack([lag_x, lag_xcf])
+    
+    return lag_x.float(), y, mask, info
+
+  def find_peaks_in_lag(self, x, time, p):
+        peaks= find_peaks(x, prominence=0.1)[0]
+        valleys = find_peaks(-x, prominence=0.1)[0]
+        peaks_valleys = np.concatenate([peaks, valleys])
+        if len(peaks) == 0:
+            return None, None
+        first_peak = peaks[0]
+        # print(first_peak, len(x), p, p//2*DAY2MIN//(cad))
+        # p1_indices = np.arange(fi

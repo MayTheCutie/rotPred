@@ -39,11 +39,13 @@ class Trainer(object):
     A class that encapsulates the training loop for a PyTorch model.
     """
     def __init__(self, model, optimizer, criterion, train_dataloader, device, num_classes=2, scheduler=None, val_dataloader=None,
-                 optim_params=None, max_iter=np.inf, net_params=None, exp_num=None, log_path=None, exp_name=None, plot_every=None):
+                 optim_params=None, max_iter=np.inf, net_params=None, scaler=None, grad_clip=False,
+                   exp_num=None, log_path=None, exp_name=None, plot_every=None):
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
-        self.optim = optimizer
+        self.scaler = scaler
+        self.grad_clip = grad_clip
         self.num_classes = num_classes
         self.scheduler = scheduler
         self.train_dl = train_dataloader
@@ -123,8 +125,8 @@ class Trainer(object):
             global_train_loss /= torch.distributed.get_world_size()
             if torch.distributed.get_rank() == 0:  # Only perform this on the master GPU
                 # global_accuracy /= torch.distributed.get_world_size()
-                train_acc.append(global_train_accuracy.item())
-                self.logger.add_scalar('train_acc', global_train_accuracy, epoch)
+                train_acc.append(global_train_accuracy.mean().item())
+                self.logger.add_scalar('train_acc', global_train_accuracy.mean().item(), epoch)
 
 
             v_loss, v_acc = self.eval_epoch(device, epoch=epoch, only_p=only_p, plot=plot, conf=conf)
@@ -138,20 +140,20 @@ class Trainer(object):
             if torch.distributed.get_rank() == 0:  # Only perform this on the master GPU
                 # global_accuracy /= torch.distributed.get_world_size()
                 # print("global_val_accuracy: ", global_val_accuracy)
-                val_acc.append(global_val_accuracy.item())
-                self.logger.add_scalar('validation_acc', global_val_accuracy, epoch)
+                val_acc.append(global_val_accuracy.mean().item())
+                self.logger.add_scalar('validation_acc', global_val_accuracy.mean().item(), epoch)
 
                 if self.scheduler is not None:
                     self.scheduler.step(global_val_loss)
                 criterion = min_loss if best == 'loss' else best_acc
                 mult = 1 if best == 'loss' else -1
-                objective = global_val_loss if best == 'loss' else global_val_accuracy
+                objective = global_val_loss if best == 'loss' else global_val_accuracy.mean()
                 if mult*objective < mult*criterion:
                     print("saving model...")
                     if best == 'loss':
                         min_loss = global_val_loss
                     else:
-                        best_acc = global_val_accuracy
+                        best_acc = global_val_accuracy.mean()
                     torch.save(self.model.state_dict(), f'{self.log_path}/exp{self.exp_num}/{self.exp_name}.pth')
                     self.best_state_dict = self.model.state_dict()
                     epochs_without_improvement = 0
@@ -161,7 +163,7 @@ class Trainer(object):
                         print('early stopping!', flush=True)
                         break
 
-                print(f'Epoch {epoch}: Train Loss: {global_train_loss:.6f}, Val Loss: {global_val_loss:.6f}, Train Acc: {global_train_accuracy:.6f}, Val Acc: {global_val_accuracy:.6f}, Time: {time.time() - start_time:.2f}s')
+                print(f'Epoch {epoch}: Train Loss: {global_train_loss:.6f}, Val Loss: {global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, Val Acc: {global_val_accuracy.round(decimals=4).tolist()}, Time: {time.time() - start_time:.2f}s')
 
                 if epoch % 10 == 0:
                     print(os.system('nvidia-smi'))
@@ -183,14 +185,17 @@ class Trainer(object):
         self.model.train()
         train_loss = []
         train_acc = 0
-        train_acc2 = 0
-        for i, (x, y,_,_) in enumerate(self.train_dl):
+        all_accs = torch.zeros(self.num_classes, device=device)
+        pbar = tqdm(self.train_dl)
+        for i, (x, y,_,_) in enumerate(pbar):
             x = x.to(device)
             y = y.to(device)
             self.optimizer.zero_grad()
             y_pred = self.model(x.float())
+            if len(y.shape) == 1:
+                y = y.unsqueeze(1)
             if conf:
-                y_pred, conf_pred = y_pred[:, :2], y_pred[:, 2:]
+                y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:].abs()
                 conf_y = torch.abs(y - y_pred) 
             # print(f"inclination range: {y_pred[:,1].min()} - {y_pred[:,1].max()}")
             # print(f"true y: {y[:10,:]}")
@@ -208,12 +213,15 @@ class Trainer(object):
             self.optimizer.step()
             train_loss.append(loss.item())
             diff = torch.abs(y_pred - y)
-            train_acc += (diff[:,0] < (y[:,0]/10)).sum().item() 
+            train_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
+            all_acc = (diff < (y/10)).sum(0)
+            pbar.set_description(f"train_acc: {all_acc}, train_loss:  {loss.item()}") 
+            all_accs = all_accs + all_acc
             
             # mean_acc = (diff[:,0]/(y[:,0])).sum().item()
             # train_acc2 += (diff[:,self.num_classes-1] < y[:,self.num_classes-1]/10).sum().item()
         print("number of train_accs: ", train_acc)
-        return train_loss, train_acc/len(self.train_dl.dataset)
+        return train_loss, all_accs/len(self.train_dl.dataset)
 
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
         """
@@ -222,15 +230,20 @@ class Trainer(object):
         self.model.eval()
         val_loss = []
         val_acc = 0
-        val_acc2 = 0
-        for i,(x, y,_,_) in enumerate(self.val_dl):
+        all_accs = torch.zeros(self.num_classes, device=device)
+        pbar = tqdm(self.val_dl)
+        for i,(x, y,_,_) in enumerate(pbar):
             x = x.to(device)
             y = y.to(device)
+            if len(y.shape) == 1:
+                y = y.unsqueeze(1)
             with torch.no_grad():
                 y_pred = self.model(x)
                 if conf:
-                    y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+                    y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:].abs()
                     conf_y = torch.abs(y - y_pred)
+                else:
+                    conf_pred = torch.ones_like(y_pred)
             loss = self.criterion(y_pred, y) if not only_p else self.criterion(y_pred, y[:, 0])
             if conf:
                 loss += self.criterion(conf_pred, conf_y)
@@ -240,9 +253,10 @@ class Trainer(object):
             diff = torch.abs(y_pred - y)
             # print("diff: ", diff.shape, "y: ", y.shape)
             val_acc += (diff[:,0] < (y[:,0]/10)).sum().item()  
-            val_acc2 += (diff[:,self.num_classes-1] < y[:,self.num_classes-1]/10).sum().item()
-        print("number of val_acc: ", val_acc, val_acc2)
-        return val_loss, val_acc/len(self.val_dl.dataset)
+            all_acc = (diff < (y/10)).sum(0)
+            pbar.set_description(f"val_acc: {all_acc}, val_loss:  {loss.item()}")
+            all_accs = all_accs + all_acc
+        return val_loss, all_accs/len(self.val_dl.dataset)
 
     def load_best_model(self, to_ddp=True, from_ddp=True):
         data_dir = f'{self.log_path}/exp{self.exp_num}'
@@ -286,6 +300,107 @@ class Trainer(object):
             x = x.to(device)
             with torch.no_grad():
                 y_pred = self.model(x)
+                # print(i, " y_pred: ", y_pred.shape, "y: ", y.shape)
+                if conf:
+                    y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+            preds = np.concatenate((preds, y_pred.cpu().numpy()))
+            if y.shape[1] == self.num_classes:
+                targets = np.concatenate((targets, y.cpu().numpy()))
+            if conf:
+                confs = np.concatenate((confs, conf_pred.cpu().numpy()))
+        print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
+        return preds, targets, confs
+    
+class DoubleInputTrainer(Trainer):
+    def __init__(self, num_classes=2, **kwargs):
+        super().__init__(**kwargs)
+        self.num_classes = num_classes
+    def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
+        """
+        Trains the model for one epoch.
+        """
+        self.model.train()
+        train_loss = []
+        train_acc = 0
+        all_accs = torch.zeros(self.num_classes, device=device)
+        pbar = tqdm(self.train_dl)
+        for i, (x1,y, x2,_) in enumerate(pbar):
+            x1 = x1.to(device)
+            x2 = x2.to(device)
+            y = y.to(device)
+            self.optimizer.zero_grad()
+            y_pred = self.model(x1.float(), x2.float())
+            if conf:
+                y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+                conf_y = torch.abs(y - y_pred) 
+            loss = self.criterion(y_pred, y) if not only_p else self.criterion(y_pred, y[:, 0])
+            if conf:
+                loss += self.criterion(conf_pred, conf_y)
+            if self.logger is not None:
+                self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
+                self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
+            # print("loss: ", loss, "y_pred: ", y_pred, "y: ", y)
+            loss.backward()
+            self.optimizer.step()
+            train_loss.append(loss.item())
+            diff = torch.abs(y_pred - y)
+            train_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
+            all_acc = (diff < (y/10)).sum(0)
+            all_accs = all_accs + all_acc
+            # pbar.set_description(f"train_acc: {all_acc}, train_loss:  {loss.item()}")
+        return train_loss, (all_accs/len(self.train_dl.dataset)).mean(axis=-1)
+
+    def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
+        """
+        Evaluates the model for one epoch.
+        """
+        self.model.eval()
+        val_loss = []
+        val_acc = 0
+        all_accs = torch.zeros(self.num_classes, device=device)
+        pbar = tqdm(self.val_dl)
+        for i,(x1,y,x2,_) in enumerate(pbar):
+            x1 = x1.to(device)
+            x2 = x2.to(device)
+            y = y.to(device)
+            with torch.no_grad():
+                y_pred = self.model(x1.float().squeeze(), x2.float().squeeze())
+                if conf:
+                    y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+                    conf_y = torch.abs(y - y_pred)
+            loss = self.criterion(y_pred, y) if not only_p else self.criterion(y_pred, y[:, 0])
+            if conf:
+                loss += self.criterion(conf_pred, conf_y)
+            if self.logger is not None:
+                self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
+            val_loss.append(loss.item())
+            diff = torch.abs(y_pred - y)
+            # print("diff: ", diff.shape, "y: ", y.shape)
+            val_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
+            all_acc = (diff < (y/10)).sum(0)
+            pbar.set_description(f"val_loss:  {loss.item()}")
+            all_accs = all_accs + all_acc  
+        return val_loss, (all_accs/len(self.val_dl.dataset)).mean(axis=-1)
+
+    def predict(self, test_dataloader, device, conf=True, only_p=False, load_best=False):
+        """
+        Returns the predictions of the model on the given dataset.
+        """
+        if self.best_state_dict is not None:
+            self.model.load_state_dict(self.best_state_dict)
+        if load_best:
+            self.load_best_model(from_ddp=False)
+        self.model.eval()
+        preds = np.zeros((0, self.num_classes))
+        targets = np.zeros((0, self.num_classes))
+        confs = np.zeros((0, self.num_classes))
+        tot_kic = []
+        tot_teff = []
+        for i,(x1,y,x2,_) in enumerate(test_dataloader):
+            x1 = x1.to(device)
+            x2 = x2.to(device)
+            with torch.no_grad():
+                y_pred = self.model(x1.float(), x2.float())
                 # print(i, " y_pred: ", y_pred.shape, "y: ", y.shape)
                 if conf:
                     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
@@ -397,39 +512,67 @@ class KeplerTrainer(Trainer):
         return preds, targets, confs, tot_kic, tot_teff, tot_r, tot_g
 
 
-class QuantileTrainer(Trainer):
+class Trainer2(Trainer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
     def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
         """
         Trains the model for one epoch.
+        
         """
         self.model.train()
         train_loss = []
         train_acc = 0
-        train_acc2 = 0
-        for i, (x, y,_,_) in enumerate(self.train_dl):
+        all_accs = torch.zeros(self.num_classes, device=device)
+        pbar = tqdm(self.train_dl)
+        for i, (x, y,_,_) in enumerate(pbar):
             x = x.to(device)
             y = y.to(device)
-            self.optimizer.zero_grad()
             y_pred = self.model(x.float())
-            
-            loss1 = self.criterion(y_pred[:,0,:], y[:,0])
-            loss2 = self.criterion(y_pred[:,1,:], y[:,1])
-            loss = loss1 + loss2
+            if len(y.shape) == 1:
+                y = y.unsqueeze(1)
+            if conf:
+                y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:].abs()
+                conf_y = torch.abs(y - y_pred) 
+            # print(f"inclination range: {y_pred[:,1].min()} - {y_pred[:,1].max()}")
+            # print(f"true y: {y[:10,:]}")
+            # print(f"pred y: {y_pred[:10,:]}")
+
+            # print("y_pred: ", y_pred.shape, "y: ", y.shape, conf)
+            loss = self.criterion(y_pred, y) if not only_p else self.criterion(y_pred, y[:, 0])
+            if conf:
+                loss += self.criterion(conf_pred, conf_y)
             if self.logger is not None:
                 self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
                 self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
             # print("loss: ", loss, "y_pred: ", y_pred, "y: ", y)
-            loss.backward()
-            self.optimizer.step()
+            
+            self.optimizer.zero_grad()
+            if self.scaler is not None:
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self.optimizer)
+            else:
+                loss.backward()
+            if self.grad_clip:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1)
+            if self.scaler is not None:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                self.optimizer.step()
+            self.scheduler.step()
+
             train_loss.append(loss.item())
-            diff = torch.abs(y_pred[...,len(self.quantiles)//2] - y)
-            train_acc += (diff[:,0] < (y[:,0]/10)).sum().item() 
+            diff = torch.abs(y_pred - y)
+            train_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
+            all_acc = (diff < (y/10)).sum(0)
+            pbar.set_description(f"train_acc: {all_acc}, train_loss:  {loss.item()}") 
+            all_accs = all_accs + all_acc
+            
             # mean_acc = (diff[:,0]/(y[:,0])).sum().item()
             # train_acc2 += (diff[:,self.num_classes-1] < y[:,self.num_classes-1]/10).sum().item()
         print("number of train_accs: ", train_acc)
-        return train_loss, train_acc/len(self.train_dl.dataset)
+        return train_loss, all_accs/len(self.train_dl.dataset)
 
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
         """
@@ -438,25 +581,33 @@ class QuantileTrainer(Trainer):
         self.model.eval()
         val_loss = []
         val_acc = 0
-        val_acc2 = 0
-        for i,(x, y,_,_) in enumerate(self.val_dl):
+        all_accs = torch.zeros(self.num_classes, device=device)
+        pbar = tqdm(self.val_dl)
+        for i,(x, y,_,_) in enumerate(pbar):
             x = x.to(device)
             y = y.to(device)
+            if len(y.shape) == 1:
+                y = y.unsqueeze(1)
             with torch.no_grad():
                 y_pred = self.model(x)
-                
-            loss1 = self.criterion(y_pred[:,0,:], y[:,0])
-            loss2 = self.criterion(y_pred[:,1,:], y[:,1])
-            loss = loss1 + loss2 
-
+                if conf:
+                    y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:].abs()
+                    conf_y = torch.abs(y - y_pred)
+                else:
+                    conf_pred = torch.ones_like(y_pred)
+            loss = self.criterion(y_pred, y) if not only_p else self.criterion(y_pred, y[:, 0])
+            if conf:
+                loss += self.criterion(conf_pred, conf_y)
             if self.logger is not None:
                 self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
             val_loss.append(loss.item())
-            diff = torch.abs(y_pred[...,len(self.quantiles)//2] - y)
+            diff = torch.abs(y_pred - y)
+            # print("diff: ", diff.shape, "y: ", y.shape)
             val_acc += (diff[:,0] < (y[:,0]/10)).sum().item()  
-            val_acc2 += (diff[:,self.num_classes-1] < y[:,self.num_classes-1]/10).sum().item()
-        print("number of val_acc: ", val_acc, val_acc2)
-        return val_loss, val_acc/len(self.val_dl.dataset)
+            all_acc = (diff < (y/10)).sum(0)
+            pbar.set_description(f"val_acc: {all_acc}, val_loss:  {loss.item()}")
+            all_accs = all_accs + all_acc
+        return val_loss, all_accs/len(self.val_dl.dataset)
 
     def predict(self, test_dataloader, device, conf=True, load_best=False):
         """
@@ -851,70 +1002,83 @@ class EncoderTrainer(Trainer):
         return preds, targets
 
 class EncoderDecoderTrainer(Trainer):
-    def __init__(self, recon_loss, alpha=0.1, **kwargs):
+    def __init__(self, recon_loss, alpha=0.5, **kwargs):
         super().__init__(**kwargs)
         self.recon_loss = recon_loss
         self.alpha = alpha
 
 
-    def train_epoch(self, device, epoch=None, only_p=False ,plot=False):
+    def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
         """
         Trains the model for one epoch.
         """
         self.model.train()
-        train_loss = 0
+        train_loss = []
         train_acc = 0
-        for x, y  in self.train_dl:
-            x, y = x.to(device), y.to(device)
+        pbar = tqdm(self.train_dl)
+        for x, y,_,_  in pbar:
+            x, y= x.to(device), y.to(device)
             self.optimizer.zero_grad()
-            y_pred, logits = self.model(x, return_logits=True)
-            loss_pred = self.criterion(y_pred, y)
+            y_pred = self.model(x)
+            y_std = torch.std(y.squeeze(), dim=1)
+            y_pred_std = torch.std(y_pred.squeeze(), dim=1)
+            # y_pred_std = torch.masked_select(y_pred_std, ~torch.isnan(y_pred_std))
+            # y_std = torch.masked_select(y_std, ~torch.isnan(y_pred_std))
+            # print("is nan: ", torch.any(torch.isnan(y_pred_std)).item(), torch.any(torch.isnan(y_std)).item())
+            # print("y_pred_std: ", y_pred_std.shape, "y_std: ", y_std.shape, "y: ", y.shape, "y_pred: ", y_pred.shape)
+            # print(y_pred.squeeze().shape, y.squeeze().shape)
+            loss_pred = self.criterion(y_pred.squeeze(), y.squeeze())
+            loss_std = self.criterion(y_pred_std, y_std)
             x_norm = x[:,0,:] / x[:,0,:].max(dim=-1).values.unsqueeze(-1)
-            logits = logits.argmax(dim=-1)
-            logits_norm = logits / logits.max(dim=-1).values.unsqueeze(-1)
-            loss_recon = self.recon_loss(logits_norm, x_norm)
+            # logits = logits.argmax(dim=-1)
+            # logits_norm = logits / logits.max(dim=-1).values.unsqueeze(-1)
+            # loss_recon = self.recon_loss(logits_norm, x_norm)
             # loss = loss_pred + self.alpha * loss_recon
-            loss = loss_pred
+            loss = loss_pred + self.alpha * loss_std
             loss.backward()
             self.optimizer.step()
             if plot:
                 self.plot_pred_vs_true(y_pred.cpu().detach().numpy(), y.cpu().detach().numpy(), epoch=epoch)
+            pbar.set_description(f"train_loss:  {loss.item()}")
 
             # acc_i = (y_pred[:,self.num_classes:].argmax(dim=1) == y[:,self.num_classes:].argmax(dim=1)).sum().item()
             # print(f"train - acc_p: {acc_p}, acc_i: {acc_i}")
             # acc = (acc_p + acc_i) / 2
-            train_loss += loss.item()
+            train_loss.append(loss.item())
             diff = torch.abs(y_pred - y)
             train_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
         print("number of train_acc: ", train_acc)
-        return train_loss/len(self.train_dl), train_acc/len(self.train_dl.dataset) 
+        return train_loss, train_acc/len(self.train_dl.dataset) 
     
-    def eval_epoch(self, device, epoch=None, only_p=False ,plot=False):
+    def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
         """
         Evaluates the model for one epoch.
         """
         self.model.eval()
-        val_loss = 0
+        val_loss = []
         val_acc = 0
-        for x, y in self.val_dl:
-            x, y = x.to(device), y.to(device)
+        for x, y,_,_ in self.val_dl:
+            x, y= x.to(device), y.to(device)
             with torch.no_grad():
-                y_pred, logits = self.model(x, return_logits=True)
-            loss_pred = self.criterion(y_pred, y)
-            loss_recon = self.recon_loss(logits.argmax(dim=-1), x[:,0,:])
+                y_pred = self.model(x)
+            loss_pred = self.criterion(y_pred.squeeze(), y.squeeze())
+            y_std = torch.std(y.squeeze(), dim=1)
+            y_pred_std = torch.std(y_pred.squeeze(), dim=1)
+            loss_std = self.criterion(y_pred_std, y_std)
+            # loss_recon = self.recon_loss(logits.argmax(dim=-1), x[:,0,:])
             # print(f"val - loss_pred: {loss_pred}, loss_recon: {loss_recon}")
             # loss = loss_pred + self.alpha * loss_recon
-            loss = loss_pred
+            loss = loss_pred + self.alpha * loss_std
             if plot:
                 self.plot_pred_vs_true(y_pred.cpu().detach().numpy(), y.cpu().detach().numpy(), epoch=epoch, data='val')
             
-            acc = (y_pred.argmax(dim=1) == y.argmax(dim=1)).sum().item()
+            # acc = (y_pred.argmax(dim=1) == y.argmax(dim=1)).sum().item()
             # acc_i = (y_pred[:,self.num_classes:].argmax(dim=1) == y[:,self.num_classes:].argmax(dim=1)).sum().item()
-            val_loss += loss.item()
+            val_loss.append(loss.item())
             diff = torch.abs(y_pred - y)
             val_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
         print("number of val_acc: ", val_acc)
-        return val_loss/len(self.val_dl), val_acc/len(self.val_dl.dataset)
+        return val_loss, val_acc/len(self.val_dl.dataset)
     
     def predict(self, test_dl, device):
         """
@@ -925,7 +1089,7 @@ class EncoderDecoderTrainer(Trainer):
         self.model.eval()
         preds = np.zeros((0, 2))
         targets = np.zeros((0, 2))
-        for x, y in test_dl:
+        for x, y,_,_ in test_dl:
             x = x.to(device)
             with torch.no_grad():
                 y_pred, _ = self.model(x, return_logits=True)
