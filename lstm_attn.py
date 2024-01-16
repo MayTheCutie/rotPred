@@ -50,7 +50,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 85
+exp_num = 80
 
 
 log_path = '/data/logs/lstm_attn'
@@ -152,17 +152,21 @@ if __name__ == '__main__':
     # transform_train = Compose([ AddGaussianNoise(sigma=0.005),
     #                     ])
 
-    transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)), KeplerNoise(noise_ds, min_ratio=0.02, max_ratio=0.05),
+    transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
+                          KeplerNoise(noise_ds, min_ratio=0.02, max_ratio=0.05),
+                          KeplerNoiseAddition(noise_ds),
      moving_avg(49), Detrend()])
-    test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)), KeplerNoise(noise_ds, min_ratio=0.02, max_ratio=0.05),
+    test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
+                            KeplerNoise(noise_ds, min_ratio=0.02, max_ratio=0.05, warmup=0),
+                            KeplerNoiseAddition(noise_ds),
      moving_avg(49), Detrend()])
 
     train_dataset = TimeSeriesDataset(data_folder, train_list, transforms=transform,
-    init_frac=0.4, acf=True, prepare=True, dur=dur)
+    init_frac=0.2, acf=True, prepare=True, dur=dur)
     val_dataset = TimeSeriesDataset(data_folder, val_list,  transforms=transform,
-     init_frac=0.4, acf=True, prepare=True, dur=dur)
+     init_frac=0.2, acf=True, prepare=True, dur=dur)
     test_dataset = TimeSeriesDataset(test_folder, test_idx_list, transforms=transform,
-    init_frac=0.4, acf=True, prepare=True, dur=dur)
+    init_frac=0.2, acf=True, prepare=True, dur=dur)
 
     # train_weights = train_dataset.weights
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
@@ -195,9 +199,9 @@ if __name__ == '__main__':
 
    
 
-    # model, net_params, _ = load_model(f'{log_path}/exp77', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
+    model, net_params, _ = load_model(f'{log_path}/exp77', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
     
-    model = LSTM_ATTN(**net_params)
+    # model = LSTM_ATTN(**net_params)
     # model = Informer(**net_params)
 
     model = model.to(local_rank)

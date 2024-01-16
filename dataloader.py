@@ -463,6 +463,7 @@ class TimeSeriesDataset(Dataset):
       self.dur = dur 
       self.kep_noise = kep_noise
       self.maxstds = 0.159
+      self.step = 0
       self.weights = torch.zeros(self.length)
       self.samples = []
       if prepare:
@@ -634,7 +635,7 @@ class TimeSeriesDataset(Dataset):
         if self.seq_len:
           x = self.interpolate(x)
         if self.transforms is not None:
-          x, _, info = self.transforms(x, mask=None, info=dict())
+          x, _, info = self.transforms(x, mask=None, info=dict(), step=self.step)
           info['idx'] = idx
         x[:,1] = fill_nan_np(x[:,1], interpolate=True)
         # t2 = time.time()
@@ -644,6 +645,7 @@ class TimeSeriesDataset(Dataset):
         x = x.nan_to_num(0)
         # t4 = time.time()
         y = self.get_labels(sample_idx)
+        self.step += 1
       else:
         x, y, info = self.samples[idx]
         x = self.normalize(x)
