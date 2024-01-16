@@ -50,7 +50,8 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 79
+exp_num = 85
+
 
 log_path = '/data/logs/lstm_attn'
 if not os.path.exists(f'{log_path}/exp{exp_num}'):
@@ -108,13 +109,13 @@ if __name__ == '__main__':
     net_params = {
         'dropout': 0.35,
         'hidden_size': 64,
-        'image': false,
-        'in_channels': 1
-        'kernel_size': 4
-        'num_classes': len(class_labels)*2
-        'num_layers': 5
-        'predict_size': 128
-        'seq_len': int(dur/cad*DAY2MIN)
+        'image': False,
+        'in_channels': 1,
+        'kernel_size': 4,
+        'num_classes': len(class_labels)*2,
+        'num_layers': 5,
+        'predict_size': 128,
+        'seq_len': int(dur/cad*DAY2MIN),
         'stride': 4}
     # 'num_att_layers':2,
     # 'n_heads': 4,}
@@ -142,7 +143,7 @@ if __name__ == '__main__':
     kepler_df = kepler_df[kepler_df['number_of_quarters']==4]
     kep_transform = Compose([RandomCrop(int(dur/cad*DAY2MIN))])
     merged_df = pd.merge(kepler_df, non_ps, on='KID', how='inner')
-    noise_ds = KeplerNoiseDataset(kepler_data_folder, path_list=None, df=merged_df,
+    noise_ds = KeplerDataset(kepler_data_folder, path_list=None, df=merged_df,
     transforms=kep_transform, acf=False, norm='none')
     
     if torch.distributed.get_rank() == 0:
@@ -151,21 +152,21 @@ if __name__ == '__main__':
     # transform_train = Compose([ AddGaussianNoise(sigma=0.005),
     #                     ])
 
-    transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)), KeplarNoise(noise_ds, min_ratio=0.1, max_ratio=0.5),
+    transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)), KeplerNoise(noise_ds, min_ratio=0.02, max_ratio=0.05),
      moving_avg(49), Detrend()])
-    test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)), KeplarNoise(noise_ds, min_ratio=0.1, max_ratio=0.5),
+    test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)), KeplerNoise(noise_ds, min_ratio=0.02, max_ratio=0.05),
      moving_avg(49), Detrend()])
 
     train_dataset = TimeSeriesDataset(data_folder, train_list, transforms=transform,
     init_frac=0.4, acf=True, prepare=True, dur=dur)
-    val_dataset = CleanDataset(data_folder, val_list,  transforms=transform,
+    val_dataset = TimeSeriesDataset(data_folder, val_list,  transforms=transform,
      init_frac=0.4, acf=True, prepare=True, dur=dur)
-    test_dataset = CleanDataset(test_folder, test_idx_list, transforms=transform,
+    test_dataset = TimeSeriesDataset(test_folder, test_idx_list, transforms=transform,
     init_frac=0.4, acf=True, prepare=True, dur=dur)
 
-    train_weights = train_dataset.weights()
-    train_sampler_weighted = DistributedSamplerWrapper(sampler=WeightedRandomSampler(train_weights, len(train_weights)),
-                                                num_replicas=world_size, rank=rank)    train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler,\
+    # train_weights = train_dataset.weights
+    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+    train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler,\
                                                   num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True) 
 
     val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
@@ -175,6 +176,7 @@ if __name__ == '__main__':
 
     test_dataloader = DataLoader(test_dataset, batch_size=b_size, \
                                   num_workers=int(os.environ["SLURM_CPUS_PER_TASK"])) 
+
 
     print("dataset length: ", len(train_dataset), len(val_dataset), len(test_dataset))
 
@@ -193,7 +195,7 @@ if __name__ == '__main__':
 
    
 
-    # model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
+    # model, net_params, _ = load_model(f'{log_path}/exp77', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
     
     model = LSTM_ATTN(**net_params)
     # model = Informer(**net_params)
@@ -216,7 +218,7 @@ if __name__ == '__main__':
     optimizer = optim.AdamW(model.parameters(), **optim_params)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=40, verbose=True, factor=0.1)
 
-    data_dict = {'dataset': train_dataset.__class__.__name__, 'transforms': transform, 'batch_size': b_size,
+    data_dict = {'dataset': train_dataset.__class__.__name__, 'transforms': str(transform), 'batch_size': b_size,
      'num_epochs':num_epochs, 'checkpoint_path': f'{log_path}/exp{exp_num}', 'loss_fn': loss_fn.__class__.__name__,
      'model': model.module.__class__.__name__, 'optimizer': optimizer.__class__.__name__,
      'data_folder': data_folder, 'test_folder': test_folder, }
@@ -249,6 +251,7 @@ if __name__ == '__main__':
 
     eval_results(preds, targets, confs, labels=class_labels, data_dir=f'{log_path}/exp{exp_num}', model_name=model.module.__class__.__name__,
      num_classes=net_params['num_classes']//2)
+
 
 
     # eval_model(f'{log_path}/exp{exp_num}',model=LSTM_ATTN, test_dl=val_dataloader,

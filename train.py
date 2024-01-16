@@ -187,7 +187,7 @@ class Trainer(object):
         train_acc = 0
         all_accs = torch.zeros(self.num_classes, device=device)
         pbar = tqdm(self.train_dl)
-        for i, (x, y,_,_) in enumerate(pbar):
+        for i, (x, y,_,info) in enumerate(pbar):
             x = x.to(device)
             y = y.to(device)
             self.optimizer.zero_grad()
@@ -217,7 +217,7 @@ class Trainer(object):
             all_acc = (diff < (y/10)).sum(0)
             pbar.set_description(f"train_acc: {all_acc}, train_loss:  {loss.item()}") 
             all_accs = all_accs + all_acc
-            
+            # self.train_dl.dataset.step += 1 # for noise addition
             # mean_acc = (diff[:,0]/(y[:,0])).sum().item()
             # train_acc2 += (diff[:,self.num_classes-1] < y[:,self.num_classes-1]/10).sum().item()
         print("number of train_accs: ", train_acc)
@@ -333,9 +333,15 @@ class DoubleInputTrainer(Trainer):
             if conf:
                 y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
                 conf_y = torch.abs(y - y_pred) 
+                
+            y_std = torch.std(y.squeeze(), dim=1)
+            y_pred_std = torch.std(y_pred.squeeze(), dim=1)
             loss = self.criterion(y_pred, y) if not only_p else self.criterion(y_pred, y[:, 0])
             if conf:
                 loss += self.criterion(conf_pred, conf_y)
+                
+            loss_std = self.criterion(y_pred_std, y_std)
+            loss = loss + 0.5 * loss_std
             if self.logger is not None:
                 self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
                 self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
@@ -368,9 +374,14 @@ class DoubleInputTrainer(Trainer):
                 if conf:
                     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
                     conf_y = torch.abs(y - y_pred)
+            y_std = torch.std(y.squeeze(), dim=1)
+            y_pred_std = torch.std(y_pred.squeeze(), dim=1)
             loss = self.criterion(y_pred, y) if not only_p else self.criterion(y_pred, y[:, 0])
             if conf:
                 loss += self.criterion(conf_pred, conf_y)
+                
+            loss_std = self.criterion(y_pred_std, y_std)
+            loss = loss + 0.5 * loss_std
             if self.logger is not None:
                 self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
             val_loss.append(loss.item())
@@ -493,7 +504,6 @@ class KeplerTrainer(Trainer):
 
         print("len test_dataloader: ", len(test_dataloader))
         for i,(x, y,_,info) in enumerate(test_dataloader):
-            print(i)
             x = x.to(device)
             with torch.no_grad():
                 y_pred = self.model(x)
@@ -1029,11 +1039,6 @@ class EncoderDecoderTrainer(Trainer):
             # print(y_pred.squeeze().shape, y.squeeze().shape)
             loss_pred = self.criterion(y_pred.squeeze(), y.squeeze())
             loss_std = self.criterion(y_pred_std, y_std)
-            x_norm = x[:,0,:] / x[:,0,:].max(dim=-1).values.unsqueeze(-1)
-            # logits = logits.argmax(dim=-1)
-            # logits_norm = logits / logits.max(dim=-1).values.unsqueeze(-1)
-            # loss_recon = self.recon_loss(logits_norm, x_norm)
-            # loss = loss_pred + self.alpha * loss_recon
             loss = loss_pred + self.alpha * loss_std
             loss.backward()
             self.optimizer.step()

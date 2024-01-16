@@ -195,8 +195,8 @@ class TimeSsl(Dataset):
               x_tot = np.concatenate((x_tot, np.array(x)))
           x = torch.tensor(x_tot/x_tot.max())
           self.cur_len = len(x)
-        except TypeError as e:
-            print("TypeError: ", e)
+        except (TypeError,OSError)  as e:
+            print("Error: ", e)
             x, meta = torch.zeros((self.cur_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
         return x, meta
     
@@ -440,9 +440,9 @@ class DenoisingDataset(Dataset):
 
 
 class TimeSeriesDataset(Dataset):
-  def __init__(self, root_dir, idx_list, labels=['Inclination', 'Period'], t_samples=512, norm='std', transforms=None,
+  def __init__(self, root_dir, idx_list, labels=['Inclination', 'Period'], t_samples=None, norm='std', transforms=None,
                 noise=False, spectrogram=False, n_fft=1000, acf=False, return_raw=False,
-                 wavelet=False, freq_rate=1, init_frac=0.4, dur=360, kep_noise=None, prepare=True):
+                 wavelet=False, freq_rate=1/48, init_frac=0.4, dur=360, kep_noise=None, prepare=True):
       self.idx_list = idx_list
       self.labels = labels
       self.length = len(idx_list)
@@ -463,7 +463,7 @@ class TimeSeriesDataset(Dataset):
       self.dur = dur 
       self.kep_noise = kep_noise
       self.maxstds = 0.159
-      self.weights = torch.ones(self.length)
+      self.weights = torch.zeros(self.length)
       self.samples = []
       if prepare:
         self.prepare_data()
@@ -633,11 +633,11 @@ class TimeSeriesDataset(Dataset):
         x = x[int(self.init_frac*len(x)):,:]
         if self.seq_len:
           x = self.interpolate(x)
-        x[:,1] = fill_nan_np(x[:,1], interpolate=True)
-        # t2 = time.time()
         if self.transforms is not None:
           x, _, info = self.transforms(x, mask=None, info=dict())
           info['idx'] = idx
+        x[:,1] = fill_nan_np(x[:,1], interpolate=True)
+        # t2 = time.time()
         # t3 = time.time()
         x = self.create_data(x)
         x = self.normalize(x)
@@ -655,7 +655,6 @@ class TimeSeriesDataset(Dataset):
         return x_spec.unsqueeze(0), y, x.float(), info
       # print("times: ", t1-s, t2-t1, t3-t2, t4-t3, t5-t4,  "tot time: ", t5-s)
       return x.float(), y, torch.ones_like(x), info
-  
 
 class TimeSeriesDataset2(Dataset):
   def __init__(self, root_dir, idx_list, labels=['Inclination', 'Period'], p_norm=True, t_samples=512, norm='std', num_classes=2, transforms=None,
@@ -817,13 +816,16 @@ class TimeSeriesClassifierDataset(TimeSeriesDataset):
     return x.float(), torch.cat([y1,y2], dim=-1).float().squeeze(0)
  
 class CleanDataset(TimeSeriesDataset):
-  def __init__(self, root_dir, idx_list, noise_ds, transforms):
+  def __init__(self, root_dir, idx_list, noise_ds, transforms, max_noise=0.4, min_noise=0.02):
       self.idx_list = idx_list
       self.length = len(idx_list)
       self.targets_path = os.path.join(root_dir, "simulation_properties.csv")
       self.lc_path = os.path.join(root_dir, "simulations")
       self.transforms = transforms
       self.kep_noise = noise_ds
+      self.max_noise = max_noise
+      self.min_noise = min_noise
+      self.step = 0
   
   def __getitem__(self, idx):
       x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values

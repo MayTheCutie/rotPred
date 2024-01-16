@@ -21,10 +21,10 @@ class Compose:
     def __init__(self, transforms):
         self.transforms = transforms
 
-    def __call__(self, x, mask=None, info=None):
+    def __call__(self, x, mask=None, info=None, step=None):
         out = x
         for t in self.transforms:
-            out, mask, info = t(out, mask=mask, info=info)
+            out, mask, info = t(out, mask=mask, info=info, step=step)
         return out, mask, info
 
     def __repr__(self):
@@ -40,7 +40,7 @@ class FillNans(object):
     def __init__(self, value):
         self.value = value
 
-    def __call__(self, x, mask=None, info=None):
+    def __call__(self, x, mask=None, info=None, step=None):
         if isinstance(x, np.ndarray):
             out = F_np.fill_nans(x, self.value)
         else:
@@ -69,7 +69,7 @@ class Mask(object):
         self.exclude_mask = exclude_mask
         self.max_ratio = max_ratio
 
-    def __call__(self, x, mask=None, info=None):
+    def __call__(self, x, mask=None, info=None, step=None):
         if isinstance(x, np.ndarray):
             out = x
         else:
@@ -115,7 +115,7 @@ class AddGaussianNoise(object):
         self.mask_only = mask_only
         assert not (exclude_mask and mask_only)
 
-    def __call__(self, x, mask=None, info=None):
+    def __call__(self, x, mask=None, info=None, step=None):
         # print('x shape: ', x.shape)
         # plt.plot(x[:,0])
         # plt.savefig("/data/tests/x.png")
@@ -163,7 +163,7 @@ class Scaler(object):
     def inverse_transform(self, y):
         return (y * self.norms) + self.centers
 
-    def __call__(self, x, mask=None, info=None):
+    def __call__(self, x, mask=None, info=None, step=None):
         out = self.fit_transform(x, mask=mask)
         info['mu'] = self.centers
         info['sigma'] = self.norms
@@ -193,7 +193,7 @@ class DownSample:
     def __init__(self, factor=1):
         self.factor = factor
 
-    def __call__(self, x, mask=None, info=None):
+    def __call__(self, x, mask=None, info=None, step=None):
         return x[::self.factor], mask[::self.factor], info
 
 
@@ -203,7 +203,7 @@ class RandomCrop:
         self.exclude_missing_threshold = exclude_missing_threshold
         assert exclude_missing_threshold is None or 0 <= exclude_missing_threshold <= 1
 
-    def __call__(self, x, mask=None, info=None):
+    def __call__(self, x, mask=None, info=None, step=None):
         seq_len = x.shape[0]
         if seq_len < self.width:
             left_crop = 0
@@ -226,14 +226,14 @@ class Slice():
     def __init__(self, start, end):
         self.start = start
         self.end = end
-    def __call__(self, x, mask=None, info=None):
+    def __call__(self, x, mask=None, info=None, step=None):
         sliced_mask = mask[self.start:self.end] if mask is not None else None
         return x[self.start:self.end], sliced_mask, info
 
 class Detrend():
     def __init__(self, type='diff'):
         self.type = type
-    def __call__(self, x, mask=None, info=None):
+    def __call__(self, x, mask=None, info=None, step=None):
         if isinstance(x, np.ndarray):
             out = x.copy()
         elif isinstance(x, torch.Tensor):
@@ -244,6 +244,8 @@ class Detrend():
             mask = mask[1:]
         info['detrend'] = self.type
         return out*10**6, mask, info
+    def __repr__(self):
+        return f"Detrend(type={self.type})"
 
 class moving_avg():
     """
@@ -254,7 +256,7 @@ class moving_avg():
         self.kernel_size = kernel_size
         self.avg = torch.nn.AvgPool1d(kernel_size=kernel_size, stride=stride, padding=0)
 
-    def __call__(self, x, mask=None, info=dict()):
+    def __call__(self, x, mask=None, info=dict(), step=None):
         # padding on the both ends of time series
         info['moving_avg'] = self.kernel_size
         if isinstance(x, np.ndarray):
@@ -275,6 +277,8 @@ class moving_avg():
         else:
             x = flux.squeeze()
         return x.numpy(), mask, info
+    def __repr__ (self):
+        return f"moving_avg(kernel_size={self.kernel_size})"
 
 class KeplerNoise():
     def __init__(self, noise_dataset, max_ratio=1, min_ratio=0.5):
@@ -282,7 +286,7 @@ class KeplerNoise():
         self.max_ratio = max_ratio
         self.min_ratio = min_ratio
 
-    def __call__(self, x, mask=None, info=None):
+    def __call__(self, x, mask=None, info=None, step=None):
         if len(x.shape) == 2:
             std = x[:, 1].std()
         else:
@@ -299,3 +303,6 @@ class KeplerNoise():
         info['std'] = std
         info['noise_KID'] = noise_info['KID']
         return x, mask, info
+    
+    def __repr__(self):
+        return f"KeplerNoise(max_ratio={self.max_ratio}, min_ratio={self.min_ratio})"

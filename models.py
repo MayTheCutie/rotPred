@@ -252,10 +252,10 @@ class LSTMFeatureExtractor(nn.Module):
             self.skip = nn.Conv2d(in_channels=in_channels, out_channels=channels, kernel_size=1, padding=0, stride=stride)
             self.drop = nn.Dropout2d(p=dropout)
             self.batchnorm1 = nn.BatchNorm2d(channels)        
-        # self.conv_list = nn.Sequential(
-        #                         ConvBlock(1,channels//4, kernel_size=3, stride=2, padding=1, dropout=dropout),
-        #                         ConvBlock(channels//4,channels//2, kernel_size=3, stride=2, padding=1, dropout=dropout),
-        #                         ConvBlock(channels//2,channels, kernel_size=3, stride=2, padding=1, dropout=dropout))
+        # self.conv_pre = nn.Sequential(
+        #                         ConvBlock(in_channels,channels//8, kernel_size=9, stride=1, padding='same', dropout=dropout),
+        #                         ConvBlock(channels//8,channels//4, kernel_size=15, stride=1, padding='same', dropout=dropout),
+        #                         ConvBlock(channels//4,channels//2, kernel_size=25, stride=1, padding='same', dropout=dropout))
         # self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=kernel_size, padding=1, stride=2)
         # self.conv3 = nn.Conv1d(in_channels=128, out_channels=channels, kernel_size=kernel_size, padding=1, stride=4)
         
@@ -281,6 +281,7 @@ class LSTMFeatureExtractor(nn.Module):
         # dummy_input = torch.randn(2,self.seq_len, self.in_channels)
         input_length = torch.ones(2, dtype=torch.int64)*self.seq_len
         print("dummy_input: ", dummy_input.shape)
+        # x = self.conv_pre(dummy_input)
         x = self.drop(self.pool(self.activation(self.batchnorm1(self.conv1(dummy_input)))))
         # x = self.conv(dummy_input, input_length)
         x = x.view(x.shape[0], x.shape[1], -1).swapaxes(1,2)
@@ -304,8 +305,9 @@ class LSTMFeatureExtractor(nn.Module):
         # input_length = torch.ones(x.shape[0], dtype=torch.int64)*self.seq_len
         # x = self.conv(x, input_length)
         skip = self.skip(x)
+        # x = self.conv_pre(x)
         x = self.drop(self.pool(self.activation(self.batchnorm1(self.conv1(x)))))
-        x = x + skip
+        x = x + skip[:, :, :x.shape[-1]]
         # x = self.conv(x)
         x = x.view(x.shape[0], x.shape[1], -1).swapaxes(1,2)
         x_f,(h_f,c_f) = self.lstm(x)
