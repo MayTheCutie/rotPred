@@ -433,6 +433,31 @@ class LSTM_ATTN_QUANT(LSTM):
         # conf = self.fc4(self.activation(self.fc3(values)))
         return out.transpose(1,2)
 
+class LSTM_DUAL(LSTM_ATTN):
+    def __init__(self, dual_model, encoder_dims, **kwargs):
+        super(LSTM_DUAL, self).__init__(**kwargs)
+        num_lstm_features = self.feature_extractor.hidden_size*2
+        self.num_features = num_lstm_features + encoder_dims
+        self.dual_model = dual_model
+        self.pred_layer = nn.Sequential(
+        nn.Linear(self.num_features, self.predict_size),
+        nn.SiLU(),
+        nn.Dropout(p=0.3),
+        nn.Linear(self.predict_size,self.num_classes),
+    )
+        
+    def forward(self, x, x_dual):
+        if len(x.shape) == 2:
+            x = x.unsqueeze(1)
+        x, h_f, c_f = self.feature_extractor(x, return_cell=True)
+        c_f = torch.cat([c_f[-1], c_f[-2]], dim=1)
+        t_features = self.attention(c_f, x, x) 
+        d_features = self.dual_model(x_dual)
+        features = torch.cat([t_features, d_features], dim=1)
+        # print("features: ", features.shape, t_features.shape, d_features.shape)
+        out = self.pred_layer(features)
+        return out
+
 class LSTM_SWIN(LSTM_ATTN):
     def __init__(self, patch_size=[16,16], im_embed_dim=64, depths=[4,6,6,4], num_heads=[4,8,8,4],
      window_size=[8,8], im_dropout=0.3, swin_weight=1, **kwargs):

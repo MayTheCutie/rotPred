@@ -50,7 +50,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 80
+exp_num = 90
 
 
 log_path = '/data/logs/lstm_attn'
@@ -88,7 +88,7 @@ DAY2MIN = 24*60
 
 dur = 360
 
-class_labels = ['Inclination', 'Period']    
+class_labels = ['Period']    
 
 def setup(rank, world_size):
     # initialize the process group
@@ -153,20 +153,20 @@ if __name__ == '__main__':
     #                     ])
 
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
-                          KeplerNoise(noise_ds, min_ratio=0.02, max_ratio=0.05),
-                          KeplerNoiseAddition(noise_ds),
+                        #   KeplerNoise(noise_ds, min_ratio=0.02, max_ratio=0.05), 
+                          KeplerNoiseAddition(noise_ds),                         
      moving_avg(49), Detrend()])
     test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
-                            KeplerNoise(noise_ds, min_ratio=0.02, max_ratio=0.05, warmup=0),
+                            # KeplerNoise(noise_ds, min_ratio=0.02, max_ratio=0.05), 
                             KeplerNoiseAddition(noise_ds),
      moving_avg(49), Detrend()])
 
     train_dataset = TimeSeriesDataset(data_folder, train_list, transforms=transform,
-    init_frac=0.2, acf=True, prepare=True, dur=dur)
+    init_frac=0.2, acf=True, prepare=True, dur=dur, high_inc=True, norm='none')
     val_dataset = TimeSeriesDataset(data_folder, val_list,  transforms=transform,
-     init_frac=0.2, acf=True, prepare=True, dur=dur)
+     init_frac=0.2, acf=True, prepare=True, dur=dur, high_inc=True, norm='none')
     test_dataset = TimeSeriesDataset(test_folder, test_idx_list, transforms=transform,
-    init_frac=0.2, acf=True, prepare=True, dur=dur)
+    init_frac=0.2, acf=True, prepare=True, dur=dur, high_inc=True, norm='none')
 
     # train_weights = train_dataset.weights
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
@@ -199,9 +199,19 @@ if __name__ == '__main__':
 
    
 
-    model, net_params, _ = load_model(f'{log_path}/exp77', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
+    # model, net_params, _ = load_model(f'{log_path}/exp77', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
     
-    # model = LSTM_ATTN(**net_params)
+
+    
+    model = LSTM_ATTN(**net_params)
+
+    # kepler_train_state_dict = torch.load('/data/logs/kepler_train/exp1/lstm_attn.pth')
+    # new_state_dict = {}
+    # for k, v in kepler_train_state_dict.items():
+    #     new_state_dict[k.replace('module.', '')] = v
+    # new_state_dict.pop('fc2.weight')
+    # new_state_dict.pop('fc2.bias')
+    # model.load_state_dict(new_state_dict, strict=False)
     # model = Informer(**net_params)
 
     model = model.to(local_rank)
@@ -233,7 +243,7 @@ if __name__ == '__main__':
     print("data params: ", data_dict)
 
     
-    trainer = Trainer(model=model, optimizer=optimizer, criterion=loss_fn, 
+    trainer = Trainer(model=model, optimizer=optimizer, criterion=loss_fn, num_classes=len(class_labels),
                        scheduler=scheduler, train_dataloader=train_dataloader, val_dataloader=val_dataloader,
                         device=local_rank, optim_params=optim_params, net_params=net_params, exp_num=exp_num, log_path=log_path,
                         exp_name="lstm_attn")
