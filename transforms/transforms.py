@@ -298,18 +298,18 @@ class KeplerNoise():
         else:
             max_ratio = self.max_ratio
         noise_std = np.random.uniform(std*self.min_ratio, std*max_ratio)
-        x_noise = (x_noise - x_noise.mean()) / (x_noise.std() + 1e-8) *  noise_std + 1 
+        x_noise = (x_noise - x_noise.mean()) / (x_noise.std() + 1e-8) *  noise_std
         if len(x.shape) == 1:
-            x = x*x_noise.squeeze().numpy()
+            x = x + x_noise.squeeze().numpy()
         else:
-            x[:,1] = x[:,1]*x_noise.squeeze().numpy()
+            x[:,1] = x[:,1] + x_noise.squeeze().numpy()
         info['noise_std'] = noise_std
         info['std'] = std
         info['noise_KID'] = noise_info['KID']
         return x, mask, info
     
     def __repr__(self):
-        return f"KeplerNoise(max_ratio={self.max_ratio}, min_ratio={self.min_ratio})"
+        return f"KeplerNoise(max_ratio={self.max_ratio}, min_ratio={self.min_ratio}, warmup={self.warmup})"
     
 
 class KeplerNoiseAddition():
@@ -318,7 +318,7 @@ class KeplerNoiseAddition():
     def __call__(self, x, mask=None, info=None, step=None):
         idx = np.random.randint(0, len(self.noise_dataset))
         x_noise,_,_,noise_info = self.noise_dataset[idx]        
-        x_noise = (x_noise - x_noise.mean()) 
+        x_noise = x_noise/x_noise.median() - 1
         if len(x.shape) == 1:
             x = x + x_noise.squeeze().numpy()
         else:

@@ -11,7 +11,7 @@ import random
 from astropy.io import fits
 from lightPred.utils import create_kepler_df
 from matplotlib import pyplot as plt
-from lightPred.utils import fill_nan_np
+from lightPred.utils import fill_nan_np, replace_zeros_with_average
 from pyts.image import GramianAngularField
 from scipy.signal import stft, correlate2d
 from scipy import signal
@@ -195,7 +195,7 @@ class TimeSsl(Dataset):
               x_tot = np.concatenate((x_tot, np.array(x)))
           x = torch.tensor(x_tot/x_tot.max())
           self.cur_len = len(x)
-        except (TypeError,OSError)  as e:
+        except (TypeError,OSError, FileNotFoundError)  as e:
             print("Error: ", e)
             x, meta = torch.zeros((self.cur_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
         return x, meta
@@ -285,12 +285,13 @@ class MaskedSSL(TimeSsl):
 
 
 class KeplerDataset(TimeSsl):
-  def __init__(self, root_dir, path_list, df=None, mask_prob=0, mask_val=-1,  **kwargs):
+  def __init__(self, root_dir, path_list, df=None, mask_prob=0, mask_val=-1, np=False,  **kwargs):
     super().__init__(root_dir, path_list, df=df, **kwargs)
     # self.df = df
     # self.length = len(self.df) if self.df is not None else len(self.paths_list)
     self.mask_prob = mask_prob
     self.mask_val = mask_val
+    self.np = np
 
   def mask_array(self, array, mask_percentage=0.15, mask_value=-1):
       # if len(array.shape) == 1:
@@ -309,11 +310,15 @@ class KeplerDataset(TimeSsl):
           inverse_token_mask[i] = False  
       return array, inverse_token_mask
   
-
+  def read_np(self, idx):
+    x = np.load(os.path.join(self.root_dir, self.path_list[idx]))
+    return torch.tensor(x), dict()
 
   def __getitem__(self, idx):
     if self.df is not None:
       x, meta = self.read_row(idx)
+    elif self.np:
+      x, meta = self.read_np(idx)
     else:
       x, meta =  self.read_data(idx).float()
       x /= x.max()
@@ -346,11 +351,12 @@ class KeplerDataset(TimeSsl):
     torch.nan_to_num(x, torch.nanmean(x))
     # print(meta['TEFF'], meta['RADIUS'], meta['LOGG'])
     info['idx'] = idx
-    info['Teff'] = meta['TEFF'] if meta['TEFF'] is not None else 0
-    info['R'] = meta['RADIUS'] if meta['RADIUS'] is not None else 0
-    info['logg'] = meta['LOGG'] if meta['LOGG'] is not None else 0
-    info['path'] = self.df.iloc[idx]['data_file_path'] if self.df is not None else self.paths_list[idx]
-    info['KID']  = self.df.iloc[idx]['KID'] if self.df is not None else self.paths_list[idx].split("/")[-1].split("-")[0].split('kplr')[-1]
+    if len(meta):
+      info['Teff'] = meta['TEFF'] if meta['TEFF'] is not None else 0
+      info['R'] = meta['RADIUS'] if meta['RADIUS'] is not None else 0
+      info['logg'] = meta['LOGG'] if meta['LOGG'] is not None else 0
+    info['path'] = self.df.iloc[idx]['data_file_path'] if self.df is not None else self.path_list[idx]
+    info['KID']  = self.df.iloc[idx]['KID'] if self.df is not None else self.path_list[idx].split("/")[-1].split("-")[0].split('kplr')[-1]
     return x.float(), masked_x.squeeze().float(), inv_mask, info
 
 
@@ -379,10 +385,12 @@ class KeplerLabeledDataset(KeplerDataset):
     if self.df is not None:
       row = self.df.iloc[idx]
     if 'Prot' in row:
-      y = {'Period': torch.tensor(row['Prot'])/max_p, 'period_err': torch.tensor(row['Prot_err']),
-          'Teff': torch.tensor(row['Teff']),'logg': torch.tensor(row['logg'])}
+      val = (row['Prot'] - boundary_values_dict['Period'][0])\
+      /(boundary_values_dict['Period'][1]-boundary_values_dict['Period'][0])
     elif 'i' in row:
-      y = {'i': torch.tensor(row['i'])/max_i} 
+      val = (row['Inclination'] - boundary_values_dict['Inclination'][0])\
+      /(boundary_values_dict['Inclination'][1]-boundary_values_dict['Inclination'][0])
+    y = torch.tensor(val)
     return x.float(), y, inv_mask, info
 
 class TFCKeplerDataset(KeplerDataset):
@@ -441,7 +449,7 @@ class DenoisingDataset(Dataset):
 
 class TimeSeriesDataset(Dataset):
   def __init__(self, root_dir, idx_list, labels=['Inclination', 'Period'], t_samples=None, norm='std', transforms=None,
-                noise=False, spectrogram=False, n_fft=1000, acf=False, return_raw=False,
+                noise=False, spectrogram=False, n_fft=1000, acf=False, return_raw=False,high_inc=False,
                  wavelet=False, freq_rate=1/48, init_frac=0.4, dur=360, kep_noise=None, prepare=True):
       self.idx_list = idx_list
       self.labels = labels
@@ -461,6 +469,7 @@ class TimeSeriesDataset(Dataset):
       self.freq_rate = freq_rate
       self.init_frac = init_frac
       self.dur = dur 
+      self.high_inc = high_inc
       self.kep_noise = kep_noise
       self.maxstds = 0.159
       self.step = 0
@@ -529,7 +538,7 @@ class TimeSeriesDataset(Dataset):
         grad = 1 + np.gradient(gwps)/(2/period)
         x = np.vstack((grad[None], xcf[None]))
       elif self.return_raw:
-        x = np.vstack((x[:,1][None], xcf[None]))
+        x = np.vstack((xcf[None], x[:,1][None]))
       else:
         x = xcf 
     elif self.wavelet:
@@ -564,16 +573,20 @@ class TimeSeriesDataset(Dataset):
       for i,label in enumerate(self.labels):
         if label in boundary_values_dict.keys():
           y[i] = (y[i] - boundary_values_dict[label][0])/(boundary_values_dict[label][1]-boundary_values_dict[label][0])
-      
+        if label == 'Inclination' and self.high_inc:
+          y[i] /= 2
       if len(self.labels) == 1:
         return y.squeeze(-1).float()
       return y.squeeze(0).squeeze(-1).float()
 
-  def get_weight(self, y, weights, counts):
-      inc = y[self.labels.index('Inclination')]*180/np.pi 
-      w = 1/(counts[(y['Inclination']*180/np.pi).astype(np.int16)] + 1e-8)
-      weights = torch.cat((weights, torch.tensor(w)), dim=0)
-      return weights
+  def get_weight(self, y, counts):
+      inc_idx = self.labels.index('Inclination')
+      inc = y[int(inc_idx)]*(boundary_values_dict['Inclination'][1] - boundary_values_dict['Inclination'][0]) + boundary_values_dict['Inclination'][0]
+      inc = int(inc.item()*180/np.pi)
+      w = 1/(counts[inc])
+      # print('inc: ', inc, 'weight: ', w, 'raw inc: ', y[inc_idx])
+      # weights = torch.cat((weights, torch.tensor(w)), dim=0)
+      return torch.tensor(w)
   
   def prepare_data(self):
       print("loading dataset...")
@@ -582,9 +595,15 @@ class TimeSeriesDataset(Dataset):
       incl = (np.arccos(np.random.uniform(0, 1, self.length))*180/np.pi).astype(np.int16)
       unique, unique_counts = np.unique(incl, return_counts=True)
       counts[unique] = unique_counts
-      weights = torch.ones(0) 
+      indices = np.argsort(counts)
+      # plt.hist(incl)
+      # plt.savefig("/data/tests/counts.png")
+      # plt.clf()
+      counts = replace_zeros_with_average(counts)
+      weights = []
       stds = []  
       for i in range(self.length):
+        info = {'idx': i}
         starttime= time.time()
         if i % 1000 == 0:
           print(i, flush=True)
@@ -597,8 +616,7 @@ class TimeSeriesDataset(Dataset):
           x = self.interpolate(x)
         time2 = time.time()
         if self.transforms is not None:
-          x, _, info = self.transforms(x, mask=None, info=dict())
-          info['idx'] = i
+          x, _, info = self.transforms(x, mask=None, info=info)
         time3 = time.time()
         x[:,1] = fill_nan_np(x[:,1], interpolate=True)
         time4 = time.time()
@@ -606,7 +624,7 @@ class TimeSeriesDataset(Dataset):
         time5 = time.time()
         y = self.get_labels(sample_idx)
         time6 = time.time()
-        # weights = self.get_weight(y, weights, counts)
+        weights.append(self.get_weight(y, counts))
         stds.append(x.std().item())
         self.samples.append((x,y, info))
 
@@ -615,7 +633,11 @@ class TimeSeriesDataset(Dataset):
         #          "\ncreate data ", time5-time4, "\nget labels ",  time6-time5, "\ntot time: ", time6-starttime)
         # except Exception as e:
         #   print("Exception: ", e)
-      # self.weights = weights
+      # self.weights = torch.stack(weights)
+      # print(self.weights.shape, torch.max(self.weights))
+      # plt.hist(self.weights)
+      # plt.savefig("/data/tests/weights.png")
+      # plt.clf()
       self.maxstds = np.max(stds)
       return
           
@@ -770,7 +792,7 @@ class TimeSeriesDataset2(Dataset):
           x /= x.median()
         elif self.norm == 'minmax':
           x = (x-x.min())/(x.max()-x.min())
-        x = x.nan_to_num(0)
+        x = torch.tensor(x).nan_to_num(0)
         # t4 = time.time()
         y = self.get_labels(sample_idx)
       # t5 = time.time()

@@ -83,18 +83,40 @@ def residual_by_period(lc, period):
 def count_params(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
+def replace_zeros_with_average(arr):
+    # Find the indices of zero values
+    zero_indices = np.where(arr == 0)[0]
+    # print(len(arr))
+
+    # Iterate over each zero index and replace with the average of neighboring values
+    for idx in zero_indices:
+        before_idx = idx - 1 if idx > 0 else idx
+        after_idx = idx + 1 if idx < len(arr) - 1 else idx
+
+        # Find the nearest non-zero neighbors
+        while before_idx in zero_indices and before_idx >= 0:
+            before_idx -= 1
+        while after_idx in zero_indices and after_idx < (len(arr) - 1):
+            after_idx += 1
+
+        # Replace zero with the average of neighboring values
+        arr[idx] = (arr[before_idx] + arr[after_idx]) / 2
+
+    return arr
 
 def dataset_weights(dl, Nlc):
     incl = (np.arcsin(np.random.uniform(0, 1, Nlc))*180/np.pi).astype(np.int16)
     unique, counts = np.unique(incl, return_counts=True)
     weights = torch.zeros(0)
     for i, (x,y,_,_) in enumerate(dl):
-        print(i)
-        w = 1/counts[(y[:,0]*90).squeeze().numpy().astype(np.int16)]
+        w = 1/counts[(y[:,0]*180/np.pi).squeeze().numpy().astype(np.int16)]
         weights = torch.cat((weights, torch.tensor(w)), dim=0)
     return weights
 
+
+
 def load_model(data_dir, model, distribute, device, to_ddp=False):
+    print("data dir ", data_dir)
     with open(f'{data_dir}/net_params.yml', 'r') as f:
         net_params = yaml.load(f, Loader=yaml.FullLoader)
     model = model(**net_params).to(device)
@@ -103,7 +125,6 @@ def load_model(data_dir, model, distribute, device, to_ddp=False):
     print("loading model from ", state_dict_files[-1])
     
     state_dict = torch.load(state_dict_files[-1]) if to_ddp else torch.load(state_dict_files[0],map_location=device)
-   
     if distribute:
         print("loading distributed model")
         # Remove "module." from keys
@@ -114,6 +135,7 @@ def load_model(data_dir, model, distribute, device, to_ddp=False):
                     key = key[7:]
             new_state_dict[key] = value
         state_dict = new_state_dict
+    print(model)
     model.load_state_dict(state_dict, strict=False)
     model = model.to(device)
     return model,net_params,model_name
@@ -573,12 +595,16 @@ def multi_quarter_kepler_df(root_kepler_path, Qs, table_path=None):
     dfs = []
     for q in Qs:
         kepler_path = os.path.join(root_kepler_path, f"Q{q}")
+        print("kepler path ", kepler_path)
         df = create_kepler_df(kepler_path, table_path)
         print("length of df ", len(df))
         dfs.append(df)
     if 'Prot' in dfs[0].columns:
-        merged_df = pd.concat(dfs).groupby('KID').agg({'Prot': 'first', 'Prot_err': 'first', 'Teff': 'first',
-        'logg': 'first', 'data_file_path': list}).reset_index()
+        if 'Prot_err' in dfs[0].columns:
+            merged_df = pd.concat(dfs).groupby('KID').agg({'Prot': 'first', 'Prot_err': 'first', 'Teff': 'first',
+            'logg': 'first', 'data_file_path': list}).reset_index()
+        else:
+            merged_df = pd.concat(dfs).groupby('KID').agg({'Prot': 'first', 'data_file_path': list}).reset_index()
     elif 'i' in dfs[0].columns:
         merged_df = pd.concat(dfs).groupby('KID').agg({'i': 'first', 'data_file_path': list}).reset_index()
     else:

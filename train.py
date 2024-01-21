@@ -192,13 +192,14 @@ class Trainer(object):
             y = y.to(device)
             self.optimizer.zero_grad()
             y_pred = self.model(x.float())
+            # print("y_pred: ", y_pred.shape, "y: ", y.shape)
+
             if len(y.shape) == 1:
                 y = y.unsqueeze(1)
             if conf:
                 y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:].abs()
                 conf_y = torch.abs(y - y_pred) 
             # print(f"inclination range: {y_pred[:,1].min()} - {y_pred[:,1].max()}")
-            # print(f"true y: {y[:10,:]}")
             # print(f"pred y: {y_pred[:10,:]}")
 
             # print("y_pred: ", y_pred.shape, "y: ", y.shape)
@@ -324,7 +325,9 @@ class DoubleInputTrainer(Trainer):
         train_acc = 0
         all_accs = torch.zeros(self.num_classes, device=device)
         pbar = tqdm(self.train_dl)
-        for i, (x1,y, x2,_) in enumerate(pbar):
+        for i, (x,y, _,_) in enumerate(pbar):
+            # print("x: ", x.shape, "y: ", y.shape)
+            x1, x2 = x[:, 0, :], x[:, 1, :]
             x1 = x1.to(device)
             x2 = x2.to(device)
             y = y.to(device)
@@ -334,28 +337,25 @@ class DoubleInputTrainer(Trainer):
                 y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
                 conf_y = torch.abs(y - y_pred) 
                 
-            y_std = torch.std(y.squeeze(), dim=1)
-            y_pred_std = torch.std(y_pred.squeeze(), dim=1)
-            loss = self.criterion(y_pred, y) if not only_p else self.criterion(y_pred, y[:, 0])
+            # y_std = torch.std(y.squeeze(), dim=1)
+            # y_pred_std = torch.std(y_pred.squeeze(), dim=1)
+            loss = self.criterion(y_pred, y)
             if conf:
                 loss += self.criterion(conf_pred, conf_y)
                 
-            loss_std = self.criterion(y_pred_std, y_std)
-            loss = loss + 0.5 * loss_std
-            if self.logger is not None:
-                self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
-                self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
+            # loss_std = self.criterion(y_pred_std, y_std)
+            # loss = loss + 0.5 * loss_std
+            
             # print("loss: ", loss, "y_pred: ", y_pred, "y: ", y)
             loss.backward()
             self.optimizer.step()
             train_loss.append(loss.item())
             diff = torch.abs(y_pred - y)
-            train_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
+            # train_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
             all_acc = (diff < (y/10)).sum(0)
             all_accs = all_accs + all_acc
-            # pbar.set_description(f"train_acc: {all_acc}, train_loss:  {loss.item()}")
-        return train_loss, (all_accs/len(self.train_dl.dataset)).mean(axis=-1)
-
+            pbar.set_description(f"train_acc: {all_acc}, train_loss:  {loss.item()}")
+        return train_loss, all_accs/len(self.train_dl.dataset)
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
         """
         Evaluates the model for one epoch.
@@ -365,7 +365,8 @@ class DoubleInputTrainer(Trainer):
         val_acc = 0
         all_accs = torch.zeros(self.num_classes, device=device)
         pbar = tqdm(self.val_dl)
-        for i,(x1,y,x2,_) in enumerate(pbar):
+        for i, (x,y, _,_) in enumerate(pbar):
+            x1, x2 = x[:, 0, :], x[:, 1, :]
             x1 = x1.to(device)
             x2 = x2.to(device)
             y = y.to(device)
@@ -374,24 +375,24 @@ class DoubleInputTrainer(Trainer):
                 if conf:
                     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
                     conf_y = torch.abs(y - y_pred)
-            y_std = torch.std(y.squeeze(), dim=1)
-            y_pred_std = torch.std(y_pred.squeeze(), dim=1)
-            loss = self.criterion(y_pred, y) if not only_p else self.criterion(y_pred, y[:, 0])
+            # y_std = torch.std(y.squeeze(), dim=1)
+            # y_pred_std = torch.std(y_pred.squeeze(), dim=1)
+            loss = self.criterion(y_pred, y) 
             if conf:
                 loss += self.criterion(conf_pred, conf_y)
                 
-            loss_std = self.criterion(y_pred_std, y_std)
-            loss = loss + 0.5 * loss_std
-            if self.logger is not None:
-                self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
+            # loss_std = self.criterion(y_pred_std, y_std)
+            # loss = loss + 0.5 * loss_std
+            # if self.logger is not None:
+            #     self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
             val_loss.append(loss.item())
             diff = torch.abs(y_pred - y)
             # print("diff: ", diff.shape, "y: ", y.shape)
-            val_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
+            # val_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
             all_acc = (diff < (y/10)).sum(0)
-            pbar.set_description(f"val_loss:  {loss.item()}")
+            pbar.set_description(f"val_acc: {all_acc}, val_loss:  {loss.item()}")
             all_accs = all_accs + all_acc  
-        return val_loss, (all_accs/len(self.val_dl.dataset)).mean(axis=-1)
+        return val_loss, all_accs/len(self.val_dl.dataset)
 
     def predict(self, test_dataloader, device, conf=True, only_p=False, load_best=False):
         """
@@ -407,7 +408,8 @@ class DoubleInputTrainer(Trainer):
         confs = np.zeros((0, self.num_classes))
         tot_kic = []
         tot_teff = []
-        for i,(x1,y,x2,_) in enumerate(test_dataloader):
+        for i,(x,y,_,_) in enumerate(test_dataloader):
+            x1, x2 = x[:, 0, :], x[:, 1, :]
             x1 = x1.to(device)
             x2 = x2.to(device)
             with torch.no_grad():
@@ -434,26 +436,27 @@ class KeplerTrainer(Trainer):
         self.model.train()
         train_loss = []
         train_acc = 0
-        for i, (x, y, _,info) in enumerate(self.train_dl):
+        pbar = tqdm(self.train_dl)
+        for i, (x, y, _,info) in enumerate(pbar):
             x = x.to(device)
-            y = {k: v.to(device) for k, v in y.items()}
+            y = y.to(device)
             self.optimizer.zero_grad()
             y_pred = self.model(x.float())
-            y_val = y['Period'] if only_p else y['i']
-            pred_idx = 1 if only_p else 0
+            # y_val = y['Period'] if only_p else y['i']
+            # pred_idx = 1 if only_p else 0
             if conf:
-                y_pred, conf_pred = y_pred[:, :2], y_pred[:, 2:]
-                conf_y = torch.abs(y_val - y_pred[:,pred_idx]) 
-            loss = self.criterion(y_pred[:,pred_idx].float(), y_val.float()) 
+                y_pred, conf_pred = y_pred[:, :self.num_classes].squeeze(), y_pred[:, self.num_classes:].squeeze()
+                conf_y = torch.abs(y - y_pred) 
+            loss = self.criterion(y_pred, y) 
             if conf:
-                loss += self.criterion(conf_pred[:,pred_idx].float(), conf_y.float())
+                loss += self.criterion(conf_pred, conf_y)
             self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
             loss.backward()
             self.optimizer.step()
-            self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
             train_loss.append(loss.item())
-            diff = torch.abs(y_pred[:,pred_idx] - y_val)
-            train_acc += (diff < (y_val/10)).sum().item() 
+            diff = torch.abs(y_pred - y)
+            train_acc += (diff < (y/10)).sum().item() 
+            pbar.set_description(f"train_acc: {train_acc}, train_loss:  {loss.item()}")
         print("number of train_accs: ", train_acc)
         return train_loss, train_acc/len(self.train_dl.dataset)
 
@@ -466,22 +469,20 @@ class KeplerTrainer(Trainer):
         val_acc = 0
         for i, (x, y, _,info) in enumerate(self.val_dl):
             x = x.to(device)
-            y = {k: v.to(device) for k, v in y.items()}
+            y = y.to(device)
             self.optimizer.zero_grad()
             y_pred = self.model(x.float())
-            y_val = y['Period'] if only_p else y['i']
-            pred_idx = 1 if only_p else 0
+            # y_val = y['Period'] if only_p else y['i']
+            # pred_idx = 1 if only_p else 0
             if conf:
-                y_pred, conf_pred = y_pred[:, :2], y_pred[:, 2:]
-                conf_y = torch.abs(y_val - y_pred[:,pred_idx]) 
-            loss = self.criterion(y_pred[:,pred_idx].float(), y_val.float()) 
+                y_pred, conf_pred = y_pred[:, :self.num_classes].squeeze(), y_pred[:, self.num_classes:].squeeze()
+                conf_y = torch.abs(y - y_pred) 
+            loss = self.criterion(y_pred, y) 
             if conf:
-                loss += self.criterion(conf_pred[:,pred_idx].float(), conf_y.float())
-            self.logger.add_scalar('val_loss', loss.item(), i + epoch*len(self.train_dl))
-            self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
+                loss += self.criterion(conf_pred, conf_y)
             val_loss.append(loss.item())
-            diff = torch.abs(y_pred[:,pred_idx] - y_val)
-            val_acc += (diff < (y_val/10)).sum().item() 
+            diff = torch.abs(y_pred - y)
+            val_acc += (diff < (y/10)).sum().item() 
         print("number of val_acc: ", val_acc)
         return val_loss, val_acc/len(self.val_dl.dataset)
 
@@ -504,15 +505,19 @@ class KeplerTrainer(Trainer):
 
         print("len test_dataloader: ", len(test_dataloader))
         for i,(x, y,_,info) in enumerate(test_dataloader):
+            print("x: ", x.shape, "y: ", y.shape)
             x = x.to(device)
+            y = y.to(device)
             with torch.no_grad():
-                y_pred = self.model(x)
+                y_pred = self.model(x.squeeze(1))
                 if conf:
                     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
-            preds = np.concatenate((preds, y_pred.cpu().numpy()))
+            preds = np.concatenate((preds, y_pred.squeeze().cpu().numpy()))
             if isinstance(y, dict):
                 y_val = y['Period'] if only_p else y['i']
-                targets = np.concatenate((targets, y_val.cpu().numpy()))
+            else:
+                y_val = y
+            targets = np.concatenate((targets, y_val.cpu().numpy()))
             if conf:
                 confs = np.concatenate((confs, conf_pred.cpu().numpy()))
             tot_kic = np.concatenate((tot_kic, info['KID'].cpu().numpy()))
