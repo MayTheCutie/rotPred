@@ -50,7 +50,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 8
+exp_num = 12
 
 log_path = '/data/logs/astroconf'
 
@@ -62,7 +62,7 @@ if not os.path.exists(f'{log_path}/exp{exp_num}'):
         print(e)
 
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
-# checkpoint_path = '/data/logs/lstm_attn/exp29'
+checkpoint_path = '/data/logs/astroconf/exp5'
 data_folder = "/data/butter/data_cos"
 
 test_folder = "/data/butter/test_cos"
@@ -82,7 +82,7 @@ train_list, val_list = train_test_split(idx_list, test_size=0.1, random_state=12
 
 test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
-b_size = 64
+b_size = 16
 
 num_epochs = 1000
 
@@ -90,7 +90,7 @@ cad = 30
 
 DAY2MIN = 24*60
 
-dur = 360
+dur = 900
 
 # class_labels = ['Period', 'Decay Time', 'Cycle Length']
 class_labels = ['Inclination', 'Period']
@@ -161,15 +161,15 @@ if __name__ == '__main__':
    
     args = Container(**yaml.safe_load(open(f'{yaml_dir}/default_config.yaml', 'r')))
     args.load_dict(yaml.safe_load(open(f'{yaml_dir}/model_config.yaml', 'r'))[args.model])
-    print("args encoder_dim: ", args.encoder_dim)
+    print("args : ", args)
 
     # transform_train = Compose([ AddGaussianNoise(sigma=0.005),
     #                     ])
 
     kepler_data_folder = "/data/lightPred/data"
     non_ps = pd.read_csv('/data/lightPred/tables/non_ps.csv')
-    kepler_df = multi_quarter_kepler_df(kepler_data_folder, table_path=None, Qs=[4,5,6,7])
-    kepler_df = kepler_df[kepler_df['number_of_quarters']==4]
+    kepler_df = multi_quarter_kepler_df(kepler_data_folder, table_path=None, Qs=[4,5,6,7,8,9,10,11,12,13])
+    kepler_df = kepler_df[kepler_df['number_of_quarters']==10]
     kepler_df.to_csv('/data/lightPred/tables/kepler_noise_4567.csv', index=False)
     # kepler_df = pd.read_csv('/data/lightPred/tables/kepler_noise_4567.csv')
     print(kepler_df.head())
@@ -215,11 +215,11 @@ if __name__ == '__main__':
     # test_dataset = ACFDataset(test_folder, test_idx_list, labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
    
     train_dataset = TimeSeriesDataset(data_folder, train_list, transforms=transform,
-    init_frac=0.5, acf=True, return_raw=True, prepare=True, dur=dur)
+    init_frac=0.05, acf=True, return_raw=True, prepare=False, dur=dur)
     val_dataset = TimeSeriesDataset(data_folder, val_list,  transforms=transform,
-     init_frac=0.5, acf=True, return_raw=True, prepare=False, dur=dur)
+     init_frac=0.05, acf=True, return_raw=True, prepare=False, dur=dur)
     test_dataset = TimeSeriesDataset(test_folder, test_idx_list, transforms=test_transform,
-    init_frac=0.5, acf=True, return_raw=True, prepare=False, dur=dur)
+    init_frac=0.05, acf=True, return_raw=True, prepare=False, dur=dur)
 
     # train_dataset = TimeSeriesDataset2(data_folder, train_list, labels=class_labels,
     #  t_samples=None, transforms=transform, spectrogram=False, prepare=False, p_norm=False)
@@ -285,9 +285,12 @@ if __name__ == '__main__':
     # model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
     
     conf_model, _, scheduler, scaler = init_train(args, local_rank)
+    conf_model.pred_layer = nn.Identity()
+    model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, **lstm_params)
 
     # model = conf_model
-    # state_dict = torch.load(f'{log_path}/exp{exp_num}/astroconf.pth')
+
+    # state_dict = torch.load(f'{log_path}/exp5/astroconf.pth')
     # new_state_dict = OrderedDict()
     # for key, value in state_dict.items():
     #     if key.startswith('module.'):
@@ -297,8 +300,9 @@ if __name__ == '__main__':
     # state_dict = new_state_dict
     # model.load_state_dict(new_state_dict)
 
-    conf_model.pred_layer = nn.Identity()
-    model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, **lstm_params)
+    
+
+
     model = model.to(local_rank)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     print("number of params:", count_params(model))

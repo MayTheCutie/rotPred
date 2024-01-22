@@ -438,10 +438,16 @@ class KeplerTrainer(Trainer):
         train_acc = 0
         pbar = tqdm(self.train_dl)
         for i, (x, y, _,info) in enumerate(pbar):
-            x = x.to(device)
             y = y.to(device)
             self.optimizer.zero_grad()
-            y_pred = self.model(x.float())
+            if x.shape[1] == 2:
+                x1, x2 = x[:, 0, :], x[:, 1, :]
+                x1 = x1.to(device)
+                x2 = x2.to(device)
+                y_pred = self.model(x1.float(), x2.float())
+            else:
+                x = x.to(device)
+                y_pred = self.model(x.float())
             # y_val = y['Period'] if only_p else y['i']
             # pred_idx = 1 if only_p else 0
             if conf:
@@ -471,7 +477,14 @@ class KeplerTrainer(Trainer):
             x = x.to(device)
             y = y.to(device)
             self.optimizer.zero_grad()
-            y_pred = self.model(x.float())
+            if x.shape[1] == 2:
+                x1, x2 = x[:, 0, :], x[:, 1, :]
+                x1 = x1.to(device)
+                x2 = x2.to(device)
+                y_pred = self.model(x1.float(), x2.float())
+            else:
+                x = x.to(device)
+                y_pred = self.model(x.float())
             # y_val = y['Period'] if only_p else y['i']
             # pred_idx = 1 if only_p else 0
             if conf:
@@ -505,19 +518,27 @@ class KeplerTrainer(Trainer):
 
         print("len test_dataloader: ", len(test_dataloader))
         for i,(x, y,_,info) in enumerate(test_dataloader):
-            print("x: ", x.shape, "y: ", y.shape)
+            # print("x: ", x.shape, "y: ", y.shape)
             x = x.to(device)
             y = y.to(device)
             with torch.no_grad():
-                y_pred = self.model(x.squeeze(1))
+                if x.shape[1] == 2:
+                    x1, x2 = x[:, 0, :], x[:, 1, :]
+                    x1 = x1.to(device)
+                    x2 = x2.to(device)
+                    y_pred = self.model(x1.float(), x2.float())
+                else:
+                    x = x.to(device)
+                    y_pred = self.model(x.float())
                 if conf:
                     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+            # print("y_pred: ", y_pred.shape, "y: ", y.shape, "conf: ", conf)
             preds = np.concatenate((preds, y_pred.squeeze().cpu().numpy()))
             if isinstance(y, dict):
                 y_val = y['Period'] if only_p else y['i']
             else:
                 y_val = y
-            targets = np.concatenate((targets, y_val.cpu().numpy()))
+            # targets = np.concatenate((targets, y_val.squeeze().cpu().numpy()))
             if conf:
                 confs = np.concatenate((confs, conf_pred.cpu().numpy()))
             tot_kic = np.concatenate((tot_kic, info['KID'].cpu().numpy()))

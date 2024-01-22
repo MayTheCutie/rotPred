@@ -50,7 +50,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 90
+exp_num = 91
 
 
 log_path = '/data/logs/lstm_attn'
@@ -88,7 +88,7 @@ DAY2MIN = 24*60
 
 dur = 360
 
-class_labels = ['Period']    
+class_labels = ['Inclination', 'Period']    
 
 def setup(rank, world_size):
     # initialize the process group
@@ -162,11 +162,11 @@ if __name__ == '__main__':
      moving_avg(49), Detrend()])
 
     train_dataset = TimeSeriesDataset(data_folder, train_list, transforms=transform,
-    init_frac=0.2, acf=True, prepare=True, dur=dur, high_inc=True, norm='none')
+    init_frac=0.5, acf=True, prepare=True, dur=dur, high_inc=True)
     val_dataset = TimeSeriesDataset(data_folder, val_list,  transforms=transform,
-     init_frac=0.2, acf=True, prepare=True, dur=dur, high_inc=True, norm='none')
+     init_frac=0.5, acf=True, prepare=True, dur=dur, high_inc=True)
     test_dataset = TimeSeriesDataset(test_folder, test_idx_list, transforms=transform,
-    init_frac=0.2, acf=True, prepare=True, dur=dur, high_inc=True, norm='none')
+    init_frac=0.5, acf=True, prepare=True, dur=dur, high_inc=True)
 
     # train_weights = train_dataset.weights
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
@@ -199,11 +199,11 @@ if __name__ == '__main__':
 
    
 
-    # model, net_params, _ = load_model(f'{log_path}/exp77', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
+    model, net_params, _ = load_model(f'{log_path}/exp86', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
     
 
     
-    model = LSTM_ATTN(**net_params)
+    # model = LSTM_ATTN(**net_params)
 
     # kepler_train_state_dict = torch.load('/data/logs/kepler_train/exp1/lstm_attn.pth')
     # new_state_dict = {}

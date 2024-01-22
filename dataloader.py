@@ -329,7 +329,7 @@ class KeplerDataset(TimeSsl):
     if self.acf:
       xcf = torch.tensor(A(x, nlags=len(x)))
       if self.return_raw:
-        x = torch.stack([x,torch.tensor(xcf)])
+        x = torch.stack([torch.tensor(xcf), torch.tensor(x)])
       else:
         x = torch.tensor(xcf).unsqueeze(0)
     else:
