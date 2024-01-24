@@ -449,7 +449,7 @@ class DenoisingDataset(Dataset):
 
 class TimeSeriesDataset(Dataset):
   def __init__(self, root_dir, idx_list, labels=['Inclination', 'Period'], t_samples=None, norm='std', transforms=None,
-                noise=False, spectrogram=False, n_fft=1000, acf=False, return_raw=False,high_inc=False,
+                noise=False, spectrogram=False, n_fft=1000, acf=False, return_raw=False,cos_inc=False,
                  wavelet=False, freq_rate=1/48, init_frac=0.4, dur=360, kep_noise=None, prepare=True):
       self.idx_list = idx_list
       self.labels = labels
@@ -469,7 +469,7 @@ class TimeSeriesDataset(Dataset):
       self.freq_rate = freq_rate
       self.init_frac = init_frac
       self.dur = dur 
-      self.high_inc = high_inc
+      self.cos_inc = cos_inc
       self.kep_noise = kep_noise
       self.maxstds = 0.159
       self.step = 0
@@ -571,10 +571,10 @@ class TimeSeriesDataset(Dataset):
       # if 'Inclination' in self.labels:
       #    y[self.labels.index('Inclination')] = np.sin(y[self.labels.index('Inclination')])
       for i,label in enumerate(self.labels):
-        if label in boundary_values_dict.keys():
+        if label == 'Inclination' and self.cos_inc:
+          y[i] = np.cos(y[i])
+        elif label in boundary_values_dict.keys():
           y[i] = (y[i] - boundary_values_dict[label][0])/(boundary_values_dict[label][1]-boundary_values_dict[label][0])
-        if label == 'Inclination' and self.high_inc:
-          y[i] /= 2
       if len(self.labels) == 1:
         return y.squeeze(-1).float()
       return y.squeeze(0).squeeze(-1).float()

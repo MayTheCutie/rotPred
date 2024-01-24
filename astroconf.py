@@ -50,7 +50,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 12
+exp_num = 15
 
 log_path = '/data/logs/astroconf'
 
@@ -82,7 +82,7 @@ train_list, val_list = train_test_split(idx_list, test_size=0.1, random_state=12
 
 test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
-b_size = 16
+b_size = 64
 
 num_epochs = 1000
 
@@ -90,7 +90,7 @@ cad = 30
 
 DAY2MIN = 24*60
 
-dur = 900
+dur = 360
 
 # class_labels = ['Period', 'Decay Time', 'Cycle Length']
 class_labels = ['Inclination', 'Period']
@@ -122,7 +122,7 @@ if __name__ == '__main__':
         'image': False,
         'in_channels': 1,
         'kernel_size': 4,
-        'num_classes': len(class_labels),
+        'num_classes': len(class_labels)*2,
         'num_layers': 5,
         'predict_size': 128,
         'seq_len': int(dur/cad*DAY2MIN),
@@ -168,8 +168,8 @@ if __name__ == '__main__':
 
     kepler_data_folder = "/data/lightPred/data"
     non_ps = pd.read_csv('/data/lightPred/tables/non_ps.csv')
-    kepler_df = multi_quarter_kepler_df(kepler_data_folder, table_path=None, Qs=[4,5,6,7,8,9,10,11,12,13])
-    kepler_df = kepler_df[kepler_df['number_of_quarters']==10]
+    kepler_df = multi_quarter_kepler_df(kepler_data_folder, table_path=None, Qs=[4,5,6,7])
+    kepler_df = kepler_df[kepler_df['number_of_quarters']==4]
     kepler_df.to_csv('/data/lightPred/tables/kepler_noise_4567.csv', index=False)
     # kepler_df = pd.read_csv('/data/lightPred/tables/kepler_noise_4567.csv')
     print(kepler_df.head())
@@ -215,11 +215,11 @@ if __name__ == '__main__':
     # test_dataset = ACFDataset(test_folder, test_idx_list, labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
    
     train_dataset = TimeSeriesDataset(data_folder, train_list, transforms=transform,
-    init_frac=0.05, acf=True, return_raw=True, prepare=False, dur=dur)
+    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, norm='median')
     val_dataset = TimeSeriesDataset(data_folder, val_list,  transforms=transform,
-     init_frac=0.05, acf=True, return_raw=True, prepare=False, dur=dur)
+     init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, norm='median')
     test_dataset = TimeSeriesDataset(test_folder, test_idx_list, transforms=test_transform,
-    init_frac=0.05, acf=True, return_raw=True, prepare=False, dur=dur)
+    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, norm='median')
 
     # train_dataset = TimeSeriesDataset2(data_folder, train_list, labels=class_labels,
     #  t_samples=None, transforms=transform, spectrogram=False, prepare=False, p_norm=False)
@@ -332,7 +332,7 @@ if __name__ == '__main__':
                         exp_name="astroconf")
     
 
-    fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank, early_stopping=40, only_p=False, best='loss', conf=False)
+    fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank, early_stopping=40, only_p=False, best='loss', conf=True)
 
     
     output_filename = f'{log_path}/exp{exp_num}/astroconf.json'
@@ -344,7 +344,7 @@ if __name__ == '__main__':
 
     print("Evaluation on test set:")
 
-    preds, targets, confs = trainer.predict(test_dataloader, device=local_rank, conf=False, load_best=True)
+    preds, targets, confs = trainer.predict(test_dataloader, device=local_rank, conf=True, load_best=True)
 
     eval_results(preds, targets, confs, labels=class_labels, data_dir=f'{log_path}/exp{exp_num}', model_name=model.module.__class__.__name__,
      num_classes=len(class_labels))
