@@ -50,7 +50,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 15
+exp_num = 100
 
 log_path = '/data/logs/astroconf'
 
@@ -62,7 +62,7 @@ if not os.path.exists(f'{log_path}/exp{exp_num}'):
         print(e)
 
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
-checkpoint_path = '/data/logs/astroconf/exp5'
+# checkpoint_path = '/data/logs/astroconf/exp14'
 data_folder = "/data/butter/data_cos"
 
 test_folder = "/data/butter/test_cos"
@@ -161,31 +161,36 @@ if __name__ == '__main__':
    
     args = Container(**yaml.safe_load(open(f'{yaml_dir}/default_config.yaml', 'r')))
     args.load_dict(yaml.safe_load(open(f'{yaml_dir}/model_config.yaml', 'r'))[args.model])
-    print("args : ", args)
+    print("args : ", vars(args))
 
     # transform_train = Compose([ AddGaussianNoise(sigma=0.005),
     #                     ])
 
-    kepler_data_folder = "/data/lightPred/data"
-    non_ps = pd.read_csv('/data/lightPred/tables/non_ps.csv')
-    kepler_df = multi_quarter_kepler_df(kepler_data_folder, table_path=None, Qs=[4,5,6,7])
-    kepler_df = kepler_df[kepler_df['number_of_quarters']==4]
-    kepler_df.to_csv('/data/lightPred/tables/kepler_noise_4567.csv', index=False)
-    # kepler_df = pd.read_csv('/data/lightPred/tables/kepler_noise_4567.csv')
-    print(kepler_df.head())
-    kep_transform = Compose([RandomCrop(int(dur/cad*DAY2MIN))])
-    merged_df = pd.merge(kepler_df, non_ps, on='KID', how='inner')
-    noise_ds = KeplerDataset(kepler_data_folder, path_list=None, df=merged_df,
-    transforms=kep_transform, acf=False, norm='none')
+    # kepler_data_folder = "/data/lightPred/data"
+    # non_ps = pd.read_csv('/data/lightPred/tables/non_ps.csv')
+    # kepler_df = multi_quarter_kepler_df(kepler_data_folder, table_path=None, Qs=[4,5,6,7])
+    # kepler_df = kepler_df[kepler_df['number_of_quarters']==4]
+    # kepler_df.to_csv('/data/lightPred/tables/kepler_noise_4567.csv', index=False)
+    # # kepler_df = pd.read_csv('/data/lightPred/tables/kepler_noise_4567.csv')
+    # print(kepler_df.head())
+    kep_transform = RandomCrop(int(dur/cad*DAY2MIN))
+    # merged_df = pd.merge(kepler_df, non_ps, on='KID', how='inner')
+    # noise_ds = KeplerDataset(kepler_data_folder, path_list=None, df=merged_df,
+    # transforms=kep_transform, acf=False, norm='none')
 
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
-                        #   KeplerNoise(noise_ds, min_ratio=0.02, max_ratio=0.05), 
-                          KeplerNoiseAddition(noise_ds),                         
-     moving_avg(49), Detrend()])
+                          KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                          transforms=kep_transform, min_ratio=0.02, max_ratio=0.05), 
+                        #   KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                        #   transforms=kep_transform),                         
+     moving_avg(49)])
     test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
-                            # KeplerNoise(noise_ds, min_ratio=0.02, max_ratio=0.05), 
-                            KeplerNoiseAddition(noise_ds),
-     moving_avg(49), Detrend()])
+                            KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                            transforms=kep_transform,
+                             min_ratio=0.02, max_ratio=0.05), 
+                        #     KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                        #   transforms=kep_transform),
+     moving_avg(49)])
 
 #     image_transform = torchvision.transforms.Compose([
 #     torchvision.transforms.RandomHorizontalFlip(p=0.5),
@@ -215,11 +220,11 @@ if __name__ == '__main__':
     # test_dataset = ACFDataset(test_folder, test_idx_list, labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
    
     train_dataset = TimeSeriesDataset(data_folder, train_list, transforms=transform,
-    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, norm='median')
+    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, cos_inc=True)
     val_dataset = TimeSeriesDataset(data_folder, val_list,  transforms=transform,
-     init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, norm='median')
+     init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, cos_inc=True)
     test_dataset = TimeSeriesDataset(test_folder, test_idx_list, transforms=test_transform,
-    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, norm='median')
+    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, cos_inc=True)
 
     # train_dataset = TimeSeriesDataset2(data_folder, train_list, labels=class_labels,
     #  t_samples=None, transforms=transform, spectrogram=False, prepare=False, p_norm=False)
@@ -290,7 +295,7 @@ if __name__ == '__main__':
 
     # model = conf_model
 
-    # state_dict = torch.load(f'{log_path}/exp5/astroconf.pth')
+    # state_dict = torch.load(f'{log_path}/exp16/astroconf.pth')
     # new_state_dict = OrderedDict()
     # for key, value in state_dict.items():
     #     if key.startswith('module.'):
@@ -298,6 +303,7 @@ if __name__ == '__main__':
     #             key = key[7:]
     #     new_state_dict[key] = value
     # state_dict = new_state_dict
+    # print("loading state dict...")
     # model.load_state_dict(new_state_dict)
 
     
@@ -315,7 +321,7 @@ if __name__ == '__main__':
     # loss_fn = WeightedMSELoss(factor=1.2)
     # loss_fn = nn.GaussianNLLLoss()
 
-    data_dict = {'dataset': train_dataset.__class__.__name__, 'transforms': transform, 'batch_size': b_size,
+    data_dict = {'dataset': train_dataset.__class__.__name__, 'dataset attributes': vars(train_dataset), 'transforms': transform, 'batch_size': b_size,
      'num_epochs':num_epochs, 'checkpoint_path': f'{log_path}/exp{exp_num}', 'loss_fn': loss_fn.__class__.__name__,
      'model': model.module.__class__.__name__, 'optimizer': optimizer.__class__.__name__,
      'data_folder': data_folder, 'test_folder': test_folder, 'class_labels': class_labels}
@@ -329,7 +335,7 @@ if __name__ == '__main__':
     trainer = DoubleInputTrainer(model=model, optimizer=optimizer, criterion=loss_fn, num_classes=len(class_labels),
                        scheduler=None, train_dataloader=train_dataloader, val_dataloader=val_dataloader,
                         device=local_rank, optim_params=optim_params, net_params=lstm_params, exp_num=exp_num, log_path=log_path,
-                        exp_name="astroconf")
+                        exp_name="astroconf2")
     
 
     fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank, early_stopping=40, only_p=False, best='loss', conf=True)
@@ -344,7 +350,7 @@ if __name__ == '__main__':
 
     print("Evaluation on test set:")
 
-    preds, targets, confs = trainer.predict(test_dataloader, device=local_rank, conf=True, load_best=True)
+    preds, targets, confs = trainer.predict(test_dataloader, device=local_rank, conf=True, load_best=False)
 
     eval_results(preds, targets, confs, labels=class_labels, data_dir=f'{log_path}/exp{exp_num}', model_name=model.module.__class__.__name__,
      num_classes=len(class_labels))

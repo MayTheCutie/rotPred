@@ -16,7 +16,7 @@ from pyts.image import GramianAngularField
 from scipy.signal import stft, correlate2d
 from scipy import signal
 import time
-from scipy.signal import find_peaks, peak_prominences, peak_widths
+from scipy.signal import find_peaks, peak_prominences, peak_widths, savgol_filter as savgol
 import torchaudio.transforms as T
 
 
@@ -456,6 +456,7 @@ class TimeSeriesDataset(Dataset):
       self.length = len(idx_list)
       self.targets_path = os.path.join(root_dir, "simulation_properties.csv")
       self.lc_path = os.path.join(root_dir, "simulations")
+      self.loaded_labels = pd.read_csv(self.targets_path)
       self.seq_len = t_samples
       self.norm=norm
       self.num_classes = len(labels)
@@ -531,14 +532,14 @@ class TimeSeriesDataset(Dataset):
   
   def create_data(self, x):
     if self.acf:
-      xcf = A(x[:,1], nlags=int(self.dur/self.freq_rate) - 1)
+      xcf = A(x, nlags=int(self.dur/self.freq_rate) - 1)
       if self.wavelet:
         power, phase, period = self.wavelet_from_np(x, period_samples=int(self.dur/self.freq_rate))
         gwps = power.sum(axis=-1)
         grad = 1 + np.gradient(gwps)/(2/period)
         x = np.vstack((grad[None], xcf[None]))
       elif self.return_raw:
-        x = np.vstack((xcf[None], x[:,1][None]))
+        x = np.vstack((xcf[None], x[None]))
       else:
         x = xcf 
     elif self.wavelet:
@@ -556,7 +557,9 @@ class TimeSeriesDataset(Dataset):
         s = x.std(dim=-1).unsqueeze(-1)
         x = (x-m)/(s+1e-8)
     elif self.norm == 'median':
-        x /= x.median(dim=-1)
+        # median = x.median(dim=-1).values.unsqueeze(-1)
+        # x = x / (median + 1e-8)
+        x /= x.median(dim=-1).values.unsqueeze(-1)
     elif self.norm == 'minmax':
         mn = x.min(dim=-1).values.unsqueeze(-1)
         mx = x.max(dim=-1).values.unsqueeze(-1)
@@ -564,7 +567,8 @@ class TimeSeriesDataset(Dataset):
     return x
   
   def get_labels(self, sample_idx):
-      y = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
+      # y = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)
+      y = self.loaded_labels.iloc[sample_idx]
       if self.labels is None:
         return y
       y = torch.tensor([y[label] for label in self.labels])
@@ -647,26 +651,32 @@ class TimeSeriesDataset(Dataset):
       return self.length
   
   def __getitem__(self, idx):
-      # s = time.time()
+      s = time.time()
       if not self.prepare:
         info = {'idx': idx}
         sample_idx = remove_leading_zeros(self.idx_list[idx])
         x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values
-        # t1 = time.time()
+        t1 = time.time()
         x = x[int(self.init_frac*len(x)):,:]
         if self.seq_len:
           x = self.interpolate(x)
+        t2 = time.time()
         if self.transforms is not None:
-          x, _, info = self.transforms(x, mask=None, info=dict(), step=self.step)
+          x, _, info = self.transforms(x[:,1], mask=None, info=dict(), step=self.step)
+          # x = savgol(x, 49, 1, mode='mirror')
           info['idx'] = idx
-        x[:,1] = fill_nan_np(x[:,1], interpolate=True)
-        # t2 = time.time()
-        # t3 = time.time()
+        t3 = time.time()
+        x = fill_nan_np(x, interpolate=True)
+        t4 = time.time()
         x = self.create_data(x)
+        # print("x shape: ", x.shape)
+        t5 = time.time()
         x = self.normalize(x)
+        t6 = time.time()
         x = x.nan_to_num(0)
         # t4 = time.time()
         y = self.get_labels(sample_idx)
+        t7 = time.time()
         self.step += 1
       else:
         x, y, info = self.samples[idx]
@@ -677,7 +687,7 @@ class TimeSeriesDataset(Dataset):
         x_spec = spec(x)
         # t6 = time.time()
         return x_spec.unsqueeze(0), y, x.float(), info
-      # print("times: ", t1-s, t2-t1, t3-t2, t4-t3, t5-t4,  "tot time: ", t5-s)
+      # print("times: ", t1-s, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5,t7-t6,  "tot time: ", t7-s)
       return x.float(), y, torch.ones_like(x), info
 
 class TimeSeriesDataset2(Dataset):

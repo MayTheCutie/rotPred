@@ -8,6 +8,8 @@ from . import functional_tensor as F_t
 from lightPred.util.stats import nanstd
 
 from matplotlib import pyplot as plt
+import os
+from scipy.signal import savgol_filter as savgol
 
 class Compose:
     """Composes several transforms together. 
@@ -260,6 +262,7 @@ class moving_avg():
         # padding on the both ends of time series
         info['moving_avg'] = self.kernel_size
         if isinstance(x, np.ndarray):
+            x = savgol(x, self.kernel_size, 1, mode='mirror', axis=0)
             # x = F_np.moving_avg(x, self.kernel_size)
             # return x, mask, info
             x = torch.from_numpy(x)
@@ -281,8 +284,10 @@ class moving_avg():
         return f"moving_avg(kernel_size={self.kernel_size})"
 
 class KeplerNoise():
-    def __init__(self, noise_dataset, max_ratio=1, min_ratio=0.5, warmup=0):
+    def __init__(self, noise_dataset, noise_path=None, transforms=None, max_ratio=1, min_ratio=0.5, warmup=0):
         self.noise_dataset = noise_dataset
+        self.transforms = transforms
+        self.noise_path = noise_path
         self.max_ratio = max_ratio
         self.min_ratio = min_ratio
         self.warmup = warmup
@@ -291,8 +296,16 @@ class KeplerNoise():
             std = x[:, 1].std()
         else:
             std = x.std()
-        idx = np.random.randint(0, len(self.noise_dataset))
-        x_noise,_,_,noise_info = self.noise_dataset[idx]
+        if self.noise_dataset is not None:
+            idx = np.random.randint(0, len(self.noise_dataset))
+            x_noise,_,_,noise_info = self.noise_dataset[idx]
+            x_noise = x_noise.numpy()
+            info['noise_KID'] = noise_info['KID']
+        else:
+            samples_list = os.listdir(self.noise_path)
+            idx = np.random.randint(0, len(samples_list))
+            x_noise,_,noise_info = self.transforms(np.load(f"{self.noise_path}/{samples_list[idx]}"), info=dict())
+            info['noise_KID'] = samples_list[idx].split('.')[0]
         if self.warmup:
             max_ratio = self.max_ratio*(1-np.exp(-step/self.warmup)) + self.min_ratio
         else:
@@ -300,12 +313,11 @@ class KeplerNoise():
         noise_std = np.random.uniform(std*self.min_ratio, std*max_ratio)
         x_noise = (x_noise - x_noise.mean()) / (x_noise.std() + 1e-8) *  noise_std
         if len(x.shape) == 1:
-            x = x + x_noise.squeeze().numpy()
+            x = x + x_noise.squeeze()
         else:
-            x[:,1] = x[:,1] + x_noise.squeeze().numpy()
+            x[:,1] = x[:,1] + x_noise.squeeze()
         info['noise_std'] = noise_std
         info['std'] = std
-        info['noise_KID'] = noise_info['KID']
         return x, mask, info
     
     def __repr__(self):
@@ -313,17 +325,26 @@ class KeplerNoise():
     
 
 class KeplerNoiseAddition():
-    def __init__(self, noise_dataset):
+    def __init__(self, noise_dataset, noise_path=None, transforms=None):
         self.noise_dataset = noise_dataset
+        self.noise_path = noise_path
+        self.transforms = transforms
     def __call__(self, x, mask=None, info=None, step=None):
-        idx = np.random.randint(0, len(self.noise_dataset))
-        x_noise,_,_,noise_info = self.noise_dataset[idx]        
-        x_noise = x_noise/x_noise.median() - 1
-        if len(x.shape) == 1:
-            x = x + x_noise.squeeze().numpy()
+        if self.noise_dataset is not None:
+            idx = np.random.randint(0, len(self.noise_dataset))
+            x_noise,_,_,noise_info = self.noise_dataset[idx]
+            x_noise = x_noise.numpy()
+            x_noise = x_noise / x_noise.median() - 1
+            info['noise_KID'] = noise_info['KID']
         else:
-            x[:,1] = x[:,1] + x_noise.squeeze().numpy()
-        info['noise_KID'] = noise_info['KID']
+            samples_list = os.listdir(self.noise_path)
+            idx = np.random.randint(0, len(samples_list))
+            x_noise,_,noise_info = self.transforms(np.load(f"{self.noise_path}/{samples_list[idx]}"), info=dict())
+            info['noise_KID'] = samples_list[idx].split('.')[0]
+        if len(x.shape) == 1:
+            x = x + x_noise.squeeze()
+        else:
+            x[:,1] = x[:,1] + x_noise.squeeze()
         return x, mask, info
     
     def __repr__(self):
