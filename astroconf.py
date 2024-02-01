@@ -50,7 +50,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 100
+exp_num = 36
 
 log_path = '/data/logs/astroconf'
 
@@ -63,9 +63,9 @@ if not os.path.exists(f'{log_path}/exp{exp_num}'):
 
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
 # checkpoint_path = '/data/logs/astroconf/exp14'
-data_folder = "/data/butter/data_cos"
+data_folder = "/data/butter/data_aigrain2"
 
-test_folder = "/data/butter/test_cos"
+test_folder = "/data/butter/test_aigrain2"
 
 yaml_dir = '/data/lightPred/Astroconformer/Astroconformer/'
 
@@ -186,8 +186,7 @@ if __name__ == '__main__':
      moving_avg(49)])
     test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
                             KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                            transforms=kep_transform,
-                             min_ratio=0.02, max_ratio=0.05), 
+                            transforms=kep_transform,  min_ratio=0.02, max_ratio=0.05), 
                         #     KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                         #   transforms=kep_transform),
      moving_avg(49)])
@@ -219,12 +218,12 @@ if __name__ == '__main__':
     # val_dataset = ACFDataset(data_folder, val_list, labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
     # test_dataset = ACFDataset(test_folder, test_idx_list, labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
    
-    train_dataset = TimeSeriesDataset(data_folder, train_list, transforms=transform,
-    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, cos_inc=True)
-    val_dataset = TimeSeriesDataset(data_folder, val_list,  transforms=transform,
-     init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, cos_inc=True)
-    test_dataset = TimeSeriesDataset(test_folder, test_idx_list, transforms=test_transform,
-    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, cos_inc=True)
+    train_dataset = TimeSeriesDataset(data_folder, train_list, labels=class_labels, transforms=transform,
+    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur)
+    val_dataset = TimeSeriesDataset(data_folder, val_list, labels=class_labels,  transforms=transform,
+     init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur)
+    test_dataset = TimeSeriesDataset(test_folder, test_idx_list, labels=class_labels, transforms=test_transform,
+    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur)
 
     # train_dataset = TimeSeriesDataset2(data_folder, train_list, labels=class_labels,
     #  t_samples=None, transforms=transform, spectrogram=False, prepare=False, p_norm=False)
@@ -289,13 +288,18 @@ if __name__ == '__main__':
 
     # model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
     
+    # lstm, lstm_params, _ = load_model(f'/data/logs/lstm_attn/exp77', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
+
     conf_model, _, scheduler, scaler = init_train(args, local_rank)
     conf_model.pred_layer = nn.Identity()
     model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, **lstm_params)
 
     # model = conf_model
 
-    # state_dict = torch.load(f'{log_path}/exp16/astroconf.pth')
+
+
+
+    # state_dict = torch.load(f'{log_path}/exp28/astroconf.pth')
     # new_state_dict = OrderedDict()
     # for key, value in state_dict.items():
     #     if key.startswith('module.'):
@@ -306,8 +310,16 @@ if __name__ == '__main__':
     # print("loading state dict...")
     # model.load_state_dict(new_state_dict)
 
-    
-
+    # state_dict = torch.load(f'/data/logs/lstm_attn/exp77/lstm_attn_acc2.pth')
+    # new_state_dict = OrderedDict()
+    # for key, value in state_dict.items():
+    #     if key.startswith('module.'):
+    #         while key.startswith('module.'):
+    #             key = key[7:]
+    #     new_state_dict[key] = value
+    # state_dict = new_state_dict
+    # print("loading state dict...")
+    # model.load_state_dict(new_state_dict)
 
     model = model.to(local_rank)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
@@ -321,26 +333,28 @@ if __name__ == '__main__':
     # loss_fn = WeightedMSELoss(factor=1.2)
     # loss_fn = nn.GaussianNLLLoss()
 
-    data_dict = {'dataset': train_dataset.__class__.__name__, 'dataset attributes': vars(train_dataset), 'transforms': transform, 'batch_size': b_size,
-     'num_epochs':num_epochs, 'checkpoint_path': f'{log_path}/exp{exp_num}', 'loss_fn': loss_fn.__class__.__name__,
+    data_dict = {'dataset': train_dataset.__class__.__name__,
+                   'transforms': transform,  'batch_size': b_size,
+     'num_epochs':num_epochs, 'checkpoint_path': f'{log_path}/exp{exp_num}', 'loss_fn':
+      loss_fn.__class__.__name__,
      'model': model.module.__class__.__name__, 'optimizer': optimizer.__class__.__name__,
      'data_folder': data_folder, 'test_folder': test_folder, 'class_labels': class_labels}
 
     with open(f'{log_path}/exp{exp_num}/data_params.yml', 'w') as outfile:
         yaml.dump(data_dict, outfile, default_flow_style=False)
-
+    print("logdir: ", f'{log_path}/exp{exp_num}')
     print("data params: ", data_dict)
+    print("args: ", args)
 
-    
-    trainer = DoubleInputTrainer(model=model, optimizer=optimizer, criterion=loss_fn, num_classes=len(class_labels),
-                       scheduler=None, train_dataloader=train_dataloader, val_dataloader=val_dataloader,
-                        device=local_rank, optim_params=optim_params, net_params=lstm_params, exp_num=exp_num, log_path=log_path,
-                        exp_name="astroconf2")
-    
-
-    fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank, early_stopping=40, only_p=False, best='loss', conf=True)
-
-    
+    trainer = DoubleInputTrainer(model=model, optimizer=optimizer,
+                        criterion=loss_fn, num_classes=len(class_labels),
+                       scheduler=None, train_dataloader=train_dataloader,
+                       val_dataloader=val_dataloader, device=local_rank,
+                         optim_params=optim_params, net_params=lstm_params,
+                           exp_num=exp_num, log_path=log_path,
+                        exp_name="astroconf_loss2") 
+    fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
+                           early_stopping=40, only_p=False, best='loss', conf=True) 
     output_filename = f'{log_path}/exp{exp_num}/astroconf.json'
     with open(output_filename, "w") as f:
         json.dump(fit_res, f, indent=2)
@@ -350,19 +364,12 @@ if __name__ == '__main__':
 
     print("Evaluation on test set:")
 
-    preds, targets, confs = trainer.predict(test_dataloader, device=local_rank, conf=True, load_best=False)
+    preds, targets, confs = trainer.predict(test_dataloader, device=local_rank,
+                                             conf=True, load_best=False)
 
-    eval_results(preds, targets, confs, labels=class_labels, data_dir=f'{log_path}/exp{exp_num}', model_name=model.module.__class__.__name__,
-     num_classes=len(class_labels))
+    eval_results(preds, targets, confs, labels=class_labels, data_dir=f'{log_path}/exp{exp_num}',
+                  model_name=model.module.__class__.__name__,  num_classes=len(class_labels), cos_inc=False)
 
 
     # eval_model(f'{log_path}/exp{exp_num}',model=LSTM_ATTN, test_dl=val_dataloader,
-    #                 data_folder=test_folder, conf=True, num_classes=net_params['num_classes']//2) 
-
-    
-    
-    
-   
-      
-    
-    
+    #                 data_folder=test_folder, conf=True, num_classes=net_params['num_classes']//2)  

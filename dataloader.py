@@ -28,10 +28,11 @@ min_cycle, max_cycle = 1, 10
 min_i, max_i = 0, np.pi/2
 min_tau, max_tau = 1,10 
 min_n, max_n = 0, 5000
+min_shear, max_shear = 0, 1
 T_SUN = 5777
 boundary_values_dict = {'Period': (min_p, max_p), 'Inclination': (min_i, max_i),
  'Decay Time': (min_tau, max_tau), 'Cycle Length': (min_cycle, max_cycle), 'Spot Max': (min_lat, max_lat),
- 'n_spots': (min_n, max_n),}
+ 'n_spots': (min_n, max_n), 'Shear': (min_shear, max_shear)}
 
 non_period_table_path = "/data/lightPred/Table_2_Non_Periodic.txt"
 kepler_path = "/data/lightPred/data"
@@ -185,7 +186,7 @@ class TimeSsl(Dataset):
         try:
           for i in range(len(row['data_file_path'])):
             x,time,meta = read_fits(row['data_file_path'][i])
-            x /= x.max()
+            # x /= x.max()
             x = fill_nan_np(np.array(x), interpolate=True)
             if i == 0:
               x_tot = x.copy()
@@ -193,7 +194,7 @@ class TimeSsl(Dataset):
               border_val = np.mean(x) - np.mean(x_tot)
               x -= border_val
               x_tot = np.concatenate((x_tot, np.array(x)))
-          x = torch.tensor(x_tot/x_tot.max())
+          x = torch.tensor(x_tot)
           self.cur_len = len(x)
         except (TypeError,OSError, FileNotFoundError)  as e:
             print("Error: ", e)
@@ -321,8 +322,9 @@ class KeplerDataset(TimeSsl):
       x, meta = self.read_np(idx)
     else:
       x, meta =  self.read_data(idx).float()
-      x /= x.max()
+      # x /= x.median()
     info = dict()
+    x /= x.median()
     if self.transforms is not None:
           x, _, info = self.transforms(x, mask=None, info=info)
           x = x.squeeze()
@@ -576,7 +578,7 @@ class TimeSeriesDataset(Dataset):
       #    y[self.labels.index('Inclination')] = np.sin(y[self.labels.index('Inclination')])
       for i,label in enumerate(self.labels):
         if label == 'Inclination' and self.cos_inc:
-          y[i] = np.cos(y[i])
+          y[i] = np.cos(np.pi/2 - y[i])
         elif label in boundary_values_dict.keys():
           y[i] = (y[i] - boundary_values_dict[label][0])/(boundary_values_dict[label][1]-boundary_values_dict[label][0])
       if len(self.labels) == 1:
