@@ -434,14 +434,22 @@ class LSTM_ATTN_QUANT(LSTM):
         return out.transpose(1,2)
 
 class LSTM_DUAL(LSTM_ATTN):
-    def __init__(self, dual_model, encoder_dims, **kwargs):
+    def __init__(self, dual_model, encoder_dims, lstm_model=None, freeze=False, **kwargs):
         super(LSTM_DUAL, self).__init__(**kwargs)
+        if lstm_model is not None:
+            self.feature_extractor = lstm_model.feature_extractor
+            self.attention = lstm_model.attention
+            if freeze:
+                for param in self.feature_extractor.parameters():
+                    param.requires_grad = False
+                # for param in self.attention.parameters():
+                #     param.requires_grad = False
         num_lstm_features = self.feature_extractor.hidden_size*2
         self.num_features = num_lstm_features + encoder_dims
         self.dual_model = dual_model
         self.pred_layer = nn.Sequential(
         nn.Linear(self.num_features, self.predict_size),
-        nn.SiLU(),
+        nn.GELU(),
         nn.Dropout(p=0.3),
         nn.Linear(self.predict_size,self.num_classes),
     )

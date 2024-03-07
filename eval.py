@@ -293,19 +293,25 @@ def eval_model(data_dir, model, test_dl, data_folder=None, scale_target=True, sc
 
 
 def eval_results(output, target, conf, data_dir, model_name, cls=False, labels=['Inclination', 'Period'], num_classes=2, only_one=False, test_df=None,
-                scale_target=True, scale_output=True, kepler=False):
+                scale_target=True, scale_output=True, kepler=False, cos_inc=False):
     num_classes = len(labels) if not cls else num_classes
     if not cls:
         if scale_target:
-            print("scaling target")
+            print("scaling target with cos_inc: ", cos_inc)
             for i in range(len(labels)):
-                target[:,i] = target[:,i] * (boundary_values_dict[labels[i]][1] - boundary_values_dict[labels[i]][0]) + boundary_values_dict[labels[i]][0]
+                if labels[i] == 'Inclination' and cos_inc:
+                    target[:,i] = np.pi/2 - np.arccos(target[:,i])
+                else:
+                    target[:,i] = target[:,i] * (boundary_values_dict[labels[i]][1] - boundary_values_dict[labels[i]][0]) + boundary_values_dict[labels[i]][0]
             
         if scale_output:
             print("scaling output")
             for i in range(len(labels)):
                 print(labels[i], "before ", output[:,i].max(), output[:,i].min())
-                output[:,i] = output[:,i] * (boundary_values_dict[labels[i]][1] - boundary_values_dict[labels[i]][0]) + boundary_values_dict[labels[i]][0]
+                if labels[i] == 'Inclination' and cos_inc:
+                    output[:,i] = np.pi/2 - np.arccos(output[:,i])
+                else:
+                    output[:,i] = output[:,i] * (boundary_values_dict[labels[i]][1] - boundary_values_dict[labels[i]][0]) + boundary_values_dict[labels[i]][0]
                 print(labels[i], "after ", output[:,i].max(), output[:,i].min())
 
         df, diff =calc_diff(target, output, conf, test_df=test_df, cls=cls, labels=labels, num_classes=num_classes)

@@ -50,7 +50,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 36
+exp_num = 35
 
 log_path = '/data/logs/astroconf'
 
@@ -63,15 +63,15 @@ if not os.path.exists(f'{log_path}/exp{exp_num}'):
 
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
 # checkpoint_path = '/data/logs/astroconf/exp14'
-data_folder = "/data/butter/data_aigrain2"
+data_folder = "/data/butter/data_high_spots"
 
-test_folder = "/data/butter/test_aigrain2"
+test_folder = "/data/butter/test_high_spots"
 
 yaml_dir = '/data/lightPred/Astroconformer/Astroconformer/'
 
-Nlc = 50000
+Nlc = 18000
 
-test_Nlc = 5000
+test_Nlc = 3000
 
 CUDA_LAUNCH_BLOCKING='1'
 
@@ -179,16 +179,16 @@ if __name__ == '__main__':
     # transforms=kep_transform, acf=False, norm='none')
 
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
-                          KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                          transforms=kep_transform, min_ratio=0.02, max_ratio=0.05), 
-                        #   KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                        #   transforms=kep_transform),                         
+                        #   KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                        #   transforms=kep_transform, min_ratio=0.02, max_ratio=0.05), 
+                          KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                          transforms=kep_transform),                         
      moving_avg(49)])
     test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
-                            KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                            transforms=kep_transform,  min_ratio=0.02, max_ratio=0.05), 
-                        #     KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                        #   transforms=kep_transform),
+                            # KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                            # transforms=kep_transform,  min_ratio=0.02, max_ratio=0.05), 
+                            KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                          transforms=kep_transform),
      moving_avg(49)])
 
 #     image_transform = torchvision.transforms.Compose([
@@ -299,16 +299,16 @@ if __name__ == '__main__':
 
 
 
-    # state_dict = torch.load(f'{log_path}/exp28/astroconf.pth')
-    # new_state_dict = OrderedDict()
-    # for key, value in state_dict.items():
-    #     if key.startswith('module.'):
-    #         while key.startswith('module.'):
-    #             key = key[7:]
-    #     new_state_dict[key] = value
-    # state_dict = new_state_dict
-    # print("loading state dict...")
-    # model.load_state_dict(new_state_dict)
+    state_dict = torch.load(f'{log_path}/exp34/astroconf.pth')
+    new_state_dict = OrderedDict()
+    for key, value in state_dict.items():
+        if key.startswith('module.'):
+            while key.startswith('module.'):
+                key = key[7:]
+        new_state_dict[key] = value
+    state_dict = new_state_dict
+    print("loading state dict...")
+    model.load_state_dict(new_state_dict)
 
     # state_dict = torch.load(f'/data/logs/lstm_attn/exp77/lstm_attn_acc2.pth')
     # new_state_dict = OrderedDict()

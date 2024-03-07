@@ -19,6 +19,7 @@ from typing import Callable, Dict, Optional, Tuple, Type, Union
 import collections
 import contextlib
 import re
+from scipy.signal import convolve, boxcar, medfilt
 
 
 
@@ -468,6 +469,10 @@ def evaluate_acf(root_dir, idx_list, max_p=60):
     target = []
     output = []
 
+    window_size = 2501
+    boxcar_window = boxcar(window_size) / window_size
+    
+
     targets_path = os.path.join(root_dir, "simulation_properties.csv")
     lc_path = os.path.join(root_dir, "simulations")
     y_df = pd.read_csv(targets_path)
@@ -475,17 +480,18 @@ def evaluate_acf(root_dir, idx_list, max_p=60):
     for i,idx in enumerate(idx_list):
         s = time.time()
         # idx = remove_leading_zeros(idx)
-        print(idx)
-        x = pd.read_parquet(os.path.join(lc_path, f"lc_{idx}.pqt"))
-        x = x.values.astype(np.float32)[int(0.4*len(x)):,:]
+        lc = pd.read_parquet(os.path.join(lc_path, f"lc_{idx}.pqt"))
+        lc = lc.values.astype(np.float32)
         meta = {'TARGETID':idx, 'OBJECT':'butterpy'}
-        lc = lk.LightCurve(time=x[:,0], flux=x[:,1], meta=meta)
+        x_smoothed = convolve(medfilt(lc[:,1], kernel_size=51), boxcar_window, mode='same')
+        x = lc[:,1] - x_smoothed + 1
+        x = x[window_size//2:-window_size//2]
+        lc = lk.LightCurve(time=lc[window_size//2:-window_size//2,0], flux=x, meta=meta)
         y = y_df.iloc[i]
-        print(y)
         y = torch.tensor(y['Period'])
-        print("analyzing...")
+        # print("analyzing...")
         p = analyze_lc(lc)
-        print(p)
+        print(idx, p, y.item())
         output.append(p)
         target.append(y)
         if p is not None:
@@ -703,7 +709,7 @@ def collate(batch, *, collate_fn_map: Optional[Dict[Union[Type, Tuple[Type, ...]
     
 
 # if __name__ == '__main__':
-    plot_all("/data/logs/masked_ssl")
+    # plot_all("/data/logs/masked_ssl")
     # train, test = create_train_test("/kepler/lightPred/data")
     # print("len train: ", len(train), "len test: ", len(test))
     # show_statistics('/kepler/butter/data', np.arange(0, 10000), '/kepler/butter/data/dist.png')
@@ -711,3 +717,4 @@ def collate(batch, *, collate_fn_map: Optional[Dict[Union[Type, Tuple[Type, ...]
     # print(train_df.head())
     # print(test_df.head())
     # print(len(train_df), len(test_df))
+    

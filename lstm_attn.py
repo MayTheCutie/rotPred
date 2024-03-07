@@ -50,7 +50,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 91
+exp_num = 100
 
 
 log_path = '/data/logs/lstm_attn'
@@ -153,20 +153,22 @@ if __name__ == '__main__':
     #                     ])
 
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
-                        #   KeplerNoise(noise_ds, min_ratio=0.02, max_ratio=0.05), 
-                          KeplerNoiseAddition(noise_ds),                         
+                          KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                          transforms=kep_transform, min_ratio=0.02, max_ratio=0.05), 
+                        #   KeplerNoiseAddition(noise_ds),                         
      moving_avg(49), Detrend()])
     test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
-                            # KeplerNoise(noise_ds, min_ratio=0.02, max_ratio=0.05), 
-                            KeplerNoiseAddition(noise_ds),
+                            KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                            transforms=kep_transform, min_ratio=0.02, max_ratio=0.05), 
+                            # KeplerNoiseAddition(noise_ds),
      moving_avg(49), Detrend()])
 
     train_dataset = TimeSeriesDataset(data_folder, train_list, transforms=transform,
-    init_frac=0.5, acf=True, prepare=True, dur=dur, high_inc=True)
+    init_frac=0.5, acf=True, prepare=False, dur=dur)
     val_dataset = TimeSeriesDataset(data_folder, val_list,  transforms=transform,
-     init_frac=0.5, acf=True, prepare=True, dur=dur, high_inc=True)
+     init_frac=0.5, acf=True, prepare=False, dur=dur)
     test_dataset = TimeSeriesDataset(test_folder, test_idx_list, transforms=transform,
-    init_frac=0.5, acf=True, prepare=True, dur=dur, high_inc=True)
+    init_frac=0.5, acf=True, prepare=False, dur=dur)
 
     # train_weights = train_dataset.weights
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
@@ -199,7 +201,7 @@ if __name__ == '__main__':
 
    
 
-    model, net_params, _ = load_model(f'{log_path}/exp86', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
+    model, net_params, _ = load_model(f'{log_path}/exp77', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
     
 
     
@@ -249,19 +251,19 @@ if __name__ == '__main__':
                         exp_name="lstm_attn")
     
 
-    fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank, early_stopping=40, only_p=False, best='loss', conf=True)
+    # fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank, early_stopping=40, only_p=False, best='loss', conf=True)
 
     
-    output_filename = f'{log_path}/exp{exp_num}/lstm_attn.json'
-    with open(output_filename, "w") as f:
-        json.dump(fit_res, f, indent=2)
-    fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-    plt.savefig(f"{log_path}/exp{exp_num}/fit.png")
-    plt.clf()
+    # output_filename = f'{log_path}/exp{exp_num}/lstm_attn.json'
+    # with open(output_filename, "w") as f:
+    #     json.dump(fit_res, f, indent=2)
+    # fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+    # plt.savefig(f"{log_path}/exp{exp_num}/fit.png")
+    # plt.clf()
 
     print("Evaluation on test set:")
 
-    preds, targets, confs = trainer.predict(test_dataloader, device=local_rank, conf=True, load_best=True)
+    preds, targets, confs = trainer.predict(test_dataloader, device=local_rank, conf=True, load_best=False)
 
     eval_results(preds, targets, confs, labels=class_labels, data_dir=f'{log_path}/exp{exp_num}', model_name=model.module.__class__.__name__,
      num_classes=net_params['num_classes']//2)

@@ -186,7 +186,7 @@ class TimeSsl(Dataset):
         try:
           for i in range(len(row['data_file_path'])):
             x,time,meta = read_fits(row['data_file_path'][i])
-            # x /= x.max()
+            x /= x.max()
             x = fill_nan_np(np.array(x), interpolate=True)
             if i == 0:
               x_tot = x.copy()
@@ -322,9 +322,9 @@ class KeplerDataset(TimeSsl):
       x, meta = self.read_np(idx)
     else:
       x, meta =  self.read_data(idx).float()
-      # x /= x.median()
+      x /= x.max()
     info = dict()
-    x /= x.median()
+    x /= x.max()
     if self.transforms is not None:
           x, _, info = self.transforms(x, mask=None, info=info)
           x = x.squeeze()

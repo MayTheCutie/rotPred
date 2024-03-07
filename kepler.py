@@ -38,7 +38,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 48
+exp_num = 50
 
 log_path = '/data/logs/kepler'
 
@@ -161,7 +161,11 @@ if __name__ == '__main__':
     torch.cuda.set_device(local_rank)
     print(f"rank: {rank}, local_rank: {local_rank}")
 
-    q_list = [[4,5,6,7,8,9,10,11], [5,6,7,8,9,10,11,12], [6,7,8,9,10,11,12,13],
+    print("logdir ", f'{log_path}/exp{exp_num}')
+    print("checkpoint path ", chekpoint_path)
+
+    q_list = [[3,4,5,6,7,8,9,10],
+    [4,5,6,7,8,9,10,11], [5,6,7,8,9,10,11,12], [6,7,8,9,10,11,12,13],
         [7,8,9,10,11,12,13,14],[8,9,10,11,12,13,14,15], [9,10,11,12,13,14,15,16]]
     for Q in q_list:
         print("Q: ", Q)

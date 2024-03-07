@@ -311,11 +311,11 @@ class KeplerNoise():
         else:
             max_ratio = self.max_ratio
         noise_std = np.random.uniform(std*self.min_ratio, std*max_ratio)
-        x_noise = (x_noise - x_noise.mean()) / (x_noise.std() + 1e-8) *  noise_std
+        x_noise = (x_noise - x_noise.mean()) / (x_noise.std() + 1e-8) *  noise_std + 1
         if len(x.shape) == 1:
-            x = x + x_noise.squeeze()
+            x = x*x_noise.squeeze()
         else:
-            x[:,1] = x[:,1] + x_noise.squeeze()
+            x[:,1] = x[:,1]*x_noise.squeeze()
         info['noise_std'] = noise_std
         info['std'] = std
         return x, mask, info

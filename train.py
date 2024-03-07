@@ -40,12 +40,13 @@ class Trainer(object):
     """
     def __init__(self, model, optimizer, criterion, train_dataloader, device, num_classes=2, scheduler=None, val_dataloader=None,
                  optim_params=None, max_iter=np.inf, net_params=None, scaler=None, grad_clip=False,
-                   exp_num=None, log_path=None, exp_name=None, plot_every=None):
+                   exp_num=None, log_path=None, exp_name=None, plot_every=None, cos_inc=False):
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
         self.scaler = scaler
         self.grad_clip = grad_clip
+        self.cos_inc = cos_inc
         self.num_classes = num_classes
         self.scheduler = scheduler
         self.train_dl = train_dataloader
@@ -221,6 +222,8 @@ class Trainer(object):
             # self.train_dl.dataset.step += 1 # for noise addition
             # mean_acc = (diff[:,0]/(y[:,0])).sum().item()
             # train_acc2 += (diff[:,self.num_classes-1] < y[:,self.num_classes-1]/10).sum().item()
+            if i > self.max_iter:
+                break
         print("number of train_accs: ", train_acc)
         return train_loss, all_accs/len(self.train_dl.dataset)
 
@@ -339,6 +342,10 @@ class DoubleInputTrainer(Trainer):
                 
             # y_std = torch.std(y.squeeze(), dim=1)
             # y_pred_std = torch.std(y_pred.squeeze(), dim=1)
+            if self.cos_inc:
+                inc_idx = 0
+                y_pred[:, inc_idx] = torch.cos(y_pred[:, inc_idx]*np.pi/2)
+                y[:, inc_idx] = torch.cos(y[:, inc_idx]*np.pi/2)
             loss = self.criterion(y_pred, y)
             if conf:
                 loss += self.criterion(conf_pred, conf_y)
@@ -355,7 +362,10 @@ class DoubleInputTrainer(Trainer):
             all_acc = (diff < (y/10)).sum(0)
             all_accs = all_accs + all_acc
             pbar.set_description(f"train_acc: {all_acc}, train_loss:  {loss.item()}")
+            if i > self.max_iter:
+                break
         return train_loss, all_accs/len(self.train_dl.dataset)
+    
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
         """
         Evaluates the model for one epoch.
@@ -377,6 +387,10 @@ class DoubleInputTrainer(Trainer):
                     conf_y = torch.abs(y - y_pred)
             # y_std = torch.std(y.squeeze(), dim=1)
             # y_pred_std = torch.std(y_pred.squeeze(), dim=1)
+            if self.cos_inc:
+                inc_idx = 0
+                y_pred[:, inc_idx] = torch.cos(y_pred[:, inc_idx]*np.pi/2)
+                y[:, inc_idx] = torch.cos(y[:, inc_idx]*np.pi/2)
             loss = self.criterion(y_pred, y) 
             if conf:
                 loss += self.criterion(conf_pred, conf_y)
