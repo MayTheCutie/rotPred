@@ -580,7 +580,7 @@ class KeplerTrainer(Trainer):
         tot_g = np.zeros((0))
         tot_qs = []
 
-        print("len test_dataloader: ", len(test_dataloader))
+        print("len test dataset: ", len(test_dataloader.dataset))
         for i,(x, y,_,info) in enumerate(test_dataloader):
             # print("x: ", x.shape, "y: ", y.shape)
             x = x.to(device)

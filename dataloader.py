@@ -295,7 +295,9 @@ class KeplerDataset(TimeSsl):
     if self.transforms is not None:
           x, _, info = self.transforms(x, mask=None, info=info)
           x = x.squeeze()
-          x = np.pad(x, (0, self.seq_len - x.shape[-1]), "constant", constant_values=0)
+          print("after transforms: ", x.shape)
+          if self.seq_len > x.shape[-1]:
+            x = np.pad(x, (0, self.seq_len - x.shape[-1]), "constant", constant_values=0)
     if self.acf:
       xcf = torch.tensor(A(x, nlags=len(x)))
       if self.return_raw:

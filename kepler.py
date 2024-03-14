@@ -183,7 +183,7 @@ if __name__ == '__main__':
         print("i: ", q)
         lower_bound = q*int(dur/cad*DAY2MIN)
         upper_bound = (q+1)*int(dur/cad*DAY2MIN)
-        #
+        print(f"lower bound {lower_bound}, upper bound {upper_bound}")
         transform = Compose([moving_avg(49), Detrend(), RandomCrop(int(dur/cad*DAY2MIN))])
         test_transform = Compose([moving_avg(49), Detrend(), Slice(lower_bound, upper_bound)])
 
@@ -234,6 +234,7 @@ if __name__ == '__main__':
 
         preds_f, target_f, conf_f, kids_f, teff_f, radius_f, logg_f, qs_f = trainer.predict(full_dataloader, device=local_rank, conf=True, only_p=False)
         # if preds_f[:,0].max() <= 1:
+        print("number of predictions: ", len(preds_f))
         print("inc range ", preds_f[:, 0].max(), preds_f[:, 0].min())
 
         # preds_f[:,0] = np.arcsin(preds_f[:,0])*180/np.pi
