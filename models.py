@@ -1,20 +1,13 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from lightPred.transformer_models import TransformerEncoderDecoder, TransformerEncoder as TEncoder, TransformerDecoder as TDecoder
 import math
 from torch.nn.utils import weight_norm
 from lightPred.utils import residual_by_period
 from lightPred.period_analysis import analyze_lc_torch, analyze_lc
-from lightPred.Informer2020.models.encoder import Encoder, EncoderLayer, ConvLayer, EncoderStack, HwinEncoderLayer
-from lightPred.Informer2020.models.decoder import Decoder, DecoderLayer
-from lightPred.Informer2020.models.attn import FullAttention, ProbAttention, AttentionLayer, HwinAttentionLayer
-from lightPred.Informer2020.models.embed import DataEmbedding
-from lightPred.Autoformer.layers.Autoformer_EncDec import Encoder as AutoformerEncoder, EncoderLayer as AutoformerEncoderLayer, my_Layernorm as AutoformerLayerNorm, series_decomp
-from lightPred.Autoformer.layers.AutoCorrelation import AutoCorrelation, AutoCorrelationLayer
+
 from torchvision.models.swin_transformer import SwinTransformer
-from lightPred.conformer.conformer.convolution import ConformerConvModule, Conv2dSubampling
-from lightPred.conformer.conformer.encoder import ConformerBlock
+
 
 
 def D(p, z, version='simplified'): # negative cosine similarity

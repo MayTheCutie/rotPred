@@ -11,7 +11,6 @@ from pyts.image import GramianAngularField
 import shutil
 from scipy.signal import find_peaks, peak_prominences, peak_widths
 from matplotlib.lines import Line2D
-import torchaudio
 import butterpy as bp
 from scipy.signal import savgol_filter as savgol
 
@@ -26,19 +25,17 @@ sys.path.append(ROOT_DIR)
 print("running from ", ROOT_DIR)  
 # from lightPred.datasets.simulations import TimeSeriesDataset
 from lightPred.dataloader import *
-from lightPred.augmentations import *
+# from lightPred.augmentations import *
 from lightPred.utils import *
 # from lightPred.optim import NoamOpt, ScheduledOptim
 # from lightPred.Informer2020.models.attn import HwinAttentionLayer, patchify, FullAttention
 # from lightPred.Informer2020.models.encoder import HwinEncoderLayer, Encoder, ConvLayer
 
 from lightPred.models import *
-from lightPred.Informer2020.models.model import Informer
 
 from lightPred.train import *
 from lightPred.sampler import DistributedSamplerWrapper
 from lightPred.transforms import *
-from lightPred.nt_xent_loss import *
 from lightPred.period_analysis import analyze_lc, analyze_lc_kepler
 
 import sys
@@ -82,6 +79,19 @@ kepler_data_folder = "/data/lightPred/data"
 idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc))+1) for idx in range(Nlc)]
 
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
+
+
+def show_samples(num_samples):
+    idx_list = [f'{idx:d}'.zfill(int(np.log10(3000)) + 1) for idx in range(3000)]
+    dataset = TimeSeriesDataset(data_folder, idx_list, t_samples=None, norm='std')
+    for i in range(num_samples):
+        x, y, _, _ = dataset[i]
+        plt.plot(x)
+        plt.title(f"p: {y[1].item()}, inc: {y[0].item()}")
+        plt.savefig(f'/data/tests/sample_{i}.png')
+        plt.close()
+
+
 
 def test_spots_dataset():
     dur = 720
@@ -1424,7 +1434,8 @@ if __name__ == "__main__":
     # test_denoiser()
     # create_noise_dataset()
     # read_spots_and_lightcurve('00010', '/data/butter/data2')
-    test_spots_dataset()
+    # test_spots_dataset()
+    show_samples(10)
 
 
 

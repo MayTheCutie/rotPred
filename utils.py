@@ -12,7 +12,7 @@ import yaml
 from collections import OrderedDict
 import time
 import lightkurve as lk
-from butterpy import Spots
+# from butterpy import Spots
 from sklearn.model_selection import train_test_split
 from astropy.io import fits
 from typing import Callable, Dict, Optional, Tuple, Type, Union
