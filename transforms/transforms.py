@@ -180,7 +180,7 @@ class StandardScaler(Scaler):
                 xm = x.copy()
                 xm[mask] = np.nan
             self.centers = np.nanmean(xm, self.dim, keepdims=True)
-            self.norms = np.nanstd(xm, self.dim, keepdims=True) + self.eps
+            self.norms = np.(xm, self.dim, keepdims=True) + self.eps
         elif isinstance(x, torch.Tensor):
             if mask is not None:
                 xm = x.clone()

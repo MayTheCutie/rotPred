@@ -40,7 +40,7 @@ from lightPred.period_analysis import analyze_lc, analyze_lc_kepler
 
 import sys
 sys.path.append('/data/butter')
-from butterpy_clone.butterpy.core import Surface
+from butterpy import Surface
 
 
 # from lightPred.autoformer.layers import series_decomp
