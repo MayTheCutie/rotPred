@@ -438,6 +438,55 @@ class DoubleInputTrainer(Trainer):
                 confs = np.concatenate((confs, conf_pred.cpu().numpy()))
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
         return preds, targets, confs
+    
+class SpotsTrainer(Trainer):
+    def __init__(self, set_loss, num_classes=2, **kwargs):
+        super().__init__(**kwargs)
+        self.num_classes = num_classes
+        self.set_loss = set_loss
+    def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
+        """
+        Trains the model for one epoch.
+        """
+        self.model.train()
+        train_loss = []
+        train_acc = 0
+        all_accs = torch.zeros(self.num_classes, device=device)
+        pbar = tqdm(self.train_dl)
+        for i, (x,y, _,_) in enumerate(pbar):
+            # print("x: ", x.shape, "y: ", y.shape)
+            x, spots = x[:, :, 0], x[:, :, 1:]
+            x = x.to(device)
+            spots = spots.to(device)
+            y = y.to(device)
+            self.optimizer.zero_grad()
+            y_pred = self.model(x.float())
+            if conf:
+                y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+                conf_y = torch.abs(y - y_pred) 
+                
+            # y_std = torch.std(y.squeeze(), dim=1)
+            # y_pred_std = torch.std(y_pred.squeeze(), dim=1)
+            if self.cos_inc:
+                inc_idx = 0
+                y_pred[:, inc_idx] = torch.cos(y_pred[:, inc_idx]*np.pi/2)
+                y[:, inc_idx] = torch.cos(y[:, inc_idx]*np.pi/2)
+            loss = self.criterion(y_pred, y)
+            if conf:
+                loss += self.criterion(conf_pred, conf_y)
+                
+            # loss_std = self.criterion(y_pred_std, y_std)
+            # loss = loss + 0.5 * loss_std
+            
+            # print("loss: ", loss, "y_pred: ", y_pred, "y: ", y)
+            loss.backward()
+            self.optimizer.step()
+            train_loss.append(loss.item())
+            diff = torch.abs(y_pred - y)
+            # train_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
+            all_acc = (diff < (y/10)).sum(0)
+            all_accs = all_accs + all_acc
+            pbar.set_description(f"train_acc: {all_acc}, train_loss:  {loss}")
 
 class KeplerTrainer(Trainer):
     def __init__(self, **kwargs):
@@ -529,6 +578,7 @@ class KeplerTrainer(Trainer):
         tot_teff = np.zeros((0))
         tot_r = np.zeros((0))
         tot_g = np.zeros((0))
+        tot_qs = []
 
         print("len test_dataloader: ", len(test_dataloader))
         for i,(x, y,_,info) in enumerate(test_dataloader):
@@ -553,13 +603,20 @@ class KeplerTrainer(Trainer):
             else:
                 y_val = y
             # targets = np.concatenate((targets, y_val.squeeze().cpu().numpy()))
+            
             if conf:
                 confs = np.concatenate((confs, conf_pred.cpu().numpy()))
-            tot_kic = np.concatenate((tot_kic, info['KID'].cpu().numpy()))
-            tot_teff = np.concatenate((tot_teff, info['Teff'].cpu().numpy()))
-            tot_r = np.concatenate((tot_r, info['R'].cpu().numpy()))
-            tot_g = np.concatenate((tot_g, info['logg'].cpu().numpy()))
-        return preds, targets, confs, tot_kic, tot_teff, tot_r, tot_g
+            kic = np.array([d['KID'] for d in info])
+            teff = np.array([d['Teff'] for d in info])
+            r = np.array([d['R'] for d in info])
+            g = np.array([d['logg'] for d in info])
+            qs = [d['qs'] for d in info]
+            tot_kic = np.concatenate((tot_kic, kic))
+            tot_teff = np.concatenate((tot_teff, teff))
+            tot_r = np.concatenate((tot_r, r))
+            tot_g = np.concatenate((tot_g, g))
+            tot_qs.extend(qs)
+        return preds, targets, confs, tot_kic, tot_teff, tot_r, tot_g, tot_qs
 
 
 class Trainer2(Trainer):

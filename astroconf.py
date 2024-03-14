@@ -50,7 +50,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 35
+exp_num = 37
 
 log_path = '/data/logs/astroconf'
 
@@ -63,20 +63,22 @@ if not os.path.exists(f'{log_path}/exp{exp_num}'):
 
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
 # checkpoint_path = '/data/logs/astroconf/exp14'
-data_folder = "/data/butter/data_high_spots"
+data_folder = "/data/butter/data_cos"
 
-test_folder = "/data/butter/test_high_spots"
+test_folder = "/data/butter/test_cos"
 
 yaml_dir = '/data/lightPred/Astroconformer/Astroconformer/'
 
-Nlc = 18000
+Nlc = 50000
 
-test_Nlc = 3000
+test_Nlc = 5000
 
 CUDA_LAUNCH_BLOCKING='1'
 
 
-idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc))+1) for idx in range(Nlc)]
+# idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc))+1) for idx in range(Nlc)]
+samples = os.listdir(os.path.join(data_folder, 'simulations'))
+idx_list = [sample.split('_')[1].split('.')[0] for sample in samples if sample.startswith('lc_')]
 
 train_list, val_list = train_test_split(idx_list, test_size=0.1, random_state=1234)
 
@@ -183,13 +185,13 @@ if __name__ == '__main__':
                         #   transforms=kep_transform, min_ratio=0.02, max_ratio=0.05), 
                           KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),                         
-     moving_avg(49)])
+     moving_avg(49), Detrend()])
     test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
                             # KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                             # transforms=kep_transform,  min_ratio=0.02, max_ratio=0.05), 
                             KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),
-     moving_avg(49)])
+     moving_avg(49), Detrend()])
 
 #     image_transform = torchvision.transforms.Compose([
 #     torchvision.transforms.RandomHorizontalFlip(p=0.5),
@@ -299,16 +301,16 @@ if __name__ == '__main__':
 
 
 
-    state_dict = torch.load(f'{log_path}/exp34/astroconf.pth')
-    new_state_dict = OrderedDict()
-    for key, value in state_dict.items():
-        if key.startswith('module.'):
-            while key.startswith('module.'):
-                key = key[7:]
-        new_state_dict[key] = value
-    state_dict = new_state_dict
-    print("loading state dict...")
-    model.load_state_dict(new_state_dict)
+    # state_dict = torch.load(f'{log_path}/exp34/astroconf.pth')
+    # new_state_dict = OrderedDict()
+    # for key, value in state_dict.items():
+    #     if key.startswith('module.'):
+    #         while key.startswith('module.'):
+    #             key = key[7:]
+    #     new_state_dict[key] = value
+    # state_dict = new_state_dict
+    # print("loading state dict...")
+    # model.load_state_dict(new_state_dict)
 
     # state_dict = torch.load(f'/data/logs/lstm_attn/exp77/lstm_attn_acc2.pth')
     # new_state_dict = OrderedDict()

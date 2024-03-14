@@ -214,6 +214,7 @@ class RandomCrop:
         else:
             left_crop = np.random.randint(seq_len-self.width)
         info['left_crop'] = left_crop
+        info['right_crop'] = left_crop + self.width
 
         out_x = x[left_crop:left_crop+self.width]
         if mask is None:
@@ -230,7 +231,11 @@ class Slice():
         self.end = end
     def __call__(self, x, mask=None, info=None, step=None):
         sliced_mask = mask[self.start:self.end] if mask is not None else None
-        return x[self.start:self.end], sliced_mask, info
+        if len(x) >= self.end:
+            info['slice'] = (self.start, self.end)
+            return x[self.start:self.end], sliced_mask, info
+        else:
+            return x, sliced_mask, info
 
 class Detrend():
     def __init__(self, type='diff'):

@@ -83,15 +83,37 @@ idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc))+1) for idx in range(Nlc)]
 
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
 
+def test_spots_dataset():
+    dur = 720
+    data_folder = "/data/butter/data2"
+    transform = Compose([RandomCrop(width=int(dur/cad*DAY2MIN))])
+    train_dataset = TimeSeriesDataset(data_folder, idx_list, transforms=transform, prepare=False, acf=False,
+                                      spots=True, init_frac=0.2)
+    for i in range(10):
+        print(i)
+        x, y, _, _ = train_dataset[i]
+        fig, ax = plt.subplots(1,2)
+        ax[0].plot(x[:, 0])
+        ax[1].scatter(x[: ,2], x[:, 1])
+        plt.savefig(f'/data/tests/spots_{i}.png')
+        print(x.shape, y)
+        spots_arr = x[:, 1:]
+        spot_idx = torch.where(spots_arr[:,0] != 0)
+        spots_arr = spots_arr[spot_idx]
+        # spots_arr = spots_arr[spots_arr != 0, :]
+        print(spots_arr.shape)
+
+
 def read_spots_and_lightcurve(idx, data_folder):
     spots_dir  = os.path.join(data_folder, 'spots')
     lc_dir = os.path.join(data_folder, 'simulations')
-    print(spots_dir[:10], lc_dir[:10])
     sample_idx = remove_leading_zeros(idx)
     x_lc = pd.read_parquet(os.path.join(data_folder, f"simulations/lc_{idx}.pqt")).values
+    # spots is N,4 array with columns: [nday, lat, lon, bmax]
     x_spots = pd.read_parquet(os.path.join(data_folder, f"spots/spots_{idx}.pqt")).values
     y = pd.read_csv(os.path.join(data_folder, 'simulation_properties.csv'), skiprows=range(1,sample_idx+1), nrows=1)
     print(x_lc.shape, y.shape, x_spots.shape)
+    print(x_spots.columns)
 
 def init_distritubuted_mode():
     world_size    = int(os.environ["WORLD_SIZE"])
@@ -1401,7 +1423,8 @@ if __name__ == "__main__":
     # test_kepler_noise()
     # test_denoiser()
     # create_noise_dataset()
-    read_spots_and_lightcurve('00010', '/data/butter/data2')
+    # read_spots_and_lightcurve('00010', '/data/butter/data2')
+    test_spots_dataset()
 
 
 

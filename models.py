@@ -273,14 +273,14 @@ class LSTMFeatureExtractor(nn.Module):
         # Make sure to not mess up the random state.
         rng_state = torch.get_rng_state()
         # try:
-        print("calculating out shape")
+        # print("calculating out shape")
         if not self.image:
             dummy_input = torch.randn(2,self.in_channels, self.seq_len)
         else:
             dummy_input = torch.randn(2,self.in_channels, self.seq_len, self.seq_len)
         # dummy_input = torch.randn(2,self.seq_len, self.in_channels)
         input_length = torch.ones(2, dtype=torch.int64)*self.seq_len
-        print("dummy_input: ", dummy_input.shape)
+        # print("dummy_input: ", dummy_input.shape)
         # x = self.conv_pre(dummy_input)
         x = self.drop(self.pool(self.activation(self.batchnorm1(self.conv1(dummy_input)))))
         # x = self.conv(dummy_input, input_length)
@@ -288,7 +288,7 @@ class LSTMFeatureExtractor(nn.Module):
         x_f,(h_f,_) = self.lstm(x)
         h_f = h_f.transpose(0,1).transpose(1,2)
         h_f = h_f.reshape(h_f.shape[0], -1)
-        print("finished")
+        # print("finished")
         return h_f.shape[1] 
         # finally:
         #     torch.set_rng_state(rng_state)
@@ -305,16 +305,13 @@ class LSTMFeatureExtractor(nn.Module):
         # input_length = torch.ones(x.shape[0], dtype=torch.int64)*self.seq_len
         # x = self.conv(x, input_length)
         skip = self.skip(x)
-        # x = self.conv_pre(x)
         x = self.drop(self.pool(self.activation(self.batchnorm1(self.conv1(x)))))
-        x = x + skip[:, :, :x.shape[-1]]
-        # x = self.conv(x)
-        x = x.view(x.shape[0], x.shape[1], -1).swapaxes(1,2)
-        x_f,(h_f,c_f) = self.lstm(x)
+        x = x + skip[:, :, :x.shape[-1]] # [B, C, L//stride]
+        x = x.view(x.shape[0], x.shape[1], -1).swapaxes(1,2) # [B, L//stride, C]
+        x_f,(h_f,c_f) = self.lstm(x) # [B, L//stride, 2*hidden_size], [B, 2*num_layers, hidden_size], [B, 2*num_layers, hidden_size
         if return_cell:
             return x_f, h_f, c_f
         h_f = h_f.transpose(0,1).transpose(1,2)
-        # h_f = h_f.max(dim=1).values
         h_f = h_f.reshape(h_f.shape[0], -1)
         return h_f
     
@@ -436,6 +433,7 @@ class LSTM_ATTN_QUANT(LSTM):
 class LSTM_DUAL(LSTM_ATTN):
     def __init__(self, dual_model, encoder_dims, lstm_model=None, freeze=False, **kwargs):
         super(LSTM_DUAL, self).__init__(**kwargs)
+        # print("intializing dual model")
         if lstm_model is not None:
             self.feature_extractor = lstm_model.feature_extractor
             self.attention = lstm_model.attention
@@ -453,16 +451,14 @@ class LSTM_DUAL(LSTM_ATTN):
         nn.Dropout(p=0.3),
         nn.Linear(self.predict_size,self.num_classes),
     )
-        
     def forward(self, x, x_dual):
         if len(x.shape) == 2:
             x = x.unsqueeze(1)
-        x, h_f, c_f = self.feature_extractor(x, return_cell=True)
-        c_f = torch.cat([c_f[-1], c_f[-2]], dim=1)
-        t_features = self.attention(c_f, x, x) 
-        d_features = self.dual_model(x_dual)
-        features = torch.cat([t_features, d_features], dim=1)
-        # print("features: ", features.shape, t_features.shape, d_features.shape)
+        x, h_f, c_f = self.feature_extractor(x, return_cell=True) # [B, L//stride, 2*hidden_size], [B, 2*nlayers, hidden_szie], [B, 2*nlayers, hidden_Size]
+        c_f = torch.cat([c_f[-1], c_f[-2]], dim=1) # [B, 2*hidden_szie]
+        t_features = self.attention(c_f, x, x) # [B, 2*hidden_size]
+        d_features = self.dual_model(x_dual) # [B, encoder_dims]
+        features = torch.cat([t_features, d_features], dim=1) # [B, 2*hidden_size + encoder_dims]
         out = self.pred_layer(features)
         return out
 

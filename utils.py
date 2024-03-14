@@ -618,6 +618,48 @@ def multi_quarter_kepler_df(root_kepler_path, Qs, table_path=None):
     merged_df['number_of_quarters'] = merged_df['data_file_path'].apply(lambda x: len(x))
     # print(merged_df.head())
     return merged_df
+# Function to convert string representation of list to real list
+def convert_to_list(string_list):
+    # Extract content within square brackets
+    matches = re.findall(r'\[(.*?)\]', string_list)
+    if matches:
+        # Split by comma, remove extra characters except period, hyphen, underscore, and comma, and strip single quotes
+        cleaned_list = [re.sub(r'[^A-Za-z0-9\-/_,.]', '', s) for s in matches[0].split(',')]
+        return cleaned_list
+    else:
+        return []
+
+# Function to extract 'qs' numbers from a path
+def extract_qs(path):
+    qs_numbers = []
+    for p in path:
+        match = re.search(r'/Q(\d+)/', p)
+        if match:
+            qs_numbers.append(int(match.group(1)))
+    return qs_numbers
+
+# Function to calculate the length of the longest consecutive sequence of 'qs'
+def consecutive_qs(qs_list):
+    max_length = 0
+    current_length = 1
+    for i in range(1, len(qs_list)):
+        if qs_list[i] == qs_list[i-1] + 1:
+            current_length += 1
+        else:
+            max_length = max(max_length, current_length)
+            current_length = 1
+    return max(max_length, current_length)
+
+def kepler_collate_fn(batch):
+    # Separate the elements of each sample tuple (x, y, mask, info) into separate lists
+    xs, ys, masks, infos = zip(*batch)
+
+    # Convert lists to tensors
+    xs_tensor = torch.stack(xs, dim=0)
+    ys_tensor = torch.stack(ys, dim=0)
+    masks_tensor = torch.stack(masks, dim=0)
+
+    return xs_tensor, ys_tensor, masks_tensor, infos
 
 def calc_luminosity(Teff, R):
     return 4*np.pi*(R)**2 * (Teff)**4 * 5.670373e-8

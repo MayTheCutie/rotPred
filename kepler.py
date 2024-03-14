@@ -25,7 +25,7 @@ from lightPred.train import *
 from lightPred.eval import eval_model, eval_results
 from lightPred.optim import QuantileLoss
 from lightPred.transforms import *
-from lightPred.utils import collate as my_collate
+from lightPred.utils import collate as my_collate, convert_to_list, extract_qs, consecutive_qs, kepler_collate_fn
 from lightPred.Astroconformer.Astroconformer.Astroconformer.Train.utils import init_train
 from lightPred.Astroconformer.Astroconformer.Astroconformer.utils import Container
 
@@ -38,7 +38,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 50
+exp_num = 52
 
 log_path = '/data/logs/kepler'
 
@@ -164,27 +164,36 @@ if __name__ == '__main__':
     print("logdir ", f'{log_path}/exp{exp_num}')
     print("checkpoint path ", chekpoint_path)
 
-    q_list = [[3,4,5,6,7,8,9,10],
-    [4,5,6,7,8,9,10,11], [5,6,7,8,9,10,11,12], [6,7,8,9,10,11,12,13],
-        [7,8,9,10,11,12,13,14],[8,9,10,11,12,13,14,15], [9,10,11,12,13,14,15,16]]
-    for Q in q_list:
-        print("Q: ", Q)
-        kepler_df = create_kepler_df(data_folder, table_path)
-        kepler_df = multi_quarter_kepler_df(root_data_folder, table_path=None, Qs=Q)
-        kepler_df = kepler_df.sample(frac=1)
-        kepler_df = kepler_df[kepler_df['number_of_quarters'] == len(Q)]
-
-
+    # q_list = [[3,4,5,6,7,8,9,10],
+    # [4,5,6,7,8,9,10,11], [5,6,7,8,9,10,11,12], [6,7,8,9,10,11,12,13],
+    #     [7,8,9,10,11,12,13,14],[8,9,10,11,12,13,14,15], [9,10,11,12,13,14,15,16]]
+    # for Q in q_list:
+    # kepler_df = create_kepler_df(data_folder, table_path)
+    # kepler_df = multi_quarter_kepler_df(root_data_folder, table_path=None, Qs=np.arange(3,17))
+    # kepler_df = kepler_df.sample(frac=1)
+    # kepler_df = kepler_df[kepler_df['number_of_quarters'] == len(Q)]
+    num_qs = dur//90
+    kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
+    kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
+    kepler_df['qs'] = kepler_df['data_file_path'].apply(extract_qs)  # Extract 'qs' numbers
+    kepler_df['consecutive_qs'] = kepler_df['qs'].apply(consecutive_qs)  # Calculate length of longest consecutive sequence
+    kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
+    print(f"all samples with at least {num_qs} consecutive qs:  {len(kepler_df)}")
+    for q in range(15-num_qs):
+        print("i: ", q)
+        lower_bound = q*int(dur/cad*DAY2MIN)
+        upper_bound = (q+1)*int(dur/cad*DAY2MIN)
+        #
         transform = Compose([moving_avg(49), Detrend(), RandomCrop(int(dur/cad*DAY2MIN))])
-        test_transform = Compose([moving_avg(49), Detrend(), Slice(0, int(dur/cad*DAY2MIN))])
+        test_transform = Compose([moving_avg(49), Detrend(), Slice(lower_bound, upper_bound)])
 
-
-        full_dataset = KeplerDataset(data_folder, path_list=None, df=kepler_df, t_samples=None,
-         transforms=test_transform, acf=True, return_raw=True)
+        full_dataset = KeplerDataset(data_folder, path_list=None, df=kepler_df, t_samples=int(dur/cad*DAY2MIN),
+            transforms=test_transform, acf=True, return_raw=True)
         sampler = torch.utils.data.distributed.DistributedSampler(full_dataset, num_replicas=world_size, rank=rank)
 
         full_dataloader = DataLoader(full_dataset, batch_size=b_size, \
-                                        num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
+                                        num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                        collate_fn=kepler_collate_fn, pin_memory=True, sampler=sampler)
         data_dict = {'dataset': full_dataset.__class__.__name__, 'batch_size': b_size, 'num_epochs':num_epochs, 'checkpoint_path': chekpoint_path}
 
         with open(f'{log_path}/exp{exp_num}/data.json', 'w') as fp:
@@ -221,15 +230,16 @@ if __name__ == '__main__':
         trainer = KeplerTrainer(model=model, optimizer=optimizer, criterion=loss_fn,
                         scheduler=scheduler, train_dataloader=None, val_dataloader=None,
                             device=local_rank, optim_params=optim_params, net_params=net_params, exp_num=exp_num, log_path=log_path,
-                            exp_name="lstm_attn", num_classes=len(class_labels))
+                            exp_name="lstm_attn", num_classes=len(class_labels), max_iter=500)
 
-        preds_f, target_f, conf_f, kids_f, teff_f, radius_f, logg_f = trainer.predict(full_dataloader, device=local_rank, conf=True, only_p=False)
+        preds_f, target_f, conf_f, kids_f, teff_f, radius_f, logg_f, qs_f = trainer.predict(full_dataloader, device=local_rank, conf=True, only_p=False)
         # if preds_f[:,0].max() <= 1:
         print("inc range ", preds_f[:, 0].max(), preds_f[:, 0].min())
 
         # preds_f[:,0] = np.arcsin(preds_f[:,0])*180/np.pi
         # target_f = np.arcsin(target_f)*180/np.pi
-        df_full = pd.DataFrame({'KID': kids_f,  'Teff': teff_f, 'R': radius_f, 'logg': logg_f })
+        df_full = pd.DataFrame({'KID': kids_f,  'Teff': teff_f, 'R': radius_f,
+         'logg': logg_f, 'qs': np.array(qs_f) })
         for i,label in enumerate(class_labels):
             print("label: ", label)
             print("range: ", preds_f[:, i].max(), preds_f[:, i].min())
@@ -238,8 +248,7 @@ if __name__ == '__main__':
             df_full[f'predicted {label}'] = new_pred
             df_full[f'{label} confidence'] = conf_f[:, i]
         print("df shape: ", df_full.shape)
-        q_name = f'{Q[0]}{Q[1]}{Q[2]}{Q[3]}'
-        df_full.to_csv(f'{log_path}/exp{exp_num}/kepler_inference_full_{q_name}_detrend.csv', index=False)
+        df_full.to_csv(f'{log_path}/exp{exp_num}/kepler_inference_full_detrend_{q}.csv', index=False)
 
     # print("Evaluation on test set:")
 
