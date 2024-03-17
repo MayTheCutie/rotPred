@@ -488,7 +488,8 @@ class SpotsTrainer(Trainer):
             all_accs = all_accs + all_acc
             pbar.set_description(f"train_acc: {all_acc}, train_loss:  {loss}")
 
-class KeplerTrainer(Trainer):
+class 
+KeplerTrainer(Trainer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
     
@@ -511,12 +512,15 @@ class KeplerTrainer(Trainer):
             else:
                 x = x.to(device)
                 y_pred = self.model(x.float())
+            # y_val = y['Period'] if only_p else y['i']
+            # pred_idx = 1 if only_p else 0
             if conf:
                 y_pred, conf_pred = y_pred[:, :self.num_classes].squeeze(), y_pred[:, self.num_classes:].squeeze()
                 conf_y = torch.abs(y - y_pred) 
             loss = self.criterion(y_pred, y) 
             if conf:
                 loss += self.criterion(conf_pred, conf_y)
+            self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
             loss.backward()
             self.optimizer.step()
             train_loss.append(loss.item())
@@ -579,8 +583,6 @@ class KeplerTrainer(Trainer):
 
         print("len test dataset: ", len(test_dataloader.dataset))
         for i,(x, y,_,info) in enumerate(test_dataloader):
-            if i > self.max_iter:
-                break
             # print("x: ", x.shape, "y: ", y.shape)
             x = x.to(device)
             y = y.to(device)

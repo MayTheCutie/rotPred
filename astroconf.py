@@ -30,8 +30,8 @@ from lightPred.transforms import Compose, StandardScaler, Mask, RandomCrop, Down
 
 from lightPred.models import LSTM_ATTN, LSTM_DUAL
 from lightPred.dataloader import *
-from lightPred.Astroconformer.Astroconformer.Astroconformer.Train.utils import init_train
-from lightPred.Astroconformer.Astroconformer.Astroconformer.utils import Container, same_seeds
+from lightPred.Astroconf.Train.utils import init_train
+from lightPred.Astroconf.utils import Container, same_seeds
 from lightPred.utils import *
 from lightPred.train import *
 from lightPred.eval import eval_model, eval_results, eval_quantiled_results
@@ -67,7 +67,7 @@ data_folder = "/data/butter/data_cos"
 
 test_folder = "/data/butter/test_cos"
 
-yaml_dir = '/data/lightPred/Astroconformer/Astroconformer/'
+yaml_dir = '/data/lightPred/Astroconf/'
 
 Nlc = 50000
 
