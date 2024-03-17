@@ -33,7 +33,6 @@ from lightPred.utils import *
 # from lightPred.Informer2020.models.encoder import HwinEncoderLayer, Encoder, ConvLayer
 
 from lightPred.models import *
-from lightPred.Informer2020.models.model import Informer
 
 from lightPred.train import *
 from lightPred.sampler import DistributedSamplerWrapper
@@ -773,14 +772,14 @@ def acf_on_winn():
 def test_koi_sample(kids, names, df_path=None):
     if df_path is not None:
         kepler_df = pd.read_csv(df_path)
-        kids = kepler_df['KID'].values
+        kids = kepler_df.dropna()['KID'].values
         names = kepler_df['kepler_name'].values
-    kepler_df = multi_quarter_kepler_df(kepler_data_folder, table_path=None, Qs=[4,5,6,7,8,9,10])
-    kepler_df = kepler_df[kepler_df['number_of_quarters']==7]
+    kepler_df = multi_quarter_kepler_df(kepler_data_folder, table_path=None, Qs=[3,4,5,6,7,8,9,10,11,12,13,14,15,16])
+    # kepler_df = kepler_df[kepler_df['number_of_quarters']==7]
     for kid, name in zip(kids, names):
-        row = kepler_df[kepler_df['KID']==kid]
+        row = kepler_df[kepler_df['KID']==int(kid)]
         if len(row['data_file_path'].values):
-            shutil.copyfile(row['data_file_path'].values[0][0], f'/data/tests/kepler_{name}.fits')
+            shutil.copyfile(row['data_file_path'].values[0][0], f'/data/tests/{name}.fits')
             print(row)
 
 def test_tfc():
@@ -1409,7 +1408,7 @@ if __name__ == "__main__":
     # test_gaf()
     # test_tfc()
     # test_koi_sample(kids=['1160684', '1164584', '1995168', '2010137'], names=['noise1', 'noise2', 'noise3', 'noise4'])
-    # test_koi_sample(kids=None, names=None, df_path='/data/lightPred/tables/kois_rotation_ref.csv')
+    test_koi_sample(kids=None, names=None, df_path='/data/lightPred/tables/references.csv')
     # acf_on_winn()
     # test_depth_width()
     # test_hdiff()
@@ -1424,7 +1423,7 @@ if __name__ == "__main__":
     # test_denoiser()
     # create_noise_dataset()
     # read_spots_and_lightcurve('00010', '/data/butter/data2')
-    test_spots_dataset()
+    # test_spots_dataset()
 
 
 

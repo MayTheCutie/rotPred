@@ -1,0 +1,60 @@
+# Basics
+randomseed: 42
+checkpoint_dir: "//data/lightPred/Astroconformer/Astroconformer/lightPred_l1/modelbestloss.ckpt"
+comment: "/lightPred_l1"
+dir: "/data/lightPred/Astroconformer/Astroconformer"
+
+# Data
+dataset: "TimeSeriesDataset"
+labels: ['Inclination', 'Period']
+assign_test: False
+transform: true
+tr_val_test: [0.85, 0.1, 0.05]
+n_workers: 8
+
+
+# Model
+model: "Astroconformer"
+# in_channels: 1
+encoder: ["mhsa_pro", "conv"]
+# timeshift: false
+num_layers: 5
+encoder_dim: 128
+deepnorm: true
+sample_rates: [1]
+
+
+# Training
+distributed: True
+optimizer: "adamw"
+loss: "l1"
+basic_lr: 3.0e-3
+eps: 1.0e-5
+scheduler: "cyclic"
+num_cycles: 3
+lower_bound: 1.0e-3
+weight_decay: 1.0e-4
+use_amp: false
+grad_clip: false    
+batch_size: 16
+total_steps: 10000
+valid_steps: 1000
+warmup_ratio: 0.1
+early_stop: 30000
+use_checkpoint: false
+save_checkpoint: true
+from_pretrained: false
+check_gpu: false
+check_param: false
+visualize_param: false
+kfold: False
+
+
+
+# Visualization
+visual_steps: 7000
+num_sample: 15
+
+# GPU
+use_gpu: true
+use_multi_gpu: True

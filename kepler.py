@@ -26,8 +26,8 @@ from lightPred.eval import eval_model, eval_results
 from lightPred.optim import QuantileLoss
 from lightPred.transforms import *
 from lightPred.utils import collate as my_collate, convert_to_list, extract_qs, consecutive_qs, kepler_collate_fn
-from lightPred.Astroconformer.Astroconformer.Astroconformer.Train.utils import init_train
-from lightPred.Astroconformer.Astroconformer.Astroconformer.utils import Container
+from lightPred.Astroconf.Train.utils import init_train
+from lightPred.Astroconf.utils import Container
 
 
 warnings.filterwarnings("ignore")
@@ -42,7 +42,7 @@ exp_num = 52
 
 log_path = '/data/logs/kepler'
 
-yaml_dir = '/data/lightPred/Astroconformer/Astroconformer/'
+yaml_dir = '/data/lightPred/Astroconf/'
 
 
 if torch.cuda.current_device() == 0:
@@ -180,12 +180,11 @@ if __name__ == '__main__':
     kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
     print(f"all samples with at least {num_qs} consecutive qs:  {len(kepler_df)}")
     for q in range(15-num_qs):
+        tic = time.time()
         print("i: ", q)
-        lower_bound = q*int(dur/cad*DAY2MIN)
-        upper_bound = (q+1)*int(dur/cad*DAY2MIN)
-        print(f"lower bound {lower_bound}, upper bound {upper_bound}")
+        step = int(q*int(90/cad*DAY2MIN))
         transform = Compose([moving_avg(49), Detrend(), RandomCrop(int(dur/cad*DAY2MIN))])
-        test_transform = Compose([moving_avg(49), Detrend(), Slice(lower_bound, upper_bound)])
+        test_transform = Compose([moving_avg(49), Detrend(), Slice(0+step, int(dur/cad*DAY2MIN) + step)])
 
         full_dataset = KeplerDataset(data_folder, path_list=None, df=kepler_df, t_samples=int(dur/cad*DAY2MIN),
             transforms=test_transform, acf=True, return_raw=True)
@@ -250,6 +249,8 @@ if __name__ == '__main__':
             df_full[f'{label} confidence'] = conf_f[:, i]
         print("df shape: ", df_full.shape)
         df_full.to_csv(f'{log_path}/exp{exp_num}/kepler_inference_full_detrend_{q}.csv', index=False)
+        toc = time.time()
+        print("time: ", toc-tic)
 
     # print("Evaluation on test set:")
 
