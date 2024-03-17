@@ -41,6 +41,9 @@ LightCurves/*
 Denoising/*
 mast/*
 tables/*
+samples/*
+*.txt
+*.csv
 ```
 
 

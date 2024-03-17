@@ -584,9 +584,9 @@ class TimeSeriesDataset(Dataset):
       gwps = power.sum(axis=-1)
       grad = 1 + np.gradient(gwps)/(2/period)
       x = grad
-    # else:
-    #   x = x[:,1]
-    return  torch.tensor(x.astype(np.float32))
+    else:
+      x = x[:,1]
+    return torch.tensor(x.astype(np.float32))
   
   def normalize(self, x):
     if self.norm == 'std':
@@ -715,11 +715,7 @@ class TimeSeriesDataset(Dataset):
         y = self.get_labels(sample_idx)
         t7 = time.time()
         if self.spots:
-          spots_data = self.read_spots(self.idx_list[idx])
-          spots_data = self.crop_spots(spots_data, info)
-          spots_arr = np.zeros((x.shape[0], 2))
-          spot_t = (spots_data[:,0]/self.freq_rate).astype(np.int16)
-          spots_arr[spot_t] = spots_data[:,1:3]
+          spots_arr = self.create_spots_arr(idx, info, x)
           x = torch.cat((x.unsqueeze(-1), torch.tensor(spots_arr).float()), dim=1)
         self.step += 1
       else:
@@ -733,6 +729,20 @@ class TimeSeriesDataset(Dataset):
         return x_spec.unsqueeze(0), y, x.float(), info
       # print("times: ", t1-s, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5,t7-t6,  "tot time: ", t7-s)
       return x.float(), y, torch.ones_like(x), info
+
+  def create_spots_arr(self, idx, info, x):
+      spots_data = self.read_spots(self.idx_list[idx])
+      init_day = int(1000 * self.init_frac)
+      spots_data = spots_data[spots_data[:, 0] > init_day]
+      spots_data[:, 0] -= init_day
+      spots_data = self.crop_spots(spots_data, info)
+      print("spots max day : ", np.max(spots_data[:,0]))
+      spots_arr = np.zeros((x.shape[0], 2))
+      spot_t = (spots_data[:, 0] / self.freq_rate).astype(np.int64)
+      print(spots_data[-10:, 0], spot_t[-10:])
+      spots_arr[spot_t] = spots_data[:, 1:3]
+      return spots_arr
+
 
 class TimeSeriesDataset2(Dataset):
   def __init__(self, root_dir, idx_list, labels=['Inclination', 'Period'], p_norm=True, t_samples=512, norm='std', num_classes=2, transforms=None,
@@ -825,6 +835,7 @@ class TimeSeriesDataset2(Dataset):
       else:
         sample_idx = remove_leading_zeros(self.idx_list[idx])
         x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values
+        print(x.shape)
         # t1 = time.time()
         x = x[int(0.5*len(x)):,:]
         row = pd.read_csv(self.targets_path, skiprows=range(1,sample_idx+1), nrows=1)

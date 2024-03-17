@@ -1,3 +1,4 @@
+import os
 import sys
 from os import path
 import math
@@ -22,7 +23,7 @@ import torch.nn as nn
 from torch.utils.data import WeightedRandomSampler
 ROOT_DIR = path.dirname(path.dirname(path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
-print("running from ", ROOT_DIR)  
+print("running from ", ROOT_DIR)
 # from lightPred.datasets.simulations import TimeSeriesDataset
 from lightPred.dataloader import *
 # from lightPred.augmentations import *
@@ -39,7 +40,6 @@ from lightPred.transforms import *
 from lightPred.period_analysis import analyze_lc, analyze_lc_kepler
 
 import sys
-sys.path.append('/data/butter')
 from butterpy import Surface
 
 
@@ -66,7 +66,7 @@ DAY2MIN = 24 * 60
 
 time = np.arange(0, dur, cad / DAY2MIN)
 
-data_folder_old = "/data/lightPred/data"
+data_folder_local = r"C:\Users\ilaym\Desktop\kepler/data/butter/data_cos"
 data_folder = "/data/butter/data_cos"
 table_path  = "/data/lightPred/Table_1_Periodic.txt"
 kois_table_path = "/data/lightPred/kois.csv"
@@ -82,13 +82,32 @@ all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_dat
 
 
 def show_samples(num_samples):
-    idx_list = [f'{idx:d}'.zfill(int(np.log10(3000)) + 1) for idx in range(3000)]
-    dataset = TimeSeriesDataset(data_folder, idx_list, t_samples=None, norm='std')
+    idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc)) + 1) for idx in range(test_Nlc)]
+    dataset = TimeSeriesDataset(data_folder_local, idx_list, t_samples=None, norm='none', prepare=False,
+                                spots=True, init_frac=0.2)
+    time = np.arange(0, 800, cad / DAY2MIN)
     for i in range(num_samples):
+        fig, ax = plt.subplots(1, 2)
         x, y, _, _ = dataset[i]
-        plt.plot(x)
-        plt.title(f"p: {y[1].item()}, inc: {y[0].item()}")
-        plt.savefig(f'/data/tests/sample_{i}.png')
+        # print('xshape', x.shape)
+        ax[0].plot(time, x[:,0])
+        spot_idx = torch.where(x[:,1] != 0)[0]
+        n_spots = len(spot_idx)
+        spots_arr = x[:, 1:]*180/np.pi
+        print("spots max day ", time[spot_idx[-1]])
+        # spots_arr = spots_arr[spots_arr[:,0] > 90]
+        spots_arr[:, 0] -= 90
+        # ax[1].scatter(spots_arr[:, 1], spots_arr[:, 0])
+        ax[1].scatter(time, spots_arr[:, 0])
+        print("nspots ", n_spots)
+        ax[0].set_title(f"p: {y[1].item():.2f}, inc: {y[0].item():.2f} nspots : {n_spots}")
+        ax[0].set_xlabel('time(days)')
+        ax[0].set_ylabel('flux')
+        ax[1].set_xlabel('time(days)')
+        ax[1].set_ylabel('spots latitude (deg)')
+        ax[1].set_ylim(0, 100)
+        plt.tight_layout()
+        plt.savefig(rf'C:\Users\ilaym\Desktop\kepler\/data/tests/sample_{i}.png')
         plt.close()
 
 
