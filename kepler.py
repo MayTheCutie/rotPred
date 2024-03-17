@@ -36,16 +36,22 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 print('device is ', DEVICE)
 
-print("gpu number: ", torch.cuda.current_device())
-
+if torch.cuda.is_available():
+    print("gpu number: ", torch.cuda.current_device())
 exp_num = 52
 
-log_path = '/data/logs/kepler'
+local = True
 
-yaml_dir = '/data/lightPred/Astroconf/'
+root_dir = '/data' if not local else '../'
+
+log_path = f'{root_dir}/logs/kepler'
+
+# yaml_dir = '/data/lightPred/Astroconf/'
+yaml_dir = 'Astroconf/'
 
 
-if torch.cuda.current_device() == 0:
+
+if (not torch.cuda.is_available()) or torch.cuda.current_device() == 0:
     if not os.path.exists(log_path):
         os.makedirs(log_path)
     if not os.path.exists(f'{log_path}/exp{exp_num}'):
@@ -53,15 +59,13 @@ if torch.cuda.current_device() == 0:
     # if not os.path.exists(f'{log_path}/exp{exp_num}_koi'):
     #     os.makedirs(f'{log_path}/exp{exp_num}_koi')
 
-# chekpoint_path = '/data/logs/simsiam/exp8'
-# chekpoint_path = '/data/logs/lstm_attn/exp47'
 # chekpoint_path = '/data/logs/lstm_attn/exp52'
-chekpoint_path = '/data/logs/astroconf/exp31'
-data_folder = "/data/lightPred/data/Q4"
-root_data_folder = "/data/lightPred/data"
-table_path  = "/data/lightPred/tables/Table_1_Periodic.txt"
-kois_table_path = "/data/lightPred/tables/kois_no_fp.csv"
-inc_path = "/data/lightPred/tables/all_incs.csv"
+chekpoint_path = f'{root_dir}/logs/astroconf/exp31'
+data_folder =  f"{root_dir}/lightPred/data/Q4"
+root_data_folder =  f"{root_dir}/lightPred/data"
+table_path  =  f"{root_dir}/lightPred/tables/Table_1_Periodic.txt"
+kois_table_path =  f"{root_dir}/lightPred/tables/kois_no_fp.csv"
+inc_path = f"{root_dir}/lightPred/tables/all_incs.csv"
 
 class_labels = ['Inclination', 'Period']
 
@@ -144,37 +148,52 @@ if __name__ == '__main__':
  'num_classes': 4, 
     'stride': 4,
     'kernel_size': 4}
-      
-    world_size    = int(os.environ["WORLD_SIZE"])
-    rank          = int(os.environ["SLURM_PROCID"])
-    #gpus_per_node = int(os.environ["SLURM_GPUS_ON_NODE"])
-    # gpus_per_node = 4
-    gpus_per_node = torch.cuda.device_count()
-    print('gpus per node ', gpus_per_node)
-    print(f"Hello from rank {rank} of {world_size} where there are" \
-          f" {gpus_per_node} allocated GPUs per node.", flush=True)
 
-    setup(rank, world_size)
-    
-    if rank == 0: print(f"Group initialized? {dist.is_initialized()}", flush=True)
-    local_rank = rank - gpus_per_node * (rank // gpus_per_node)
-    torch.cuda.set_device(local_rank)
-    print(f"rank: {rank}, local_rank: {local_rank}")
+    try:
+        world_size    = int(os.environ["WORLD_SIZE"])
+        rank          = int(os.environ["SLURM_PROCID"])
+        #gpus_per_node = int(os.environ["SLURM_GPUS_ON_NODE"])
+        # gpus_per_node = 4
+        gpus_per_node = torch.cuda.device_count()
+        print('gpus per node ', gpus_per_node)
+        print(f"Hello from rank {rank} of {world_size} where there are" \
+              f" {gpus_per_node} allocated GPUs per node.", flush=True)
 
-    print("logdir ", f'{log_path}/exp{exp_num}')
-    print("checkpoint path ", chekpoint_path)
+        setup(rank, world_size)
+
+        if rank == 0: print(f"Group initialized? {dist.is_initialized()}", flush=True)
+        local_rank = rank - gpus_per_node * (rank // gpus_per_node)
+        torch.cuda.set_device(local_rank)
+        num_workers = int(os.environ["SLURM_CPUS_PER_TASK"])
+        print(f"rank: {rank}, local_rank: {local_rank}")
+
+        print("logdir ", f'{log_path}/exp{exp_num}')
+        print("checkpoint path ", chekpoint_path)
+    except:
+        world_size = 1
+        rank = 0
+        local_rank = 0
+        num_workers = 1
+        print("running locally")
+        print("logdir ", f'{log_path}/exp{exp_num}')
+        print("checkpoint path ", chekpoint_path)
 
     # q_list = [[3,4,5,6,7,8,9,10],
     # [4,5,6,7,8,9,10,11], [5,6,7,8,9,10,11,12], [6,7,8,9,10,11,12,13],
     #     [7,8,9,10,11,12,13,14],[8,9,10,11,12,13,14,15], [9,10,11,12,13,14,15,16]]
     # for Q in q_list:
     # kepler_df = create_kepler_df(data_folder, table_path)
-    # kepler_df = multi_quarter_kepler_df(root_data_folder, table_path=None, Qs=np.arange(3,17))
+    # kepler_df = multi_quarter_kepler_df(root_data_folder, ta
+    # ble_path=None, Qs=np.arange(3,17))
     # kepler_df = kepler_df.sample(frac=1)
     # kepler_df = kepler_df[kepler_df['number_of_quarters'] == len(Q)]
     num_qs = dur//90
-    kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
-    kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
+    # kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
+    kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3,17))
+    try:
+        kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
+    except TypeError:
+        pass
     kepler_df['qs'] = kepler_df['data_file_path'].apply(extract_qs)  # Extract 'qs' numbers
     kepler_df['consecutive_qs'] = kepler_df['qs'].apply(consecutive_qs)  # Calculate length of longest consecutive sequence
     kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
@@ -191,7 +210,7 @@ if __name__ == '__main__':
         sampler = torch.utils.data.distributed.DistributedSampler(full_dataset, num_replicas=world_size, rank=rank)
 
         full_dataloader = DataLoader(full_dataset, batch_size=b_size, \
-                                        num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                        num_workers=num_workers,
                                         collate_fn=kepler_collate_fn, pin_memory=True, sampler=sampler)
         data_dict = {'dataset': full_dataset.__class__.__name__, 'batch_size': b_size, 'num_epochs':num_epochs, 'checkpoint_path': chekpoint_path}
 
@@ -204,7 +223,7 @@ if __name__ == '__main__':
         conf_model.pred_layer = nn.Identity()
         model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, **net_params)
 
-        state_dict = torch.load(f'{chekpoint_path}/astroconf.pth')
+        state_dict = torch.load(f'{chekpoint_path}/astroconf.pth', map_location=torch.device('cpu'))
         new_state_dict = OrderedDict()
         for key, value in state_dict.items():
             if key.startswith('module.'):

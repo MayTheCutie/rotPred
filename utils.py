@@ -586,6 +586,9 @@ def create_kepler_df(kepler_path, table_path=None):
         obj_id = extract_object_id(file)
         if obj_id:
             data_files_info.append({'KID': obj_id, 'data_file_path':os.path.join(kepler_path, file) })
+    if len(data_files_info) == 0:
+        print("no files found in ", kepler_path)
+        return pd.DataFrame({'KID':[], 'data_file_path':'[]'})
     kepler_df = pd.DataFrame(data_files_info)
     kepler_df['KID'] = kepler_df['KID'].astype('int64')
     kepler_df['data_file_path'] = kepler_df['data_file_path'].astype('string')
