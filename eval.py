@@ -23,7 +23,7 @@ from os import path
 ROOT_DIR = path.dirname(path.dirname(path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 from lightPred.dataloader import *
-from lightPred.model import *
+# from lightPred.model import *
 from lightPred.utils import *
 from lightPred.train import *
 import yaml
