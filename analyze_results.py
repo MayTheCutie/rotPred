@@ -1219,7 +1219,7 @@ def real_inference():
     merged_df_kois['a'] = (merged_df_kois['planet_Prot'] ** 2) ** (1 / 3)
     compare_kois(merged_df_kois, sample_kois)
 
-    # prad_plot(merged_df_kois)
+    prad_plot(merged_df_kois, window_size=0.1)
 
     # sample_kois = win_revised(kepler_inference, sample_kois)
 
@@ -1322,12 +1322,10 @@ def calculate_moving_average(df, window_size):
         'predicted inclination'].transform('mean')
 
     return df_sorted
-def prad_plot(merged_df_kois, dir='../imgs'):
+def prad_plot(merged_df_kois, window_size, dir='../imgs'):
     small_r = merged_df_kois[merged_df_kois['koi_prad'] < 10]
-    earth_radius = 1.0  # Define the average earth radius
 
     # Calculate the window size in terms of data points corresponding to 0.5 earth radii
-    window_size = 0.5
 
     moving_avg_df = calculate_moving_average(small_r, window_size)
 
