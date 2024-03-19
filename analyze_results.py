@@ -87,7 +87,10 @@ def string_to_list(string_array):
         return None  # or any other appropriate actio
 # Load the .dat file into a pandas DataFrame
 
-
+def moving_average(a, n=3):
+    ret = np.cumsum(a, dtype=float)
+    ret[n:] = ret[n:] - ret[:-n]
+    return ret[n - 1:] / n
 def read_ascii_table(t_path, columns, start_idx=1):
     # Read the ASCII table into a list of strings
     with open(t_path, 'r') as file:
@@ -295,7 +298,7 @@ def create_kois_mazeh(kepler_inference, mazeh_path='references/Table_1_Periodic.
     merged_df_mazeh = kepler_inference.merge(mazeh, on='KID', how='right')
     merged_df_mazeh.rename(columns=lambda x: x.rstrip('_x'), inplace=True)
 
-    merged_df_kois = kois.merge(kepler_inference, on='KID')
+    merged_df_kois = kepler_inference.merge(kois, on='KID')
     merged_df_kois.rename(columns=lambda x: x.rstrip('_x'), inplace=True)
 
 
@@ -633,6 +636,10 @@ def plot_kois_comparison(df, att1, att2, err1, err2, name, dir='../imgs'):
     norm = Normalize(vmin=df['confidence'].min(), vmax=df['confidence'].max())
     fig, ax = plt.subplots(figsize=(25,12))
     intersect_count = 0
+    acc10 = 0
+    acc20p = 0
+    acc10p = 0
+    acc20 = 0
     for index, row in df.iterrows():
         confidence_color = cmap(norm(row['confidence']))
         plt.errorbar(index, row[f'{att1}'], yerr=err1[index], fmt=row['marker'], capsize=10, c=confidence_color)  # 's' sets marker size
@@ -643,6 +650,14 @@ def plot_kois_comparison(df, att1, att2, err1, err2, name, dir='../imgs'):
         if (att2_value - err2_value[0] <= row[f'{att1}'] + err1[index]) and (
                 att2_value + err2_value[1] >= row[f'{att1}'] - err1[index]):
             intersect_count += 1
+        if np.abs(att2_value - row[f'{att1}']) < 10:
+            acc10 += 1
+        if np.abs(att2_value - row[f'{att1}']) < row[f'{att1}'] / 10:
+            acc10p += 1
+        if np.abs(att2_value - row[f'{att1}']) < row[f'{att1}'] / 5:
+            acc20p += 1
+        if np.abs(att2_value - row[f'{att1}']) < 20:
+            acc20 += 1
     plt.errorbar(np.arange(len(df)), df[f'{att2}'], yerr=err2, fmt='o',
                  label='Morgan et al.', capsize=10, color='blue')
     # color_legend_elements = [Line2D([0], [0], marker='o', color='w', markerfacecolor='b', label='model'),
@@ -654,7 +669,11 @@ def plot_kois_comparison(df, att1, att2, err1, err2, name, dir='../imgs'):
     cbar.set_ticks(np.linspace(df['confidence'].min(), df['confidence'].max(), num=5))
     plt.title(f'{name} comparison')
     plt.xticks(ticks=np.arange(len(df)), labels=df['kepler_name'], rotation=90)
-    plt.text(0.05, 0.95, f"intersection ratio = {intersect_count / len(df):.2f} %",
+    plt.text(0.05, 0.95, f"intersection ratio = {intersect_count / len(df):.2f} %\n"
+                         f"acc_10p = {acc10p / len(df):.2f} %\n"
+                         f"acc_20p = {acc20p / len(df):.2f} %\n"
+                         f"acc_10 = {acc10 / len(df):.2f} %\n"
+                         f"acc_20 = {acc20 / len(df):.2f} %\n",
              transform=ax.transAxes, fontsize=12,
              verticalalignment='top', bbox=dict(facecolor='white', alpha=0.5))
     # plt.xlabel('# sample')
@@ -663,7 +682,7 @@ def plot_kois_comparison(df, att1, att2, err1, err2, name, dir='../imgs'):
     # plt.legend(handles=marker_legend_elements)
     # plt.colorbar
     plt.savefig(f"{dir}/compare_kois_{name}.png")
-    plt.show()
+    plt.close()
 
 
 def plot_kois_comparison2(df, att1, att2, err1, err2, name, dir='../imgs'):
@@ -690,7 +709,7 @@ def plot_kois_comparison2(df, att1, att2, err1, err2, name, dir='../imgs'):
     plt.ylabel(f'model {name} ({units})')
     plt.legend(handles=marker_legend_elements)
     plt.savefig(f"{dir}/compare_kois_{name}2.png")
-    plt.show()
+    plt.close()
 
 
 def plot_kois_comparison3(df, att1, att2, err1, err2, name, dir='../imgs'):
@@ -718,7 +737,7 @@ def plot_kois_comparison3(df, att1, att2, err1, err2, name, dir='../imgs'):
     plt.ylabel(f'{name} ({units})')
     plt.legend(handles=marker_legend_elements)
     plt.savefig(f"{dir}/compare_kois_{name}.png")
-    plt.show()
+    plt.close()
 
 
 def compare_kois(all_kois, sample, merge_on='kepler_name'):
@@ -741,7 +760,7 @@ def compare_kois(all_kois, sample, merge_on='kepler_name'):
     all_kois = all_kois[~all_kois['kepler_name'].isnull()]
     # bad = all_kois[all_kois['KID'] == 11709124]
     # print(bad['kepler_name'], type(bad['kepler_name']))
-
+    print("plotting lightcurves comparison of ", len(sample), " kois")
     plot_refrences_lc(all_kois, sample)
 
 
@@ -776,19 +795,26 @@ def prepare_kois_sample(paths, indicator='kepler_name'):
     kois['kepler_name'] = kois['kepler_name'].astype(str).apply(lambda x: x.lower().split(" ")[0])
     duplicates_mask = kois.duplicated(subset='KID', keep='first')
     kois = kois[~duplicates_mask]
+    kois.reset_index(drop=True, inplace=True)
     dfs = [pd.read_csv(p) for p in paths]
     ref_names = [p.split('.')[0] for p in paths]
     for i in range(len(ref_names)):
         dfs[i]['reference'] = ref_names[i]
-        dfs[i]['kepler_name'] = dfs[i]['kepler_name'].astype(str).apply(lambda x: x.lower().split(" ")[0])
-        if 'KID' not in dfs[i].keys():
-            # Create a mapping between 'kepler_name' and 'KID' from df2
+        if 'kepler_name' not in dfs[i].keys():
+            # Perform the comparison and retrieve 'kepler_name'
+            merged_df = dfs[i].merge(kois, on='KID', how='left')
+            # Assign 'kepler_name' from the merged DataFrame to a new column in dfs
+            dfs[i]['kepler_name'] = merged_df['kepler_name']
+        elif 'KID' not in dfs[i].columns or dfs[i]['KID'].isnull().any():
+            dfs[i]['kepler_name'] = dfs[i]['kepler_name'].astype(str).apply(lambda x: x.lower().split(" ")[0])
+            # Create mapping dictionary from 'kepler_name' to 'KID'
             mapping = kois.set_index('kepler_name')['KID'].to_dict()
-
-            # Add 'KID' column to df1 based on the mapping
+            # Map 'KID' based on 'kepler_name' correspondence
             dfs[i]['KID'] = dfs[i]['kepler_name'].map(mapping)
+        dfs[i]['kepler_name'] = dfs[i]['kepler_name'].astype(str).apply(lambda x: x.lower().split(" ")[0])
 
-    sample_kois = pd.concat(dfs).drop_duplicates(subset=indicator, keep='first')
+    # sample_kois = pd.concat(dfs).drop_duplicates(subset=indicator, keep='first')
+    sample_kois = pd.concat(dfs)
     sample_kois[indicator] = sample_kois[indicator].str.lower()  # Use str.lower() for better performance
 
     kids = sample_kois.loc[~sample_kois['KID'].isnull(), 'KID'].astype(np.int64)
@@ -852,6 +878,7 @@ def compare_pariod(df_inference, df_compare, p_att='Prot', ref_name='reinhold202
     pred, label = merged_df['predicted period'].values, merged_df[p_att].values
     conf = merged_df['period confidence']
     acc10 = np.sum(np.abs(pred - label) <= label*0.1) / len(merged_df)
+    print(f"{ref_name} accuracy 10%: {acc10}")
     plt.scatter(label, pred, label=f"acc10p = {acc10:.2f}", s=3, c=conf)
     cbar = plt.colorbar()
     cbar.ax.text(0.5, -0.08, 'confidence', ha='center', va='center',  transform=cbar.ax.transAxes)
@@ -866,7 +893,7 @@ def compare_pariod(df_inference, df_compare, p_att='Prot', ref_name='reinhold202
     plt.xlabel("reference period")
     plt.ylabel("model period")
     # plt.title(f"comparison with {ref_name}")
-    plt.savefig(f"imgs/compare_{ref_name}")
+    plt.savefig(f"../imgs/compare_{ref_name}")
     plt.show()
 
 
@@ -1139,7 +1166,7 @@ def show_kepler_sample(file_path, title, save_path):
     plt.legend()
     plt.savefig(save_path)
     plt.close()
-    print('image saved at :', save_path)
+    # print('image saved at :', save_path)
 
 def plot_refrences_lc(kepler_inference, refs, samples_dir='samples'):
     kepler_inference.sort_values(by='KID', inplace=True)
@@ -1157,6 +1184,7 @@ def plot_refrences_lc(kepler_inference, refs, samples_dir='samples'):
             if p.endswith('.fits'):
                 show_kepler_sample(os.path.join(samples_dir, p), title, save_path)
 
+
 def real_inference():
     """
     inference on kepler data
@@ -1164,36 +1192,34 @@ def real_inference():
     print("pandas version ",  pd.__version__)
     # kepler_eval = pd.read_csv("kepler/kepler_eval2.csv")
     sample_kois = prepare_kois_sample(['references/albrecht2022_clean.csv', 'references/morgan2023.csv', 'references/win2017.csv'])
-    sample_kois.to_csv('references.csv')
+    sample_kois.to_csv('references/all_refs.csv')
     # sample_kois = prepare_kois_sample(['win2017.csv'])
 
 
-    kepler_inference = read_csv_folder('astroconf_exp31', filter_thresh=10)
+    kepler_inference = read_csv_folder('astroconf_exp31_new', filter_thresh=6)
     kepler_inference = kepler_inference[kepler_inference['predicted period'] > 3]
-    # kepler_inference = kepler_inference[kepler_inference['confidence'] > 0.95]
-    # i_kepler_inference = read_csv_folder('astroconf_exp31', filter_thresh=None, att='inclination')
-    # i_kepler_inference = i_kepler_inference[i_kepler_inference['predicted period'] > 3]
-    # i_kepler_inference = i_kepler_inference[i_kepler_inference['confidence'] > 0.975]
 
-    # print("number of samples for period: ", len(kepler_inference))
+
+    print("number of samples for period: ", len(kepler_inference))
     mock_eval = prepare_df(pd.read_csv(r"C:\Users\ilaym\Desktop\kepler\acf\analyze\mock\eval_astroconf_exp31.csv"),
                            filter_giants=False, filter_eb=False, teff_thresh=False)
     # print("nans in inclination kepler inference: ", kepler_inference['predicted inclination'].isna().sum())
-    # plot_subset(i_kepler_inference, mock_eval)
+    # plot_subset(kepler_inference, mock_eval)
     # get_optimal_confidence(mock_eval)
 
     # find_non_ps(kepler_inference)
 
-    # print("len df: ", len(kepler_inference))
-    # ref = pd.read_csv('Table_1_Periodic.txt')
+    print("len df: ", len(kepler_inference))
+    ref = pd.read_csv('references/Table_1_Periodic.txt')
     # compare_pariod(kepler_inference, ref, ref_name='Mazeh2014')
-    # ref = pd.read_csv('reinhold2023.csv')
+    ref = pd.read_csv('references/reinhold2023.csv')
     # compare_pariod(kepler_inference, ref, ref_name='Reinhold2023')
 
     merged_df_mazeh, merged_df_kois, merged_df_no_kois = create_kois_mazeh(kepler_inference, kois_path='references/kois.csv')
     merged_df_kois['a'] = (merged_df_kois['planet_Prot'] ** 2) ** (1 / 3)
     compare_kois(merged_df_kois, sample_kois)
 
+    # prad_plot(merged_df_kois)
 
     # sample_kois = win_revised(kepler_inference, sample_kois)
 
@@ -1259,15 +1285,15 @@ def real_inference():
         w[i] = hist_weights[int(arr[i])]
     # plt.hist(np.cos(arr*np.pi/180), weights=w, density=True, histtype='step')
     # plt.show()
-    hist(kepler_inference, save_name='inc_hj',  df_kois=merged_df_hj3, label='<6200')
+    # hist(kepler_inference, save_name='inc_hj',  df_kois=merged_df_hj3, label='<6200')
     # hist(kepler_inference, save_name='inc_clean_hj', att='predicted inclination', df_mazeh=None, df_kois=merged_df_hj)
     # hist(inc_sample, save_name='inc_hj', df_mazeh=None, df_kois=kois_sample)
     # hist(inc_sample, save_name='inc_hj', df_mazeh=None, df_kois=hj_sample)
 
 
     # hist(kepler_inference, save_name='inc_clean', att='predicted inclination', theoretical='cos')
-    hist(kepler_inference, save_name='cos_inc_weighted',
-         att='predicted inclination', weights=hist_weights, theoretical='cos', label=r'$T_{eff} > 6200 K, P > 10 \, Days, conf > 0.9$')
+    # hist(kepler_inference, save_name='cos_inc_weighted',
+    #      att='predicted inclination', weights=hist_weights, theoretical='cos', label=r'$T_{eff} > 6200 K, P > 10 \, Days, conf > 0.9$')
 
     # hist(kepler_inference, save_name='period',att='predicted period', df_mazeh=None, df_kois=merged_df_hj)
 
@@ -1282,6 +1308,38 @@ def real_inference():
 
 
     # inc_t_kois(kepler_inference_56, merged_df_kois)
+
+
+def calculate_moving_average(df, window_size):
+    # Sort the DataFrame by 'koi_prad'
+    df_sorted = df.sort_values(by='koi_prad')
+
+    # Calculate the rolling mean of 'predicted inclination' using 'koi_prad' as the window
+    df_sorted['moving_avg'] = df_sorted.groupby(pd.cut(df_sorted['koi_prad'], np.arange(df_sorted['koi_prad'].min(),
+                                                                                        df_sorted[
+                                                                                            'koi_prad'].max() + window_size,
+                                                                                        window_size)))[
+        'predicted inclination'].transform('mean')
+
+    return df_sorted
+def prad_plot(merged_df_kois, dir='../imgs'):
+    small_r = merged_df_kois[merged_df_kois['koi_prad'] < 10]
+    earth_radius = 1.0  # Define the average earth radius
+
+    # Calculate the window size in terms of data points corresponding to 0.5 earth radii
+    window_size = 0.5
+
+    moving_avg_df = calculate_moving_average(small_r, window_size)
+
+    # Plot the scatter plot and moving average
+    plt.scatter(moving_avg_df['koi_prad'], moving_avg_df['predicted inclination'], s=2, label='Data')
+    plt.plot(moving_avg_df['koi_prad'], moving_avg_df['moving_avg'], color='red',
+             label=f'Moving Average', linestyle='--')
+    plt.xlabel('planet radius (earth radii)')
+    plt.ylabel("predicted inclination (degrees)")
+    plt.legend()
+    plt.savefig(os.path.join(dir, 'prad_inc.png'))
+    plt.show()
 
 
 def mock_inference():
@@ -1336,6 +1394,7 @@ def acf_inference(acf_path):
 
 
 if __name__ == "__main__":
+    plt.close('all')
     # columns = ['KIC','ProtACF','LPH','ProtGPS','hIP','SNR','Rvar6h','points','ProtFin','Method','ProtMcQ14','ProtS21','_RA', '_DE']
     # df = pd.read_csv(r'C:\Users\ilaym\Desktop\kepler\acf\analyze\reinholds2023.tsv', names=columns, delimiter=';')
     # df.to_csv('reinhold2023.csv')

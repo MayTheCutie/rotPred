@@ -632,6 +632,13 @@ def convert_to_list(string_list):
     else:
         return []
 
+# Function to convert string representation to tuple of integers
+def convert_to_tuple(string):
+    # Remove parentheses and split by comma
+    values = string.strip('()').split(',')
+    # Convert strings to integers and create a tuple
+    return tuple(int(value) for value in values)
+
 # Function to extract 'qs' numbers from a path
 def extract_qs(path):
     qs_numbers = []
