@@ -66,7 +66,8 @@ class HungarianMatcher(nn.Module):
         # Compute the L1 cost between boxes
         cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
 
-        # Compute the giou cost betwen boxes
+
+        # Compute the giou cost betwen boxes TODO : fix to angle_box
         cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
 
         # Final cost matrix
@@ -77,7 +78,7 @@ class HungarianMatcher(nn.Module):
         indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
         return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
 
-        
+
 class TimeSeriesDetrLoss(nn.Module):
     def __init__(self, num_classes: int, weight_set: float = 1.0, weight_bbox: float = 1.0, weight_class: float = 1.0):
         super(TimeSeriesDetrLoss, self).__init__()
