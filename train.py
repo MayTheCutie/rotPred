@@ -8,7 +8,7 @@ from matplotlib import pyplot as plt
 import glob
 from collections import OrderedDict
 from tqdm import tqdm
-
+import torch.distributed as dist
 # import NamedTuple
 # import List
 
@@ -581,7 +581,7 @@ class KeplerTrainer(Trainer):
         for i,(x, y,_,info) in enumerate(test_dataloader):
             if i > self.max_iter:
                 break
-            # print("x: ", x.shape, "y: ", y.shape)
+            # print("batch: ", i, "x: ", x.shape, "y: ", y.shape, flush=True)
             x = x.to(device)
             y = y.to(device)
             with torch.no_grad():
@@ -595,8 +595,18 @@ class KeplerTrainer(Trainer):
                     y_pred = self.model(x.float())
                 if conf:
                     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
-            # print("y_pred: ", y_pred.shape, "y: ", y.shape, "conf: ", conf)
+
+            if dist.is_available() and dist.is_initialized():
+                # Gather predictions from all GPUs
+                # Ensure y_pred is contiguous
+                y_pred_contiguous = y_pred.contiguous()
+
+                # Gather predictions from all GPUs
+                all_preds = [torch.zeros_like(y_pred_contiguous) for _ in range(dist.get_world_size())]
+                dist.all_gather(all_preds, y_pred_contiguous)
+                y_pred = torch.cat(all_preds, dim=0)
             preds = np.concatenate((preds, y_pred.squeeze().cpu().numpy()))
+            print("y_pred: ", y_pred.shape, "tot pred: ", preds.shape)
             if isinstance(y, dict):
                 y_val = y['Period'] if only_p else y['i']
             else:

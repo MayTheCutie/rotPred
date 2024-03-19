@@ -39,6 +39,8 @@ print('device is ', DEVICE)
 if torch.cuda.is_available():
     print("gpu number: ", torch.cuda.current_device())
 exp_num = 52
+print("gpu number: ", torch.cuda.current_device())
+
 
 local = True
 
@@ -248,7 +250,7 @@ if __name__ == '__main__':
         trainer = KeplerTrainer(model=model, optimizer=optimizer, criterion=loss_fn,
                         scheduler=scheduler, train_dataloader=None, val_dataloader=None,
                             device=local_rank, optim_params=optim_params, net_params=net_params, exp_num=exp_num, log_path=log_path,
-                            exp_name="lstm_attn", num_classes=len(class_labels), max_iter=500)
+                            exp_name="lstm_attn", num_classes=len(class_labels))
 
         preds_f, target_f, conf_f, kids_f, teff_f, radius_f, logg_f, qs_f = trainer.predict(full_dataloader, device=local_rank, conf=True, only_p=False)
         # if preds_f[:,0].max() <= 1:
@@ -259,6 +261,8 @@ if __name__ == '__main__':
         # target_f = np.arcsin(target_f)*180/np.pi
         df_full = pd.DataFrame({'KID': kids_f,  'Teff': teff_f, 'R': radius_f,
          'logg': logg_f, 'qs': np.array(qs_f) })
+        df_full['start_idx'] = q
+        df_full['duration(days)'] = dur
         for i,label in enumerate(class_labels):
             print("label: ", label)
             print("range: ", preds_f[:, i].max(), preds_f[:, i].min())

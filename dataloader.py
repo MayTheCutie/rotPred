@@ -17,7 +17,7 @@ from scipy.signal import stft, correlate2d
 from scipy import signal
 import time
 from scipy.signal import find_peaks, peak_prominences, peak_widths, savgol_filter as savgol
-import torchaudio.transforms as T
+# import torchaudio.transforms as T
 
 
 cad = 30
@@ -297,6 +297,7 @@ class KeplerDataset(TimeSsl):
           x = x.squeeze()
           if self.seq_len > x.shape[-1]:
             x = np.pad(x, (0, self.seq_len - x.shape[-1]), "constant", constant_values=0)
+    x = x[:self.seq_len]
     if self.acf:
       xcf = torch.tensor(A(x, nlags=len(x)))
       if self.return_raw:

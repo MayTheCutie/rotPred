@@ -38,6 +38,8 @@ from lightPred.train import *
 from lightPred.sampler import DistributedSamplerWrapper
 from lightPred.transforms import *
 from lightPred.period_analysis import analyze_lc, analyze_lc_kepler
+from lightPred.timeDetr import TimeSeriesDetrModel
+from lightPred.timeDetrLoss import TimeSeriesDetrLoss
 
 import sys
 from butterpy import Surface
@@ -80,7 +82,6 @@ idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc))+1) for idx in range(Nlc)]
 
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
 
-
 def show_samples(num_samples):
     idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc)) + 1) for idx in range(test_Nlc)]
     dataset = TimeSeriesDataset(data_folder_local, idx_list, t_samples=None, norm='none', prepare=False,
@@ -110,7 +111,35 @@ def show_samples(num_samples):
         plt.savefig(rf'C:\Users\ilaym\Desktop\kepler\/data/tests/sample_{i}.png')
         plt.close()
 
+def test_timeDetr():
+    dur = 720
+    data_folder = "/data/butter/data2"
+    transform = Compose([RandomCrop(width=int(dur/cad*DAY2MIN))])
+    train_dataset = TimeSeriesDataset(data_folder, idx_list, transforms=transform, prepare=False, acf=False,
+                                      spots=True, init_frac=0.2)
 
+    train_dl = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=0)
+    model = TimeSeriesDetrModel(input_dim=1, hidden_dim=64, num_layers=4, num_heads=4,
+     dropout=0.3, num_classes=2, num_angles=2, num_queries=500)
+    model = model.to(DEVICE)
+    spots_loss = TimeSeriesDetrLoss(num_classes=2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
+    for i, (x,y,_,_) in enumerate(train_dl):
+        print(i, x.shape, y.shape)
+        x = x.to(DEVICE)
+        y = y.to(DEVICE)
+        x, spots_arr = x[:,:, 0], x[:,:, 1:3]
+        spot_idx = torch.where(spots_arr[:,0] != 0)
+        spots_arr = spots_arr[spot_idx]
+        out_spots, out_att = model(x.unsqueeze(-1))
+        spots_classes = torch.ones(spots_arr.shape[0])
+        print(out_spots[0].shape, out_spots[1].shape, y.shape)
+        spots_loss_value = spots_loss(out_spots[0], spots_arr, out_spots[1], spots_classes)
+        optimizer.zero_grad()
+        loss_value.backward()
+        optimizer.step()
+        if i == 3:
+            break
 
 def test_spots_dataset():
     dur = 720
@@ -1438,7 +1467,7 @@ if __name__ == "__main__":
     # test_gaf()
     # test_tfc()
     # test_koi_sample(kids=['1160684', '1164584', '1995168', '2010137'], names=['noise1', 'noise2', 'noise3', 'noise4'])
-    test_koi_sample(kids=None, names=None, df_path='/data/lightPred/tables/references.csv')
+    # test_koi_sample(kids=None, names=None, df_path='/data/lightPred/tables/references.csv')
     # acf_on_winn()
     # test_depth_width()
     # test_hdiff()
@@ -1454,7 +1483,8 @@ if __name__ == "__main__":
     # create_noise_dataset()
     # read_spots_and_lightcurve('00010', '/data/butter/data2')
     # test_spots_dataset()
-    show_samples(10)
+
+    test_timeDetr()
 
 
 
