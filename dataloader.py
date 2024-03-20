@@ -584,8 +584,8 @@ class TimeSeriesDataset(Dataset):
       gwps = power.sum(axis=-1)
       grad = 1 + np.gradient(gwps)/(2/period)
       x = grad
-    else:
-      x = x[:,1]
+    # else:
+    #   x = x[:,1]
     return torch.tensor(x.astype(np.float32))
   
   def normalize(self, x):
@@ -736,10 +736,10 @@ class TimeSeriesDataset(Dataset):
       spots_data = spots_data[spots_data[:, 0] > init_day]
       spots_data[:, 0] -= init_day
       spots_data = self.crop_spots(spots_data, info)
-      print("spots max day : ", np.max(spots_data[:,0]))
+      # if len(spots_data):
+      #   print("spots max day : ", np.max(spots_data[:,0]))
       spots_arr = np.zeros((x.shape[0], 2))
       spot_t = (spots_data[:, 0] / self.freq_rate).astype(np.int64)
-      print(spots_data[-10:, 0], spot_t[-10:])
       spots_arr[spot_t] = spots_data[:, 1:3]
       return spots_arr
 

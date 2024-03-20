@@ -1217,7 +1217,7 @@ def real_inference():
 
     merged_df_mazeh, merged_df_kois, merged_df_no_kois = create_kois_mazeh(kepler_inference, kois_path='references/kois.csv')
     merged_df_kois['a'] = (merged_df_kois['planet_Prot'] ** 2) ** (1 / 3)
-    compare_kois(merged_df_kois, sample_kois)
+    # compare_kois(merged_df_kois, sample_kois)
 
     prad_plot(merged_df_kois, window_size=0.1)
 
@@ -1323,19 +1323,20 @@ def calculate_moving_average(df, window_size):
 
     return df_sorted
 def prad_plot(merged_df_kois, window_size, dir='../imgs'):
-    small_r = merged_df_kois[merged_df_kois['koi_prad'] < 10]
+    small_pr = merged_df_kois[(merged_df_kois['koi_prad'] < 10) & (merged_df_kois['planet_Prot'] < 100)]
 
     # Calculate the window size in terms of data points corresponding to 0.5 earth radii
 
-    moving_avg_df = calculate_moving_average(small_r, window_size)
+    moving_avg_df = calculate_moving_average(small_pr, window_size)
 
     # Plot the scatter plot and moving average
-    plt.scatter(moving_avg_df['koi_prad'], moving_avg_df['predicted inclination'], s=2, label='Data')
+    plt.hexbin(moving_avg_df['koi_prad'], moving_avg_df['predicted inclination'], cmap='viridis', mincnt=1, label='Data')
     plt.plot(moving_avg_df['koi_prad'], moving_avg_df['moving_avg'], color='red',
              label=f'Moving Average', linestyle='--')
     plt.xlabel('planet radius (earth radii)')
     plt.ylabel("predicted inclination (degrees)")
     plt.legend()
+    plt.colorbar(label='Density')
     plt.savefig(os.path.join(dir, 'prad_inc.png'))
     plt.show()
 

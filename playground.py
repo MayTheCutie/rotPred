@@ -39,7 +39,7 @@ from lightPred.sampler import DistributedSamplerWrapper
 from lightPred.transforms import *
 from lightPred.period_analysis import analyze_lc, analyze_lc_kepler
 from lightPred.timeDetr import TimeSeriesDetrModel
-from lightPred.timeDetrLoss import TimeSeriesDetrLoss
+from lightPred.timeDetrLoss import TimeSeriesDetrLoss, SetCriterion, HungarianMatcher
 
 import sys
 from butterpy import Surface
@@ -78,7 +78,7 @@ kepler_data_folder = "/data/lightPred/data"
 # kois_df = create_kepler_df(data_folder, kois_table_path)
 # train_df, test_df = train_test_split(kepler_df, test_size=0.1, random_state=42, shuffle=True)
 
-idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc))+1) for idx in range(Nlc)]
+idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
 
@@ -111,35 +111,65 @@ def show_samples(num_samples):
         plt.savefig(rf'C:\Users\ilaym\Desktop\kepler\/data/tests/sample_{i}.png')
         plt.close()
 
+
+
+def cxcy_to_cxcywh(arr, w, h):
+    x, y = arr[:, 0], arr[:, 1]
+    x1 = x - w / 2
+    y1 = y - h / 2
+    x2 = x + w / 2
+    y2 = y + h / 2
+    return torch.stack((x1, y1, x2, y2), dim=1)
+def get_spot_dict(spot_arr):
+    bs, _,_ = spot_arr.shape
+    idx = [spot_arr[b,:, 0] != 0 for b in range(bs)]
+    res = []
+    for i in range(bs):
+        spot_dict = {'boxes': cxcy_to_cxcywh(spot_arr[i, idx[i], :], 1, 1),
+                     'labels': torch.ones(len(spot_arr[i, idx[i], :])).long()}
+        res.append(spot_dict)
+    return res
+
 def test_timeDetr():
-    dur = 720
-    data_folder = "/data/butter/data2"
+    dur = 90
+    print(os.getcwd())
+    data_folder = "../butter/data_cos"
     transform = Compose([RandomCrop(width=int(dur/cad*DAY2MIN))])
     train_dataset = TimeSeriesDataset(data_folder, idx_list, transforms=transform, prepare=False, acf=False,
                                       spots=True, init_frac=0.2)
 
     train_dl = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=0)
     model = TimeSeriesDetrModel(input_dim=1, hidden_dim=64, num_layers=4, num_heads=4,
-     dropout=0.3, num_classes=2, num_angles=2, num_queries=500)
+     dropout=0.3, num_classes=2, num_angles=4, num_queries=500)
     model = model.to(DEVICE)
-    spots_loss = TimeSeriesDetrLoss(num_classes=2)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
-    for i, (x,y,_,_) in enumerate(train_dl):
-        print(i, x.shape, y.shape)
+    matcher = HungarianMatcher()
+    weight_dict = {'loss_ce': 1, 'loss_bbox': 1, 'loss_giou': 1}
+    eos = 0.2
+    losses = ['labels', 'boxes', 'cardinality']
+    spots_loss = SetCriterion(1, matcher, weight_dict, eos,  losses = losses)
+    att_loss = nn.L1Loss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001,)
+    pbar = tqdm(train_dl)
+    model.train()
+    for i, (x,y,_,_) in enumerate(pbar):
+        # print(i, x.shape, y.shape)
         x = x.to(DEVICE)
         y = y.to(DEVICE)
         x, spots_arr = x[:,:, 0], x[:,:, 1:3]
-        spot_idx = torch.where(spots_arr[:,0] != 0)
-        spots_arr = spots_arr[spot_idx]
+        tgt_spots = get_spot_dict(spots_arr)
         out_spots, out_att = model(x.unsqueeze(-1))
-        spots_classes = torch.ones(spots_arr.shape[0])
-        print(out_spots[0].shape, out_spots[1].shape, y.shape)
-        spots_loss_value = spots_loss(out_spots[0], spots_arr, out_spots[1], spots_classes)
+        spots_loss_dict = spots_loss(out_spots, tgt_spots)
+        weight_dict = spots_loss.weight_dict
+        spot_loss_val = sum(spots_loss_dict[k] * weight_dict[k] for k in spots_loss_dict.keys() if k in weight_dict)
+        # print(out_att.shape, y[:,0].shape)
+        att_loss_val = att_loss(out_att.squeeze(), y[:, 0])
+        tot_loss = spot_loss_val + att_loss_val
         optimizer.zero_grad()
-        loss_value.backward()
+        tot_loss.backward()
         optimizer.step()
-        if i == 3:
-            break
+        pbar.set_description(f'spot loss: {spot_loss_val.item()}, att loss: {att_loss_val.item()} tot loss: {tot_loss.item()}')
+        # if i == 3:
+        #     break
 
 def test_spots_dataset():
     dur = 720
