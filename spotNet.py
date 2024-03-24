@@ -28,9 +28,11 @@ print("running from ", ROOT_DIR)
 from lightPred.datasets.simulations import TimeSeriesDataset
 from lightPred.transforms import Compose, StandardScaler, Mask, RandomCrop, DownSample, AddGaussianNoise
 
-from lightPred.models import LSTM_ATTN, LSTM_DUAL
+from lightPred.models import SpotNet, LSTM_ATTN
+from lightPred.timeDetrLoss import SetCriterion, HungarianMatcher
 from lightPred.Astroconf.Train.utils import init_train
 from lightPred.Astroconf.utils import Container, same_seeds
+from lightPred.Astroconf.Model.models import AstroDecoder
 from lightPred.dataloader import *
 from lightPred.utils import *
 from lightPred.train import *
@@ -50,9 +52,9 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 37
+exp_num = 0
 
-log_path = '/data/logs/astroconf'
+log_path = '/data/logs/spotnet'
 
 if not os.path.exists(f'{log_path}/exp{exp_num}'):
     try:
@@ -84,7 +86,7 @@ train_list, val_list = train_test_split(idx_list, test_size=0.1, random_state=12
 
 test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
-b_size = 64
+b_size = 4
 
 num_epochs = 1000
 
@@ -132,14 +134,12 @@ if __name__ == '__main__':
     # 'num_att_layers':2,
     # 'n_heads': 4,}
 
-    backbone= { 'in_channels':1,
- 'dropout': 0.35,
- 'hidden_size': 64,
- 'num_layers': 5,
- 'seq_len': int(dur/cad*DAY2MIN), 
- "num_classes": 4,
-    'stride': 4,
-    'kernel_size': 4}
+    weight_dict = {'loss_ce': 0.822321274651144,
+     'loss_bbox': 0.10110399527930165, 'loss_giou': 1}
+    eos = 1644644781327425
+    losses = ['labels', 'boxes', 'cardinality']
+
+    num_queries = 600
       
     world_size    = int(os.environ["WORLD_SIZE"])
     rank          = int(os.environ["SLURM_PROCID"])
@@ -159,27 +159,12 @@ if __name__ == '__main__':
     torch.cuda.set_device(local_rank)
     print(f"rank: {rank}, local_rank: {local_rank}")
 
-
-   
     args = Container(**yaml.safe_load(open(f'{yaml_dir}/default_config.yaml', 'r')))
     args.load_dict(yaml.safe_load(open(f'{yaml_dir}/model_config.yaml', 'r'))[args.model])
     print("args : ", vars(args))
 
-    # transform_train = Compose([ AddGaussianNoise(sigma=0.005),
-    #                     ])
-
-    # kepler_data_folder = "/data/lightPred/data"
-    # non_ps = pd.read_csv('/data/lightPred/tables/non_ps.csv')
-    # kepler_df = multi_quarter_kepler_df(kepler_data_folder, table_path=None, Qs=[4,5,6,7])
-    # kepler_df = kepler_df[kepler_df['number_of_quarters']==4]
-    # kepler_df.to_csv('/data/lightPred/tables/kepler_noise_4567.csv', index=False)
-    # # kepler_df = pd.read_csv('/data/lightPred/tables/kepler_noise_4567.csv')
-    # print(kepler_df.head())
     kep_transform = RandomCrop(int(dur/cad*DAY2MIN))
-    # merged_df = pd.merge(kepler_df, non_ps, on='KID', how='inner')
-    # noise_ds = KeplerDataset(kepler_data_folder, path_list=None, df=merged_df,
-    # transforms=kep_transform, acf=False, norm='none')
-
+   
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
                         #   KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                         #   transforms=kep_transform, min_ratio=0.02, max_ratio=0.05), 
@@ -192,65 +177,21 @@ if __name__ == '__main__':
                             KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),
      moving_avg(49), Detrend()])
-
-#     image_transform = torchvision.transforms.Compose([
-#     torchvision.transforms.RandomHorizontalFlip(p=0.5),
-#     # torchvision.transforms.ToDtype(torch.float32, scale=True),
-#     torchvision.transforms.Normalize(mean=[0.445], std=[0.269]),
-# ])
-
-#     image_test_transform = torchvision.transforms.Compose([
-#     # torchvision.transforms.ToDtype(torch.float32, scale=True),
-#     torchvision.transforms.Normalize(mean=[0.445], std=[0.269]),
-# ])
-    
-    # train_dataset = ACFImageDataset(data_folder, train_list, t_samples=t_samples, transforms=transform, image_transform=image_transform)
-    # val_dataset = ACFImageDataset(data_folder, val_list, t_samples=t_samples, transforms=transform, image_transform=image_transform)
-    # test_dataset = ACFImageDataset(data_folder, val_list, t_samples=t_samples, transforms=test_transform, image_transform=image_test_transform)
-
-    # train_dataset = ACFDataset(data_folder, train_list,labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
-    # val_dataset = ACFDataset(data_folder, val_list, labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
-    # test_dataset = ACFDataset(test_folder, test_idx_list, labels=class_labels, t_samples=None, transforms=test_transform, return_raw=False)
-
-    # train_dataset = FourierDataset(data_folder, train_list,labels=class_labels, n_days=dur*2, )
-    # val_dataset = FourierDataset(data_folder, val_list, labels=class_labels, n_days=dur*2,)
-    # test_dataset = FourierDataset(test_folder, test_idx_list, labels=class_labels, n_days=dur*2, )
-
-    # train_dataset = ACFDataset(data_folder, train_list, labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
-    # val_dataset = ACFDataset(data_folder, val_list, labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
-    # test_dataset = ACFDataset(test_folder, test_idx_list, labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
    
     train_dataset = TimeSeriesDataset(data_folder, train_list, labels=class_labels, transforms=transform,
-    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur)
+    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, spots=True)
     val_dataset = TimeSeriesDataset(data_folder, val_list, labels=class_labels,  transforms=transform,
-     init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur)
+     init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, spots=True)
     test_dataset = TimeSeriesDataset(test_folder, test_idx_list, labels=class_labels, transforms=test_transform,
-    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur)
+    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, spots=True)
 
-    # train_dataset = TimeSeriesDataset2(data_folder, train_list, labels=class_labels,
-    #  t_samples=None, transforms=transform, spectrogram=False, prepare=False, p_norm=False)
-    # val_dataset = TimeSeriesDataset2(data_folder, val_list, labels=class_labels,
-    #  t_samples=None, transforms=transform, spectrogram=False, prepare=False, p_norm=False)
-    # test_dataset = TimeSeriesDataset2(test_folder, test_idx_list, labels=class_labels,
-    #  t_samples=None, transforms=test_transform, spectrogram=False, prepare=False, p_norm=False)
-  
+    for i in range(10):
+        x,y,_,_ = train_dataset[i]
+        print("x shape: ", x.shape, "y shape: ", y.shape)
 
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
     train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler, \
                                                num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True)
-
-    # print("calculating weights...")
-    # if os.path.exists(f'{log_path}/exp{exp_num}/train_weights.npy'):
-    #     train_weights = np.load(f'{log_path}/exp{exp_num}/train_weights.npy')
-    # else:
-    #     train_weights = dataset_weights(train_dataloader, Nlc)
-    #     os.makedirs(f'{log_path}/exp{exp_num}', exist_ok=True)
-    #     np.save(f'{log_path}/exp{exp_num}/train_weights.npy', train_weights)
-
-    # train_sampler_weighted = DistributedSamplerWrapper(sampler=WeightedRandomSampler(train_weights, len(train_weights)),
-    #                                             num_replicas=world_size, rank=rank)
-    # train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler_weighted,\
-    #                                               num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True) 
 
     val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
     val_dataloader = DataLoader(val_dataset, batch_size=b_size, sampler=val_sampler, \
@@ -262,85 +203,30 @@ if __name__ == '__main__':
 
     print("dataset length: ", len(train_dataset), len(val_dataset), len(test_dataset))
 
-    # for i in range(10):
-    #     idx = np.random.randint(0, len(train_dataset))
-    #     x,y,_,_ = train_dataset[idx]
-
-    # print("check weights...")
-    # incs = torch.zeros(0)
-    # for i, (x,y,_,_) in enumerate(test_dataloader):
-    #     print(i)
-    #     incs = torch.cat((incs, y[:,0]*90), dim=0)
-    # plt.hist(incs.squeeze(), 80)
-    # plt.savefig('/data/tests/incs_hist_test_lstm_attn.png')
-    # plt.clf()
-    # print("done")
-    # train_dataset = TimeSeriesDataset(data_folder, train_list, t_samples=net_params['seq_len'])
-    # val_dataset = TimeSeriesDataset(data_folder, val_list, t_samples=net_params['seq_len'])
-    # test_dataset = TimeSeriesDataset(test_folder, test_idx_list, t_samples=net_params['seq_len'])
-
-
-    # train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
-    # train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler, \
-    #                                            num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True)
-    # val_dataloader = DataLoader(val_dataset, batch_size=b_size, \
-    #                              num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
-
-   
-
-    # model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
     
-    # lstm, lstm_params, _ = load_model(f'/data/logs/lstm_attn/exp77', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
 
-    conf_model, _, scheduler, scaler = init_train(args, local_rank)
-    conf_model.pred_layer = nn.Identity()
-    model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, **lstm_params)
-
-    # model = conf_model
-
-
-
-
-    # state_dict = torch.load(f'{log_path}/exp34/astroconf.pth')
-    # new_state_dict = OrderedDict()
-    # for key, value in state_dict.items():
-    #     if key.startswith('module.'):
-    #         while key.startswith('module.'):
-    #             key = key[7:]
-    #     new_state_dict[key] = value
-    # state_dict = new_state_dict
-    # print("loading state dict...")
-    # model.load_state_dict(new_state_dict)
-
-    # state_dict = torch.load(f'/data/logs/lstm_attn/exp77/lstm_attn_acc2.pth')
-    # new_state_dict = OrderedDict()
-    # for key, value in state_dict.items():
-    #     if key.startswith('module.'):
-    #         while key.startswith('module.'):
-    #             key = key[7:]
-    #     new_state_dict[key] = value
-    # state_dict = new_state_dict
-    # print("loading state dict...")
-    # model.load_state_dict(new_state_dict)
+    conf_enc, _, scheduler, scaler = init_train(args, local_rank)
+    conf_enc.pred_layer = nn.Identity()
+    conf_dec = AstroDecoder(args)
+    lstm_model = LSTM_ATTN(**lstm_params)
+    model = SpotNet(conf_enc, args.encoder_dim, conf_dec, num_queries, lstm_model)
 
     model = model.to(local_rank)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     print("number of params:", count_params(model))
     
+    matcher = HungarianMatcher()
+    spots_loss = SetCriterion(1, matcher, weight_dict, eos, losses=losses, device=DEVICE)
     loss_fn = nn.L1Loss()
     optimizer = optim.AdamW(model.parameters(), **optim_params)
-
-    # loss_fn = nn.MSELoss()
-    # loss_fn = nn.SmoothL1Loss(beta=0.0005)
-    # loss_fn = WeightedMSELoss(factor=1.2)
-    # loss_fn = nn.GaussianNLLLoss()
 
     data_dict = {'dataset': train_dataset.__class__.__name__,
                    'transforms': transform,  'batch_size': b_size,
      'num_epochs':num_epochs, 'checkpoint_path': f'{log_path}/exp{exp_num}', 'loss_fn':
       loss_fn.__class__.__name__,
      'model': model.module.__class__.__name__, 'optimizer': optimizer.__class__.__name__,
-     'data_folder': data_folder, 'test_folder': test_folder, 'class_labels': class_labels}
+     'data_folder': data_folder, 'test_folder': test_folder, 'class_labels': class_labels,
+     'weight_dict': weight_dict, 'losses': losses, 'num_queries': num_queries,}
 
     with open(f'{log_path}/exp{exp_num}/data_params.yml', 'w') as outfile:
         yaml.dump(data_dict, outfile, default_flow_style=False)
@@ -348,13 +234,12 @@ if __name__ == '__main__':
     print("data params: ", data_dict)
     print("args: ", args)
 
-    trainer = DoubleInputTrainer(model=model, optimizer=optimizer,
+    trainer = SpotsTrainer(model=model, optimizer=optimizer, spots_loss=spots_loss,
                         criterion=loss_fn, num_classes=len(class_labels),
-                       scheduler=None, train_dataloader=train_dataloader,
+                       scheduler=None, train_dataloader=train_dataloader, optim_params=optim_params,
                        val_dataloader=val_dataloader, device=local_rank,
-                         optim_params=optim_params, net_params=lstm_params,
                            exp_num=exp_num, log_path=log_path,
-                        exp_name="astroconf") 
+                        exp_name="spotNet")
     fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
                            early_stopping=40, only_p=False, best='loss', conf=True) 
     output_filename = f'{log_path}/exp{exp_num}/astroconf.json'

@@ -55,10 +55,12 @@ Astroconformer:
   # Model
   in_channels: 1
   encoder: ["mhsa_pro", "conv", "mhsa_pro"]
+  decoder: ["mhsa_decoder",  "conv", "mhsa_decoder"]
   timeshift: false
   num_layers: 5
   stride: 20
   encoder_dim: 128
+  decoder_dim: 128
   num_heads: 8
   kernel_size: 3
   dropout_p: 0.3

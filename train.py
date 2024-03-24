@@ -9,6 +9,8 @@ import glob
 from collections import OrderedDict
 from tqdm import tqdm
 import torch.distributed as dist
+from lightPred.timeDetrLoss import cxcy_to_cxcywh
+
 # import NamedTuple
 # import List
 
@@ -439,54 +441,6 @@ class DoubleInputTrainer(Trainer):
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
         return preds, targets, confs
     
-class SpotsTrainer(Trainer):
-    def __init__(self, set_loss, num_classes=2, **kwargs):
-        super().__init__(**kwargs)
-        self.num_classes = num_classes
-        self.set_loss = set_loss
-    def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
-        """
-        Trains the model for one epoch.
-        """
-        self.model.train()
-        train_loss = []
-        train_acc = 0
-        all_accs = torch.zeros(self.num_classes, device=device)
-        pbar = tqdm(self.train_dl)
-        for i, (x,y, _,_) in enumerate(pbar):
-            # print("x: ", x.shape, "y: ", y.shape)
-            x, spots = x[:, :, 0], x[:, :, 1:]
-            x = x.to(device)
-            spots = spots.to(device)
-            y = y.to(device)
-            self.optimizer.zero_grad()
-            y_pred = self.model(x.float())
-            if conf:
-                y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
-                conf_y = torch.abs(y - y_pred) 
-                
-            # y_std = torch.std(y.squeeze(), dim=1)
-            # y_pred_std = torch.std(y_pred.squeeze(), dim=1)
-            if self.cos_inc:
-                inc_idx = 0
-                y_pred[:, inc_idx] = torch.cos(y_pred[:, inc_idx]*np.pi/2)
-                y[:, inc_idx] = torch.cos(y[:, inc_idx]*np.pi/2)
-            loss = self.criterion(y_pred, y)
-            if conf:
-                loss += self.criterion(conf_pred, conf_y)
-                
-            # loss_std = self.criterion(y_pred_std, y_std)
-            # loss = loss + 0.5 * loss_std
-            
-            # print("loss: ", loss, "y_pred: ", y_pred, "y: ", y)
-            loss.backward()
-            self.optimizer.step()
-            train_loss.append(loss.item())
-            diff = torch.abs(y_pred - y)
-            # train_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
-            all_acc = (diff < (y/10)).sum(0)
-            all_accs = all_accs + all_acc
-            pbar.set_description(f"train_acc: {all_acc}, train_loss:  {loss}")
 
 class KeplerTrainer(Trainer):
     def __init__(self, **kwargs):
@@ -746,6 +700,165 @@ class Trainer2(Trainer):
             targets = np.concatenate((targets, y.cpu().numpy()))
         return preds, targets
 
+
+class SpotsTrainer(Trainer):
+    def __init__(self, spots_loss, num_classes=2, eta=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.num_classes = num_classes
+        self.spots_loss = spots_loss
+        self.eta = eta
+    
+    def get_spot_dict(self, spot_arr):
+        spot_arr = spot_arr*180/np.pi
+        bs, _,_ = spot_arr.shape
+        idx = [spot_arr[b,0,:] != 0 for b in range(bs)]
+        res = []
+        for i in range(bs):
+            spot_dict = {'boxes': cxcy_to_cxcywh(spot_arr[i, :, idx[i]], 1, 1).transpose(0,1).to(spot_arr.device),
+                        'labels': torch.ones((spot_arr[i, :, idx[i]].shape[-1]), device=spot_arr.device).long()}
+            res.append(spot_dict)
+        return res
+
+    def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
+        """
+        Trains the model for one epoch.
+        """
+        self.model.train()
+        train_loss = []
+        train_acc = 0
+        all_accs = torch.zeros(self.num_classes, device=device)
+        pbar = tqdm(self.train_dl)
+        for i, (x,y, _,_) in enumerate(pbar):
+            x, spots_arr = x[:, :-2, :], x[:, -2:, :]
+            x = x.to(device)
+            y = y.to(device)
+            spots_arr = spots_arr.to(device)
+            tgt_spots = self.get_spot_dict(spots_arr)
+            shapes = [(tgt_spots[i]['boxes'].shape, tgt_spots[i]['labels'].shape) for i in range(len(tgt_spots))]
+            if x.shape[1] == 2:
+                x1, x2 = x[:, 0, :], x[:, 1, :]
+                out_spots, y_pred = self.model(x1, x2)
+            else:
+                out_spots, y_pred = self.model(x.unsqueeze(-1))
+            src_shapes = (out_spots['pred_boxes'].shape, out_spots['pred_logits'].shape)
+            if conf:
+                y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+                conf_y = torch.abs(y - y_pred)
+            att_loss_val = self.criterion(y_pred, y)
+            if conf:
+                att_loss_val += self.criterion(conf_pred, conf_y)
+
+            spots_loss_dict = self.spots_loss(out_spots, tgt_spots)
+            weight_dict = self.spots_loss.weight_dict
+            spot_loss_val = sum(spots_loss_dict[k] * weight_dict[k] for k in spots_loss_dict.keys() if k in weight_dict)
+            loss = att_loss_val
+            # loss = self.eta*spot_loss_val + (1-self.eta)*att_loss_val
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            train_loss.append(loss.item())
+            # print(spots_loss_dict['class_error'])
+            spots_acc = (100 - spots_loss_dict['class_error'])
+            diff = torch.abs(y_pred - y)
+            # train_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
+            att_acc = (diff < (y/10)).sum(0)
+            all_accs = all_accs + (att_acc + spots_acc)/2
+            pbar.set_description(f"train_acc: {att_acc, spots_acc}, train_loss:  {loss.item()}")
+            if i > self.max_iter:
+                break
+        return train_loss, all_accs/len(self.train_dl.dataset)
+
+    def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
+        """
+        Evaluates the model for one epoch.
+        """
+        self.model.eval()
+        val_loss = []
+        val_acc = 0
+        all_accs = torch.zeros(self.num_classes, device=device)
+        pbar = tqdm(self.val_dl)
+        with torch.no_grad():
+            for i, (x,y,_,_) in enumerate(pbar):
+                x, spots_arr = x[:, :-2, :], x[:, -2:, :]
+                x = x.to(device)
+                y = y.to(device)
+                spots_arr = spots_arr.to(device)
+                tgt_spots = self.get_spot_dict(spots_arr)
+                if x.shape[1] == 2:
+                    x1, x2 = x[:, 0, :], x[:, 1, :]
+                    out_spots, y_pred = self.model(x1, x2)
+                else:
+                    out_spots, y_pred = self.model(x.unsqueeze(-1))
+                if conf:
+                    y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+                    conf_y = torch.abs(y - y_pred)
+                att_loss_val = self.criterion(y_pred, y)
+                if conf:
+                    att_loss_val += self.criterion(conf_pred, conf_y)
+
+                spots_loss_dict = self.spots_loss(out_spots, tgt_spots)
+                weight_dict = self.spots_loss.weight_dict
+                spot_loss_val = sum(spots_loss_dict[k] * weight_dict[k] for k in spots_loss_dict.keys() if k in weight_dict)
+                loss = att_loss_val
+
+                # loss = self.eta*spot_loss_val + (1-self.eta)*att_loss_val
+                val_loss.append(loss.item())
+                spots_acc = (100 - spots_loss_dict['class_error'])
+                diff = torch.abs(y_pred - y)
+                # val_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
+                att_acc = (diff < (y/10)).sum(0)
+                all_accs = all_accs + (att_acc + spots_acc)/2
+                pbar.set_description(f"val_acc: {att_acc, spots_acc}, val_loss:  {loss.item()}")
+        return val_loss, all_accs/len(self.val_dl.dataset)
+    
+    def predict(self, test_dataloader, device, conf=True, load_best=False):
+        """
+        Returns the predictions of the model on the given dataset.
+        """
+        if self.best_state_dict is not None:
+            self.model.load_state_dict(self.best_state_dict)
+        if load_best:
+            self.load_best_model()
+        self.model.eval()
+        preds = np.zeros((0, self.num_classes))
+        targets = np.zeros((0, self.num_classes))
+        confs = np.zeros((0, self.num_classes))
+        spots_bbox = np.zeros((0, 4))
+        spots_labels = np.zeros((0))
+        spots_target_bbox = np.zeros((0, 4))
+        for i,(x, y,_,info) in enumerate(test_dataloader):
+            x, spots_arr = x[:, :-2, :], x[:, -2:, :]
+            x = x.to(device)
+            tgt_spots = self.get_spot_dict(spots_arr)
+            with torch.no_grad():
+                if x.shape[1] == 2:
+                    x1, x2 = x[:, 0, :], x[:, 1, :]
+                    out_spots, y_pred = self.model(x1, x2)
+                else:
+                    out_spots, y_pred = self.model(x.unsqueeze(-1))
+                if conf:
+                    y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+                    conf_y = torch.abs(y - y_pred)
+                spots_loss_dict = self.spots_loss(out_spots, tgt_spots)
+                weight_dict = self.spots_loss.weight_dict
+                spot_loss_val = sum(spots_loss_dict[k] * weight_dict[k] for k in spots_loss_dict.keys() if k in weight_dict)
+                # print(out_att.shape, y[:,0].shape)
+                att_loss_val = self.criterion(y_pred, y)
+                if conf:
+                    att_loss_val += self.criterion(conf_pred, conf_y)
+                loss = self.eta*spot_loss_val + (1-self.eta)*att_loss_val
+            src_boxes, target_boxes = self.spots_loss.post_process(out_spots, tgt_spots)
+            spots_bbox = np.concatenate((spots_bbox, src_boxes.cpu().numpy()))
+            spots_target_bbox = np.concatenate((spots_target_bbox, target_boxes.cpu().numpy()))
+            labels = out_spots['pred_labels'].argmax().cpu().numpy()
+            spots_labels = np.concatenate((spots_labels,labels))
+            preds = np.concatenate((preds, y_pred.cpu().numpy()))
+            if y.shape[1] == self.num_classes:
+                targets = np.concatenate((targets, y.cpu().numpy()))
+            if conf:
+                confs = np.concatenate((confs, conf_pred.cpu().numpy()))
+            
+        return preds, targets, confs, spots_bbox, spots_target_bbox, spots_labels
 
 class ClassifierTrainer(Trainer):
     def __init__(self, num_classes=10, **kwargs):

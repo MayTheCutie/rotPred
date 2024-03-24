@@ -4,7 +4,7 @@ from torch import Tensor
 from torch.nn.functional import softmax
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
 
-from .Modules.conformer import ConformerEncoder
+from .Modules.conformer import ConformerEncoder, ConformerDecoder
 from .Modules.mhsa_pro import RotaryEmbedding, ContinuousRotaryEmbedding
 from .Modules.cnn import ResNetBlock
 # from .Modules.NCE import Net
@@ -40,17 +40,31 @@ class Astroconformer(nn.Module):
 
     x = x.unsqueeze(1) # x: [B, 1, L]
     x = self.extractor(x) # x: [B, encoder_dim, L]
-    # print("x shape: ", x.shape)
     x = x.permute(0,2,1) # x: [B, L, encoder_dim]
     RoPE = self.pe(x, x.shape[1]) # RoPE: [2, B, L, encoder_dim], 2: sin, cos
-    # print("RoPE shape: ", RoPE.shape)
     x = self.encoder(x, RoPE) # x: [B, L, encoder_dim]
+    memory = x.clone()
     # print("x shape: ", x.shape)
     x = x.mean(dim=1) # x: [B, encoder_dim]
     # print("x shape: ", x.shape)
     # attn = softmax(self.attnpool(x), dim=1) # attn: [B, L, 1]
     # x = torch.matmul(x.permute(0,2,1), attn).squeeze(-1) # x: [B, encoder_dim]
     x = self.pred_layer(x) # x: [B, 1]
+    return x, memory
+
+class AstroDecoder(nn.Module):
+  def __init__(self, args) -> None:
+    super(AstroDecoder, self).__init__()
+    self.head_size = args.encoder_dim // args.num_heads
+    self.rotary_ndims = int(self.head_size * 0.5)    
+    self.pe = RotaryEmbedding(self.rotary_ndims)
+    self.decoder = ConformerDecoder(args)
+    
+  def forward(self, tgt: Tensor, memory: Tensor) -> Tensor:
+    x = tgt #initial input_size: [B, L, encoder_dim]
+
+    RoPE = self.pe(x, x.shape[1]) # RoPE: [2, B, L, encoder_dim], 2: sin, cos
+    x = self.decoder(x, memory, RoPE) # x: [B, L, encoder_dim]
     return x
 
 class ResNetBaseline(nn.Module):

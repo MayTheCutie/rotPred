@@ -122,28 +122,110 @@ class MHA_rotary(nn.Module):
 
         if self.collect_attention_map:
             self.attention_map = att
+        
+        return x
+
+class MHA_decoder(nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        self.collect_attention_map = False
+        self.attention_map = None
+        assert args.encoder_dim % args.num_heads == 0
+        self.num_heads = args.num_heads
+        self.head_size = args.decoder_dim // args.num_heads
+
+        if args.timeshift:
+            self.time_shift = nn.ZeroPad2d((0,0,1,0))
+
+        self.query = nn.Linear(args.encoder_dim, args.encoder_dim)
+        self.key = nn.Linear(args.encoder_dim, args.encoder_dim)
+        self.value = nn.Linear(args.encoder_dim, args.encoder_dim)
+
+        # self.register_buffer("mask", torch.tril(torch.ones(config.ctx_len, config.ctx_len)))
+        
+        self.rotary_ndims = int(self.head_size * 0.5)
+        
+        self.rotary_emb = RotaryEmbedding(self.rotary_ndims)
+
+        self.output = nn.Linear(args.encoder_dim, args.encoder_dim)
+
+    def forward(self, x, memory,RoPE, key_padding_mask=None):
+        B, T, C = x.size()
+        _, L, _ = memory.size()
+
+        # print("x size: ", x.size(), 'memory size: ', memory.size())
+        # print('B, T, C: ', B, T, C, 'L: ', L)
+
+        q = self.query(x).view(B, T, self.num_heads, self.head_size).transpose(1, 2)       # (B, T, C) -> (B, nh, T, hs)
+        k = self.key(x).view(B, T, self.num_heads, self.head_size).transpose(1, 2)         # (B, T, C) -> (B, nh, T, hs)
+        v = self.value(x).view(B, T, self.num_heads, self.head_size).transpose(1, 2)       # (B, T, C) -> (B, nh, T, hs)
+
+        q, query_pass = q[..., :self.rotary_ndims], q[..., self.rotary_ndims:]
+        k, key_pass = k[..., :self.rotary_ndims], k[..., self.rotary_ndims:]
+        
+        # cos, sin = self.rotary_emb(q, seq_len=T)
+        cos, sin = RoPE
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)                                     # rotary encoding
+        q = torch.cat((q, query_pass), dim=-1)
+        k = torch.cat((k, key_pass), dim=-1)  
+        
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))                 # self-attention: (B, nh, T, hs) * (B, nh, hs, T) -> (B, nh, T, T)
+        if key_padding_mask is not None:
+            key_padding_mask = key_padding_mask[:, None, None, :]           # (B, T) -> (B, 1, 1, T)
+            att = att.masked_fill(key_padding_mask == 0, float('-inf'))
+        att = F.softmax(att, dim = -1)                                                  # softmax
+
+        x = att @ v  
+        # print("after attention vals: ", x.shape)                                                                   # (B, nh, T, T) * (B, nh, T, hs) -> (B, nh, T, hs)
+        x = x.transpose(1, 2).contiguous().view(B, T, -1)                               # (B, nh, T, hs) -> (B, T, nh, hs) -> (B, T, C)
+
+        # x = self.output(x)
+
+        # print("after linear: ", x.shape)                                                                   # (B, nh, T, T) * (B, nh, T, hs) -> (B, nh, T, hs)
+
+
+        # cross attention:
+        q = self.query(x).view(B, T, self.num_heads, self.head_size).transpose(1, 2)       # (B, T, C) -> (B, nh, T, hs)
+        k = self.key(memory).view(B, L, self.num_heads, self.head_size).transpose(1, 2)         # (B, T, C) -> (B, nh, T, hs)
+        v = self.value(memory).view(B, L, self.num_heads, self.head_size).transpose(1, 2)       # (B, T, C) -> (B, nh, T, hs)
+        
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))                 # self-attention: (B, nh, T, hs) * (B, nh, hs, T) -> (B, nh, T, T)
+        # print("att size: ", att.size())
+        if key_padding_mask is not None:
+            key_padding_mask = key_padding_mask[:, None, None, :]           # (B, T) -> (B, 1, 1, T)
+            att = att.masked_fill(key_padding_mask == 0, float('-inf'))
+        att = F.softmax(att, dim = -1)                                                  # softmax
+
+        x = att @ v                                                                     # (B, nh, T, T) * (B, nh, T, hs) -> (B, nh, T, hs)
+        # print("x deocder size: ", x.size())
+        x = x.transpose(1, 2).contiguous().view(B, T, -1)                               # (B, nh, T, hs) -> (B, T, nh, hs) -> (B, T, C)
+        # print("x deocder size transposed: ", x.size())
+        x = self.output(x)
+
+        if self.collect_attention_map:
+            self.attention_map = att
 
         return x
 
-class GeGLU(torch.nn.Module):
-    def __init__(self, config, layer_id, time_shift = False):
-        super().__init__()
-        self.layer_id = layer_id
+    class GeGLU(torch.nn.Module):
+        def __init__(self, config, layer_id, time_shift = False):
+            super().__init__()
+            self.layer_id = layer_id
 
-        if time_shift:
-            self.time_shift = nn.ZeroPad2d((0,0,1,0))
+            if time_shift:
+                self.time_shift = nn.ZeroPad2d((0,0,1,0))
 
-        hidden_sz = 3 * config.n_ffn
-        self.key = nn.Linear(config.n_embd, hidden_sz)
-        self.value = nn.Linear(config.n_embd, hidden_sz)
-        self.weight = nn.Linear(hidden_sz, config.n_embd)
+            hidden_sz = 3 * config.n_ffn
+            self.key = nn.Linear(config.n_embd, hidden_sz)
+            self.value = nn.Linear(config.n_embd, hidden_sz)
+            self.weight = nn.Linear(hidden_sz, config.n_embd)
 
-    def forward(self, x):
-        B, T, C = x.size()
-        if hasattr(self, 'time_shift'):
-            x = torch.cat([self.time_shift(x)[:, :-1, :C//2], x[:, :, C//2:]], dim = -1)
-        
-        k = self.key(x)
-        v = self.value(x)        
-        y = self.weight(F.gelu(k) * v)
-        return y
+        def forward(self, x):
+            B, T, C = x.size()
+            if hasattr(self, 'time_shift'):
+                x = torch.cat([self.time_shift(x)[:, :-1, :C//2], x[:, :, C//2:]], dim = -1)
+            
+            k = self.key(x)
+            v = self.value(x)        
+            y = self.weight(F.gelu(k) * v)
+            return y

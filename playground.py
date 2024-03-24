@@ -82,34 +82,60 @@ idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nl
 
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
 
+
+def create_period_normalized_samples(data_folder, num_samples, num_ps=20):
+    lc_path = os.path.join(data_folder, 'simulations')
+    csv_path = os.path.join(data_folder, 'simulation_properties.csv')
+    norm_lc_path = os.path.join(data_folder, 'simulations_norm')
+    if not os.path.exists(norm_lc_path):
+        os.makedirs(norm_lc_path)
+    labels_df = pd.read_csv(csv_path)
+    idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc)) + 1) for idx in range(Nlc)]
+    for i, idx_s in enumerate(idx_list[:num_samples]):
+        if i % 1000 == 0:
+            print(i)
+        clean_idx = remove_leading_zeros(idx_s)
+        row = labels_df.iloc[clean_idx]
+        p = row['Period']
+        x = pd.read_parquet(os.path.join(lc_path, f"lc_{idx_s}.pqt")).values
+        norm_t, norm_f = period_norm(x, period=p, num_ps=num_ps)
+        norm_df = pd.DataFrame(np.c_[norm_t, norm_f], columns=["time", "flux"])
+        norm_df.to_parquet(os.path.join(norm_lc_path, f"lc_{idx_s}.pqt"))
+
 def show_samples(num_samples):
-    idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc)) + 1) for idx in range(test_Nlc)]
-    dataset = TimeSeriesDataset(data_folder_local, idx_list, t_samples=None, norm='none', prepare=False,
+    idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc)) + 1) for idx in range(Nlc)]
+    dataset = TimeSeriesDataset(data_folder, idx_list, t_samples=None, norm='none', prepare=False,
                                 spots=True, init_frac=0.2)
     time = np.arange(0, 800, cad / DAY2MIN)
+    n_spots = []
     for i in range(num_samples):
-        fig, ax = plt.subplots(1, 2)
+        if i % 1000 == 0:
+            print(i)
         x, y, _, _ = dataset[i]
         # print('xshape', x.shape)
-        ax[0].plot(time, x[:,0])
+        # ax[0].plot(time, x[:,0])
         spot_idx = torch.where(x[:,1] != 0)[0]
-        n_spots = len(spot_idx)
+        n_spots.append(len(spot_idx))
         spots_arr = x[:, 1:]*180/np.pi
-        print("spots max day ", time[spot_idx[-1]])
+        # print("spots max day ", time[spot_idx[-1]])
         # spots_arr = spots_arr[spots_arr[:,0] > 90]
         spots_arr[:, 0] -= 90
         # ax[1].scatter(spots_arr[:, 1], spots_arr[:, 0])
-        ax[1].scatter(time, spots_arr[:, 0])
-        print("nspots ", n_spots)
-        ax[0].set_title(f"p: {y[1].item():.2f}, inc: {y[0].item():.2f} nspots : {n_spots}")
-        ax[0].set_xlabel('time(days)')
-        ax[0].set_ylabel('flux')
-        ax[1].set_xlabel('time(days)')
-        ax[1].set_ylabel('spots latitude (deg)')
-        ax[1].set_ylim(0, 100)
-        plt.tight_layout()
-        plt.savefig(rf'C:\Users\ilaym\Desktop\kepler\/data/tests/sample_{i}.png')
-        plt.close()
+        # ax[1].scatter(time, spots_arr[:, 0])
+        # ax[0].set_title(f"p: {y[1].item():.2f}, inc: {y[0].item():.2f} nspots : {n_spots}")
+        # ax[0].set_xlabel('time(days)')
+        # ax[0].set_ylabel('flux')
+        # ax[1].set_xlabel('time(days)')
+        # ax[1].set_ylabel('spots latitude (deg)')
+        # ax[1].set_ylim(0, 100)
+        # plt.tight_layout()
+        # plt.savefig(rf'C:\Users\ilaym\Desktop\kepler\/data/tests/sample_{i}.png')
+        # plt.close()
+    print(np.mean(n_spots), np.std(n_spots), np.max(n_spots), np.min(n_spots))
+    plt.hist(n_spots, 100)
+    plt.xlabel('number of spots')
+    plt.ylabel('count')
+    plt.savefig('/data/tests/n_spots_hist.png')
 
 
 
@@ -120,6 +146,7 @@ def cxcy_to_cxcywh(arr, w, h):
     x2 = x + w / 2
     y2 = y + h / 2
     return torch.stack((x1, y1, x2, y2), dim=1)
+
 def get_spot_dict(spot_arr):
     bs, _,_ = spot_arr.shape
     idx = [spot_arr[b,:, 0] != 0 for b in range(bs)]
@@ -546,20 +573,20 @@ def diffs():
     plt.xlabel('Inclination (Radians)')
     plt.savefig('/data/tests/period_vs_inc_log.png')
         
-def period_norm(lc, period, num_ps):
-    # plt.plot(lc[:,0], lc[:,1])
-    time, flux = lc[:, 0], lc[:, 1]
+def period_norm(lc, period, num_ps, orig_freq=1/48):
+    if len(lc.shape) == 1:
+        flux = lc
+        time = np.arange(0, len(flux)*orig_freq, orig_freq)
+    else:
+        time, flux = lc[:, 0], lc[:, 1]
     time = time - time[0]
-    # num_samples_norm = int(period * num_ps / CAD)
+
     # Define the new time points and the desired sampling rate
-    new_sampling_rate = period / 1000  # Change this to your desired new sampling rate
+    new_sampling_rate = period / 1000  
     new_time = np.arange(0, period * num_ps, new_sampling_rate)
-    # print(period, new_time.shape, time.shape)
-    # Use numpy.interp for interpolation
     new_flux = np.interp(new_time, time, flux)
-    # plt.plot(new_time, new_flux)
-    # plt.show()
-    return new_time, new_flux
+    t_norm = np.linspace(0, num_ps, num=len(new_flux))
+    return t_norm, new_flux
 
 def filter_samples():
     data_dir = "/data/lightPred/LightCurves/data/simulations"
@@ -1513,8 +1540,9 @@ if __name__ == "__main__":
     # create_noise_dataset()
     # read_spots_and_lightcurve('00010', '/data/butter/data2')
     # test_spots_dataset()
-
-    test_timeDetr()
+    # show_samples(48000)
+    create_period_normalized_samples('/data/butter/data_cos', 50000, num_ps=20)
+    # test_timeDetr()
 
 
 

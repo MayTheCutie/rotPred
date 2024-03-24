@@ -472,12 +472,14 @@ class TimeSeriesDataset(Dataset):
   def __init__(self, root_dir, idx_list, labels=['Inclination', 'Period'], t_samples=None, norm='std', transforms=None,
                 noise=False, spectrogram=False, n_fft=1000, acf=False, return_raw=False,cos_inc=False,
                  wavelet=False, freq_rate=1/48, init_frac=0.4, dur=360, kep_noise=None, prepare=True,
-                 spots=False):
+                 spots=False, period_norm=False):
       self.idx_list = idx_list
       self.labels = labels
       self.length = len(idx_list)
+      self.p_norm = period_norm
       self.targets_path = os.path.join(root_dir, "simulation_properties.csv")
-      self.lc_path = os.path.join(root_dir, "simulations")
+      lc_dir = 'simulations' if not period_norm else 'simulations_norm'
+      self.lc_path = os.path.join(root_dir, lc_dir)
       self.spots_path = os.path.join(root_dir, "spots")
       self.loaded_labels = pd.read_csv(self.targets_path)
       self.seq_len = t_samples
@@ -560,6 +562,17 @@ class TimeSeriesDataset(Dataset):
       spots[:,0] -= left_day
     return spots
 
+  def create_spots_arr(self, idx, info, x):
+        spots_data = self.read_spots(self.idx_list[idx])
+        init_day = int(1000 * self.init_frac)
+        spots_data = spots_data[spots_data[:, 0] > init_day]
+        spots_data[:, 0] -= init_day
+        if not self.p_norm:
+          spots_data = self.crop_spots(spots_data, info)
+        spots_arr = np.zeros((2, x.shape[-1]))
+        spot_t = (spots_data[:, 0] / self.freq_rate).astype(np.int64)
+        spots_arr[:, spot_t] = spots_data[:,1:3].T
+        return spots_arr
 
   def interpolate(self, x):
       f = interp1d(x[:,0], x[:,1])
@@ -574,7 +587,7 @@ class TimeSeriesDataset(Dataset):
         power, phase, period = self.wavelet_from_np(x, period_samples=int(self.dur/self.freq_rate))
         gwps = power.sum(axis=-1)
         grad = 1 + np.gradient(gwps)/(2/period)
-        x = np.vstack((grad[None], xcf[None]))
+        x = np.vstack((grad[None], x[None]))
       elif self.return_raw:
         x = np.vstack((xcf[None], x[None]))
       else:
@@ -702,6 +715,8 @@ class TimeSeriesDataset(Dataset):
           x, _, info = self.transforms(x[:,1], mask=None,  info=dict(), step=self.step)
           # x = savgol(x, 49, 1, mode='mirror')
           info['idx'] = idx
+        else:
+          x = x[:,1]
         t3 = time.time()
         x = fill_nan_np(x, interpolate=True)
         t4 = time.time()
@@ -715,8 +730,10 @@ class TimeSeriesDataset(Dataset):
         y = self.get_labels(sample_idx)
         t7 = time.time()
         if self.spots:
+          if len(x.shape) == 1:
+            x = x.unsqueeze(-1)
           spots_arr = self.create_spots_arr(idx, info, x)
-          x = torch.cat((x.unsqueeze(-1), torch.tensor(spots_arr).float()), dim=1)
+          x = torch.cat((x, torch.tensor(spots_arr).float()), dim=0)
         self.step += 1
       else:
         x, y, info = self.samples[idx]
@@ -729,19 +746,6 @@ class TimeSeriesDataset(Dataset):
         return x_spec.unsqueeze(0), y, x.float(), info
       # print("times: ", t1-s, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5,t7-t6,  "tot time: ", t7-s)
       return x.float(), y, torch.ones_like(x), info
-
-  def create_spots_arr(self, idx, info, x):
-      spots_data = self.read_spots(self.idx_list[idx])
-      init_day = int(1000 * self.init_frac)
-      spots_data = spots_data[spots_data[:, 0] > init_day]
-      spots_data[:, 0] -= init_day
-      spots_data = self.crop_spots(spots_data, info)
-      # if len(spots_data):
-      #   print("spots max day : ", np.max(spots_data[:,0]))
-      spots_arr = np.zeros((x.shape[0], 2))
-      spot_t = (spots_data[:, 0] / self.freq_rate).astype(np.int64)
-      spots_arr[spot_t] = spots_data[:, 1:3]
-      return spots_arr
 
 
 class TimeSeriesDataset2(Dataset):

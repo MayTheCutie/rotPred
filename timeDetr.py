@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 from torch import Tensor
 import math
 # from torchvision.models import transformer
@@ -95,7 +95,7 @@ class TimeSeriesDetrDecoder(nn.Module):
         decoder_layer = nn.TransformerDecoderLayer(hidden_dim, num_heads, hidden_dim * 4, dropout)
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
 
-    def forward(self, memory: Tensor, tgt: Tensor) -> Tuple[dict[str, Tensor], Tensor]:
+    def forward(self, memory: Tensor, tgt: Tensor) -> Tuple[Dict[str, Tensor], Tensor]:
         t, bs, h = tgt.shape
         hs = self.transformer_decoder(tgt, memory)  # (1, N, C)
         decoder_output = hs.transpose(0, 1)

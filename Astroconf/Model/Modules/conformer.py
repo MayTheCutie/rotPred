@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch import Tensor
 import torch.nn.init as init
 
-from .mhsa_pro import MHA_rotary
+from .mhsa_pro import MHA_rotary, MHA_decoder
 from .cnn import ConvBlock
 
 from typing import Optional,Tuple
@@ -417,73 +417,66 @@ class ConformerBlock(nn.Module):
 
         self.modlist = nn.ModuleList([norm_dict[args.norm](block_dict[block](args), args) for block in args.encoder]\
             )
-            # ResidualConnectionModule(
-            #     module=FeedForwardModule(
-            #         encoder_dim=encoder_dim,
-            #         expansion_factor=feed_forward_expansion_factor,
-            #         dropout_p=feed_forward_dropout_p,
-            #         device=device,
-            #     ),
-            #     module_factor=self.feed_forward_residual_factor,
-            # ),
-            # ResidualConnectionModule(
-            #     module=MHA_rotary(
-            #         AttentionConfig(n_head=num_attention_heads, n_attn=encoder_dim, n_embd=encoder_dim),
-            #         # time_shift=False
-            # ),
-            # ),
-            # ResidualConnectionModule(
-            #     module=MultiHeadedSelfAttentionModule(
-            #         d_model=encoder_dim,
-            #         num_heads=num_attention_heads,
-            #         dropout_p=attention_dropout_p,
-            # ),
-            # ),
-            # ResidualConnectionModule(
-            #     module=ConformerConvModule(
-            #         args.encoder_dim=encoder_dim,
-            #         args.kernel_size=conv_kernel_size,
-            #         expansion_factor=conv_expansion_factor,
-            #         dropout_p=conv_dropout_p,
-            #     ),
-            # ),
-            # ResidualConnectionModule(
-            #     module=MultiHeadedSelfAttentionModule(
-            #         d_model=encoder_dim,
-            #         num_heads=num_attention_heads,
-            #         dropout_p=attention_dropout_p,
-            # ),
-            # ),
-            # ResidualConnectionModule(
-            #     module=ConformerConvModule(
-            #         args.encoder_dim=encoder_dim,
-            #         args.kernel_size=conv_kernel_size,
-            #         expansion_factor=conv_expansion_factor,
-            #         dropout_p=conv_dropout_p,
-            #     ),
-            # ),
-            # ResidualConnectionModule(
-            #     module=ConformerConvModule(
-            #         in_channels=encoder_dim,
-            #         kernel_size=conv_kernel_size,
-            #         expansion_factor=conv_expansion_factor,
-            #         dropout_p=conv_dropout_p,
-            #     ),
-            # ),
-            # ResidualConnectionModule(
-            #     module=FeedForwardModule(
-            #         encoder_dim=encoder_dim,
-            #         expansion_factor=feed_forward_expansion_factor,
-            #         dropout_p=feed_forward_dropout_p,
-            #     ),
-            #     module_factor=self.feed_forward_residual_factor,
-            # ),
-            # nn.LayerNorm(args.encoder_dim)
 
     def forward(self, x: Tensor, RoPE, key_padding_mask=None) -> Tensor:
         for m in self.modlist:
             if isinstance(m.module, MHA_rotary):
                 x = m(x, RoPE=RoPE, key_padding_mask=key_padding_mask)
+            else:
+                x = m(x)
+        return x
+
+
+class DecoderBlock(nn.Module):
+    """
+    Decoder block contains two Feed Forward modules sandwiching the Multi-Headed Self-Attention module
+    and the Convolution module. This sandwich structure is inspired by Macaron-Net, which proposes replacing
+    the original feed-forward layer in the Transformer block into two half-step feed-forward layers,
+    one before the attention layer and one after.
+    Args:
+        encoder_dim (int, optional): Dimension of conformer encoder
+        num_attention_heads (int, optional): Number of attention heads
+        feed_forward_expansion_factor (int, optional): Expansion factor of feed forward module
+        conv_expansion_factor (int, optional): Expansion factor of conformer convolution module
+        feed_forward_dropout_p (float, optional): Probability of feed forward module dropout
+        attention_dropout_p (float, optional): Probability of attention module dropout
+        conv_dropout_p (float, optional): Probability of conformer convolution module dropout
+        conv_kernel_size (int or tuple, optional): Size of the convolving kernel
+        half_step_residual (bool): Flag indication whether to use half step residual or not
+        device (torch.device): torch device (cuda or cpu)
+    Inputs: inputs
+        - **inputs** (batch, time, dim): Tensor containing input vector
+    Returns: outputs
+        - **outputs** (batch, time, dim): Tensor produces by conformer block.
+    """
+    def __init__(
+            self,
+            args
+    ):
+        super(DecoderBlock, self).__init__()
+        
+        norm_dict = {
+            'shortcut': ResidualConnectionModule,
+            'postnorm': PostNorm
+        }
+        block_dict = {
+            'ffn': FeedForwardModule,
+            'mhsa': MultiHeadedSelfAttentionModule,
+            'mhsa_pro': MHA_rotary,
+            'mhsa_decoder': MHA_decoder,
+            'conv': ConvBlock,
+            'conformerconv': ConformerConvModule
+        }
+
+        self.modlist = nn.ModuleList([norm_dict[args.norm](block_dict[block](args), args) for block in args.decoder]\
+            )
+
+    def forward(self, x: Tensor, memory:Tensor, RoPE, key_padding_mask=None) -> Tensor:
+        for m in self.modlist:
+            if isinstance(m.module, MHA_decoder):
+                x = m(x, memory=memory, RoPE=RoPE, key_padding_mask=key_padding_mask)
+            elif isinstance(m.module, MHA_rotary):
+                x = m(x, RoPE=RoPE, key_padding_mask=key_padding_mask).transpose(0,1)
             else:
                 x = m(x)
         return x
@@ -536,5 +529,55 @@ class ConformerEncoder(nn.Module):
         """
         for block in self.blocks:
             x = block(x, RoPE=RoPE, key_padding_mask=key_padding_mask)
+
+        return x
+
+class ConformerDecoder(nn.Module):
+    """
+    Conformer encoder first processes the input with a convolution subsampling layer and then
+    with a number of conformer blocks.
+    Args:
+        input_dim (int, optional): Dimension of input vector
+        encoder_dim (int, optional): Dimension of conformer encoder
+        num_layers (int, optional): Number of conformer blocks
+        num_attention_heads (int, optional): Number of attention heads
+        feed_forward_expansion_factor (int, optional): Expansion factor of feed forward module
+        conv_expansion_factor (int, optional): Expansion factor of conformer convolution module
+        feed_forward_dropout_p (float, optional): Probability of feed forward module dropout
+        attention_dropout_p (float, optional): Probability of attention module dropout
+        conv_dropout_p (float, optional): Probability of conformer convolution module dropout
+        conv_kernel_size (int or tuple, optional): Size of the convolving kernel
+        half_step_residual (bool): Flag indication whether to use half step residual or not
+        device (torch.device): torch device (cuda or cpu)
+    Inputs: inputs, input_lengths
+        - **inputs** (batch, time, dim): Tensor containing input vector
+        - **input_lengths** (batch): list of sequence input lengths
+    Returns: outputs, output_lengths
+        - **outputs** (batch, out_channels, time): Tensor produces by conformer encoder.
+        - **output_lengths** (batch): list of sequence output lengths
+    """
+    def __init__(
+            self,
+            args,
+    ):
+        super(ConformerDecoder, self).__init__()
+        self.blocks = nn.ModuleList([DecoderBlock(
+            args) for _ in range(args.num_layers)])
+
+    def forward(self, x: Tensor, memory: Tensor, RoPE=None, key_padding_mask=None) -> Tuple[Tensor, Tensor]:
+        """
+        Forward propagate a `inputs` for  encoder training.
+        Args:
+            inputs (torch.FloatTensor): A input sequence passed to encoder. Typically for inputs this will be a padded
+                `FloatTensor` of size ``(batch, seq_length, dimension)``.
+            input_lengths (torch.LongTensor): The length of input tensor. ``(batch)``
+        Returns:
+            (Tensor, Tensor)
+            * outputs (torch.FloatTensor): A output sequence of encoder. `FloatTensor` of size
+                ``(batch, seq_length, dimension)``
+            * output_lengths (torch.LongTensor): The length of output tensor. ``(batch)``
+        """
+        for block in self.blocks:
+            x = block(x, memory, RoPE=RoPE, key_padding_mask=key_padding_mask)
 
         return x

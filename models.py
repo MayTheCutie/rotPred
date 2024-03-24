@@ -217,6 +217,21 @@ class ConvBlock(nn.Module):
         x = x + skip
         return x
 
+class MLP(nn.Module):
+    """ Very simple multi-layer perceptron (also called FFN)"""
+
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
+        super().__init__()
+        self.num_layers = num_layers
+        h = [hidden_dim] * (num_layers - 1)
+        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+
+    def forward(self, x):
+        for i, layer in enumerate(self.layers):
+            x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
+        return x
+
+
 class LSTMFeatureExtractor(nn.Module):
     def __init__(self, seq_len=1024, hidden_size=256, num_layers=5, num_classes=4,
                  in_channels=1, channels=256, dropout=0.2, kernel_size=4 ,stride=4, image=False):
@@ -447,10 +462,65 @@ class LSTM_DUAL(LSTM_ATTN):
         x, h_f, c_f = self.feature_extractor(x, return_cell=True) # [B, L//stride, 2*hidden_size], [B, 2*nlayers, hidden_szie], [B, 2*nlayers, hidden_Size]
         c_f = torch.cat([c_f[-1], c_f[-2]], dim=1) # [B, 2*hidden_szie]
         t_features = self.attention(c_f, x, x) # [B, 2*hidden_size]
-        d_features = self.dual_model(x_dual) # [B, encoder_dims]
+        d_features, _ = self.dual_model(x_dual) # [B, encoder_dims]
         features = torch.cat([t_features, d_features], dim=1) # [B, 2*hidden_size + encoder_dims]
         out = self.pred_layer(features)
         return out
+
+class SpotNet(LSTM_ATTN):
+    def __init__(self, encoder, encoder_dims, decoder, num_queries, lstm_model=None,
+     freeze=False, dropout=0.3, **kwargs):
+        super(SpotNet, self).__init__(**kwargs)
+        # print("intializing dual model")
+        if lstm_model is not None:
+            self.feature_extractor = lstm_model.feature_extractor
+            self.attention = lstm_model.attention
+            if freeze:
+                for param in self.feature_extractor.parameters():
+                    param.requires_grad = False
+                # for param in self.attention.parameters():
+                #     param.requires_grad = False
+        num_lstm_features = self.feature_extractor.hidden_size*2
+        self.num_features = num_lstm_features + encoder_dims
+        self.encoder = encoder
+        self.decoder = decoder
+        self.object_queries = nn.Embedding(num_queries, encoder_dims)
+        self.pred_layer = nn.Sequential(
+        nn.Linear(self.num_features, self.predict_size),
+        nn.GELU(),
+        nn.Dropout(p=dropout),
+        nn.Linear(self.predict_size,self.num_classes),
+    )
+        self.spot_class_layer = nn.Linear(encoder_dims, 2)
+        self.spot_box_layer = nn.Sequential(
+        nn.Linear(encoder_dims, self.predict_size),
+        nn.GELU(),
+        nn.Dropout(p=dropout),
+        nn.Linear(self.predict_size, self.predict_size),
+        nn.GELU(),
+        nn.Dropout(p=dropout),
+        nn.Linear(self.predict_size,4),
+    )
+
+    def forward(self, x_acf, x):
+        bs, T = x.shape
+        if len(x.shape) == 2:
+            x_acf = x_acf.unsqueeze(1)
+        x_f, h_f, c_f = self.feature_extractor(x_acf, return_cell=True) # [B, L//stride, 2*hidden_size], [B, 2*nlayers, hidden_szie], [B, 2*nlayers, hidden_Size]
+        c_f = torch.cat([c_f[-1], c_f[-2]], dim=1) # [B, 2*hidden_szie]
+        t_features = self.attention(c_f, x_f, x_f) # [B, 2*hidden_size]
+        d_features, memory = self.encoder(x) # [B, encoder_dims]
+        features = torch.cat([t_features, d_features], dim=1) # [B, 2*hidden_size + encoder_dims]
+        query_embed = self.object_queries.weight.unsqueeze(0).repeat(bs, 1, 1)
+        tgt = torch.zeros_like(query_embed)
+        decoder_output = self.decoder(tgt, memory) 
+        # print("decoder_output: ", decoder_output.shape)
+        predictions = self.pred_layer(features)
+        class_logits = self.spot_class_layer(decoder_output)
+        bbox_logits = self.spot_box_layer(decoder_output).sigmoid()
+        # print("class_logits: ", class_logits.shape, "bbox_logits: ", bbox_logits.shape)
+        out_dict = {'pred_boxes': bbox_logits, 'pred_logits': class_logits}
+        return out_dict, predictions
 
 class LSTM_SWIN(LSTM_ATTN):
     def __init__(self, patch_size=[16,16], im_embed_dim=64, depths=[4,6,6,4], num_heads=[4,8,8,4],
