@@ -25,7 +25,7 @@ DAY2MIN = 24*60
 min_p, max_p = 0,60
 min_lat, max_lat = 0, 80
 min_cycle, max_cycle = 1, 10
-min_i, max_i = 0, np.pi/2
+min_i, max_i = 0, 90
 min_tau, max_tau = 1,10 
 min_n, max_n = 0, 5000
 min_shear, max_shear = 0, 1
@@ -735,6 +735,7 @@ class TimeSeriesDataset(Dataset):
           spots_arr = self.create_spots_arr(idx, info, x)
           x = torch.cat((x, torch.tensor(spots_arr).float()), dim=0)
         self.step += 1
+        t8 = time.time()
       else:
         x, y, info = self.samples[idx]
         x = self.normalize(x)
@@ -744,7 +745,8 @@ class TimeSeriesDataset(Dataset):
         x_spec = spec(x)
         # t6 = time.time()
         return x_spec.unsqueeze(0), y, x.float(), info
-      # print("times: ", t1-s, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5,t7-t6,  "tot time: ", t7-s)
+      end = time.time()
+      # print("times: ", t1-s, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5,t7-t6, t8-t7,  "tot time: ", end-s)
       return x.float(), y, torch.ones_like(x), info
 
 

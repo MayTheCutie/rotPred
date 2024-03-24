@@ -68,7 +68,7 @@ train_list, val_list = train_test_split(idx_list, test_size=0.1, random_state=12
 
 test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
-b_size = 16
+b_size = 8
 
 num_epochs = 2
 
@@ -158,7 +158,8 @@ def objective(trial):
         args.stride = stride
         args.kernel_size = kernel_size
 
-        num_queries = trial.suggest_int("num_queries", 400, 600, 100)
+        # num_queries = trial.suggest_int("num_queries", 300, 600, 100)
+        num_queries = 250
         conformer_enc, _, scheduler, scaler = init_train(args, DEVICE)
         conformer_enc.pred_layer = nn.Identity()
         conformer_dec = AstroDecoder(args)
@@ -181,9 +182,12 @@ def objective(trial):
         lr = trial.suggest_float("lr", 1e-5,1e-3)
         weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-1)
 
-        ce_weight = trial.suggest_float("ce_weight", 0.1, 1)
-        bbox_weight = trial.suggest_float("bbox_weight", 0.1, 1)
-        eos_val = trial.suggest_float("eos_val", 0.1, 0.5)
+        # ce_weight = trial.suggest_float("ce_weight", 0.1, 1)
+        # bbox_weight = trial.suggest_float("bbox_weight", 0.1, 1)
+        # eos_val = trial.suggest_float("eos_val", 0.1, 0.5)
+        ce_weight = 1
+        bbox_weight = 5
+        eos_val = 0.5
         weight_dict = {'loss_ce': ce_weight, 'loss_bbox': bbox_weight, 'loss_giou': 1}
         eos = eos_val
         losses = ['labels', 'boxes', 'cardinality']

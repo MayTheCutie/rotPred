@@ -139,7 +139,7 @@ if __name__ == '__main__':
     eos = 1644644781327425
     losses = ['labels', 'boxes', 'cardinality']
 
-    num_queries = 600
+    num_queries = 300
       
     world_size    = int(os.environ["WORLD_SIZE"])
     rank          = int(os.environ["SLURM_PROCID"])
