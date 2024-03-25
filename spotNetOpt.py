@@ -16,6 +16,7 @@ from lightPred.timeDetrLoss import SetCriterion, HungarianMatcher, cxcy_to_cxcyw
 from lightPred.Astroconf.Train.utils import init_train
 from lightPred.Astroconf.utils import Container, same_seeds
 from lightPred.Astroconf.Model.models import AstroDecoder
+from lightPred.timeDetr import TimeSeriesDetrDecoder
 from lightPred.dataloader import *
 from lightPred.utils import *
 # from lightPred.train import *
@@ -140,8 +141,8 @@ def objective(trial):
          # Sample one of the model architectures
         encoder_idx = trial.suggest_int('encoder_idx', 0, len(encoder_architectures) - 1)
         encoder = encoder_architectures[encoder_idx]
-        decoder_idx = trial.suggest_int('decoder_idx', 0, len(decoder_architectures) - 1)
-        decoder = decoder_architectures[decoder_idx]
+        # decoder_idx = trial.suggest_int('decoder_idx', 0, len(decoder_architectures) - 1)
+        # decoder = decoder_architectures[decoder_idx]
         encoder_dim = trial.suggest_int("hidden_dim", 64, 256, 64)
         num_layers = trial.suggest_int("num_layers", 1, 6)
         num_heads = trial.suggest_int("num_heads", 4, 8, 4)
@@ -149,9 +150,9 @@ def objective(trial):
         stride = trial.suggest_int("stride", 4, 24, 4)
         kernel_size = trial.suggest_int("kernel_size", 3, 7, 2)
         args.encoder = encoder
-        args.decoder = decoder
+        # args.decoder = decoder
         args.encoder_dim = encoder_dim
-        args.decoder_dim = encoder_dim
+        # args.decoder_dim = encoder_dim
         args.num_layers = num_layers
         args.num_heads = num_heads
         args.dropout_p = dropout
@@ -159,10 +160,11 @@ def objective(trial):
         args.kernel_size = kernel_size
 
         # num_queries = trial.suggest_int("num_queries", 300, 600, 100)
-        num_queries = 250
+        num_queries = 300
         conformer_enc, _, scheduler, scaler = init_train(args, DEVICE)
         conformer_enc.pred_layer = nn.Identity()
-        conformer_dec = AstroDecoder(args)
+        # conformer_dec = AstroDecoder(args)
+        conformer_dec = TimeSeriesDetrDecoder(encoder_dim, num_layers, num_heads, dropout)
         lstm_model = LSTM_ATTN(**lstm_params)
         model = SpotNet(conformer_enc, args.encoder_dim, conformer_dec,
          num_queries, lstm_model, num_classes=lstm_model.num_classes)
@@ -185,18 +187,18 @@ def objective(trial):
         # ce_weight = trial.suggest_float("ce_weight", 0.1, 1)
         # bbox_weight = trial.suggest_float("bbox_weight", 0.1, 1)
         # eos_val = trial.suggest_float("eos_val", 0.1, 0.5)
-        ce_weight = 1
-        bbox_weight = 5
-        eos_val = 0.5
+        ce_weight = 0.2
+        bbox_weight = 1
+        eos_val = 1
         weight_dict = {'loss_ce': ce_weight, 'loss_bbox': bbox_weight, 'loss_giou': 1}
         eos = eos_val
         losses = ['labels', 'boxes', 'cardinality']
-        matcher = HungarianMatcher(cost_class=1, cost_bbox=5, cost_giou=2)
+        matcher = HungarianMatcher()
         spots_loss = SetCriterion(1, matcher, weight_dict, eos, losses=losses, device=DEVICE)
         att_loss = nn.L1Loss()
         optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-        eta = 0.5
+        eta = 1e-3
 
         
         model.to(DEVICE)
@@ -235,7 +237,8 @@ def objective(trial):
                 loss.backward()
                 optimizer.step()
                 t_loss += loss.item()
-                pbar.set_description(f"train loss: {spot_loss_val.item(), att_loss_val.item()}")          
+                pbar.set_description(f"train_loss:  {loss.item():.2f}, "\
+             f"spot_loss: {eta*spot_loss_val:.2f}, att_loss: {(1-eta)*att_loss_val:.2f}")          
             train_loss.append(t_loss / max_iter)
 
             model.eval()
@@ -264,7 +267,8 @@ def objective(trial):
                     weight_dict = spots_loss.weight_dict
                     spot_loss_val = sum(spots_loss_dict[k] * weight_dict[k] for k in spots_loss_dict.keys() if k in weight_dict)
                     v_loss += eta*spot_loss_val + (1-eta)*att_loss_val
-                    pbar.set_description(f"val loss: {spot_loss_val.item(), att_loss_val.item()}")
+                    pbar.set_description(f"val_loss:  {loss.item():.2f}, "\
+             f"spot_loss: {eta*spot_loss_val:.2f}, att_loss: {(1-eta)*att_loss_val:.2f}")
             v_loss /= val_iter
             val_loss.append(v_loss)
             trial.report(v_loss, epoch)
@@ -276,7 +280,7 @@ def objective(trial):
 
 if __name__ == "__main__":
 
-    study = optuna.create_study(study_name='spotnet', storage='sqlite:////data/optuna/spotnet.db', load_if_exists=True)
+    study = optuna.create_study(study_name='spotnet', storage='sqlite:////data/optuna/spotnet_detr_decoder.db', load_if_exists=True)
     study.optimize(lambda trial: objective(trial), n_trials=100)
     print('Device: ', DEVICE)
     print("Best trial:")

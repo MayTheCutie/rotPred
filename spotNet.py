@@ -71,7 +71,7 @@ test_folder = "/data/butter/test_cos"
 
 yaml_dir = '/data/lightPred/Astroconf/'
 
-Nlc = 50000
+Nlc = 5000
 
 test_Nlc = 5000
 
@@ -86,9 +86,9 @@ train_list, val_list = train_test_split(idx_list, test_size=0.1, random_state=12
 
 test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
-b_size = 4
+b_size = 32
 
-num_epochs = 1000
+num_epochs = 10
 
 cad = 30
 
@@ -134,9 +134,13 @@ if __name__ == '__main__':
     # 'num_att_layers':2,
     # 'n_heads': 4,}
 
-    weight_dict = {'loss_ce': 0.822321274651144,
-     'loss_bbox': 0.10110399527930165, 'loss_giou': 1}
-    eos = 1644644781327425
+    # weight_dict = {'loss_ce': 0.822321274651144,
+    #  'loss_bbox': 0.10110399527930165, 'loss_giou': 1}
+    # eos = 1644644781327425
+    # losses = ['labels', 'boxes', 'cardinality']
+    weight_dict = {'loss_ce': 0.2,
+     'loss_bbox': 1, 'loss_giou': 1}
+    eos = 1
     losses = ['labels', 'boxes', 'cardinality']
 
     num_queries = 300
@@ -238,7 +242,7 @@ if __name__ == '__main__':
                         criterion=loss_fn, num_classes=len(class_labels),
                        scheduler=None, train_dataloader=train_dataloader, optim_params=optim_params,
                        val_dataloader=val_dataloader, device=local_rank,
-                           exp_num=exp_num, log_path=log_path,
+                           exp_num=exp_num, log_path=log_path, eta=1e-3,
                         exp_name="spotNet")
     fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
                            early_stopping=40, only_p=False, best='loss', conf=True) 

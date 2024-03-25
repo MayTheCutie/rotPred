@@ -83,42 +83,45 @@ class TimeSeriesDetrEncoder(nn.Module):
         return memory
 
 class TimeSeriesDetrDecoder(nn.Module):
-    def __init__(self, hidden_dim: int, num_layers:int, num_classes: int,
-     num_angles: int, num_heads: int, dropout: float, mlp_layers: int = 2):
+    def __init__(self, hidden_dim: int, num_layers:int, 
+      num_heads: int, dropout: float,):
         super(TimeSeriesDetrDecoder, self).__init__()
         self.hidden_dim = hidden_dim
-        self.num_classes = num_classes
-        self.num_angles = num_angles
-        self.class_output = nn.Linear(hidden_dim, num_classes) # spot classification
-        self.bbox_output = MLP(hidden_dim,hidden_dim, num_angles, mlp_layers) # spot angles regression
-        self.attribute_output = MLP(hidden_dim, hidden_dim//4, 1, mlp_layers) # global attributes (inclination)
         decoder_layer = nn.TransformerDecoderLayer(hidden_dim, num_heads, hidden_dim * 4, dropout)
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
 
     def forward(self, memory: Tensor, tgt: Tensor) -> Tuple[Dict[str, Tensor], Tensor]:
         t, bs, h = tgt.shape
         hs = self.transformer_decoder(tgt, memory)  # (1, N, C)
+        return hs
+    
+class TimeSeriesDetrModel(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, num_layers: int, num_heads: int,
+     dropout: float, num_classes: int, num_angles: int, num_queries: int, mlp_layers: int = 2, num_atts: int = 2):
+        super(TimeSeriesDetrModel, self).__init__()
+        self.encoder = TimeSeriesDetrEncoder(input_dim, hidden_dim, num_layers, num_heads, dropout)
+        self.decoder = TimeSeriesDetrDecoder(hidden_dim, num_layers, num_heads, dropout)
+        self.num_classes = num_classes
+        self.num_angles = num_angles
+        self.object_queries = nn.Embedding(num_queries, hidden_dim)
+        self.class_output = nn.Linear(hidden_dim, num_classes) # spot classification
+        self.bbox_output = MLP(hidden_dim,hidden_dim, num_angles, mlp_layers) # spot angles regression
+        self.attribute_output = MLP(hidden_dim, hidden_dim//4, num_atts, mlp_layers) # global attributes (inclination)
+
+    def forward(self, x: Tensor) -> List[Tensor]:
+        if x.dim() == 3 and x.size(1) == 1:
+            x = x.transpose(2, 1)
+        bs, t, c = x.shape
+        memory = self.encoder(x)
+        query_embed = self.object_queries.weight.unsqueeze(1).repeat(1, bs, 1)
+        tgt = torch.zeros_like(query_embed)
+        hs = self.decoder(memory, tgt)
         decoder_output = hs.transpose(0, 1)
         class_logits = self.class_output(decoder_output) 
         bbox_logits = self.bbox_output(decoder_output).sigmoid()
         att_logits = self.attribute_output(decoder_output.sum(dim=1))
         out_dict = {'pred_boxes': bbox_logits, 'pred_logits': class_logits}
         return out_dict, att_logits
-
-class TimeSeriesDetrModel(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, num_layers: int, num_heads: int,
-     dropout: float, num_classes: int, num_angles: int, num_queries: int):
-        super(TimeSeriesDetrModel, self).__init__()
-        self.encoder = TimeSeriesDetrEncoder(input_dim, hidden_dim, num_layers, num_heads, dropout)
-        self.decoder = TimeSeriesDetrDecoder(hidden_dim, num_layers, num_classes, num_angles, num_heads, dropout)
-        self.object_queries = nn.Embedding(num_queries, hidden_dim)
-
-    def forward(self, x: Tensor) -> List[Tensor]:
-        bs, t, c = x.shape
-        memory = self.encoder(x)
-        query_embed = self.object_queries.weight.unsqueeze(1).repeat(1, bs, 1)
-        tgt = torch.zeros_like(query_embed)
-        return self.decoder(memory, tgt)
     
 
 

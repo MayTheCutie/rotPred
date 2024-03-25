@@ -125,9 +125,14 @@ if __name__ == '__main__':
         'num_queries': 600,
     }
     
-    weight_dict = {'loss_ce': 0.822321274651144,
-     'loss_bbox': 0.10110399527930165, 'loss_giou': 1}
-    eos = 1644644781327425
+    # weight_dict = {'loss_ce': 0.822321274651144,
+    #  'loss_bbox': 0.10110399527930165, 'loss_giou': 1}
+    # eos = 1644644781327425
+    # losses = ['labels', 'boxes', 'cardinality']
+
+    weight_dict = {'loss_ce': 0.2,
+     'loss_bbox': 1, 'loss_giou': 1}
+    eos = 1
     losses = ['labels', 'boxes', 'cardinality']
        
 
@@ -164,6 +169,11 @@ if __name__ == '__main__':
                                         spots=True, init_frac=0, freq_rate=1,  period_norm=True)
     test_dataset = TimeSeriesDataset(test_folder, test_idx_list, transforms=test_transform, prepare=False, acf=False,
                                         spots=True, init_frac=0, freq_rate=1,  period_norm=True)
+
+    for i in range(10):
+        x,y,_,_ = train_dataset[i]
+        print("x shape: ", x.shape, "y shape: ", y.shape)
+
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
     train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler, \
                                                num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True)
@@ -201,7 +211,7 @@ if __name__ == '__main__':
                         criterion=att_loss, num_classes=len(class_labels),
                        scheduler=None, train_dataloader=train_dataloader, optim_params=optim_params,
                        val_dataloader=val_dataloader, device=local_rank,
-                           exp_num=exp_num, log_path=log_path,
+                           exp_num=exp_num, log_path=log_path, eta=1e-3,
                         exp_name="timeDetr") 
     fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
                            early_stopping=40, only_p=False, best='loss', conf=True) 

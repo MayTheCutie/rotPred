@@ -86,15 +86,16 @@ def setup(rank, world_size):
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def get_spot_dict(spot_arr):
-    spot_arr = spot_arr*180/np.pi
-    bs, _,_ = spot_arr.shape
-    idx = [spot_arr[b,:, 0] != 0 for b in range(bs)]
-    res = []
-    for i in range(bs):
-        spot_dict = {'boxes': cxcy_to_cxcywh(spot_arr[i, idx[i], :], 1, 1),
-                     'labels': torch.ones(len(spot_arr[i, idx[i], :]), device=spot_arr.device).long()}
-        res.append(spot_dict)
-    return res
+        spot_arr = spot_arr*180/np.pi
+        bs, _,_ = spot_arr.shape
+        idx = [spot_arr[b,0,:] != 0 for b in range(bs)]
+        res = []
+        for i in range(bs):
+            spot_dict = {'boxes': cxcy_to_cxcywh(spot_arr[i, :, idx[i]], 1, 1).transpose(0,1).to(spot_arr.device),
+                        'labels': torch.ones((spot_arr[i, :, idx[i]].shape[-1]), device=spot_arr.device).long()}
+            res.append(spot_dict)
+        return res
+
 
 def objective(trial):
         hidden_dim = trial.suggest_int("hidden_dim", 64, 256, 64)
@@ -120,16 +121,17 @@ def objective(trial):
         lr = trial.suggest_float("lr", 1e-5,1e-3)
         weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-1)
 
-        ce_weight = trial.suggest_float("ce_weight", 0.1, 1)
-        bbox_weight = trial.suggest_float("bbox_weight", 0.1, 1)
-        eos_val = trial.suggest_float("eos_val", 0.1, 0.5)
-        weight_dict = {'loss_ce': ce_weight, 'loss_bbox': bbox_weight, 'loss_giou': 1}
-        eos = eos_val
+        # ce_weight = trial.suggest_float("ce_weight", 0.1, 1)
+        # bbox_weight = trial.suggest_float("bbox_weight", 0.1, 1)
+        # eos_val = trial.suggest_float("eos_val", 0.1, 0.5)
+        weight_dict = {'loss_ce': 0.2, 'loss_bbox': 1, 'loss_giou': 1}
+        eos = 1
         losses = ['labels', 'boxes', 'cardinality']
         matcher = HungarianMatcher(cost_class=1, cost_bbox=5, cost_giou=2)
         spots_loss = SetCriterion(1, matcher, weight_dict, eos, losses=losses, device=DEVICE)
         att_loss = nn.L1Loss()
         optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        eta = 1e-3
 
         
         model.to(DEVICE)
@@ -146,19 +148,26 @@ def objective(trial):
                     break
                 x = x.to(DEVICE)
                 y = y.to(DEVICE)
-                x, spots_arr = x[:,:, 0], x[:,:, 1:3]
+                if y.dim() == 1:
+                    y = y.unsqueeze(-1)
+                x, spots_arr = x[:, :-2, :], x[:, -2:, :]
                 tgt_spots = get_spot_dict(spots_arr)
-                out_spots, out_att = model(x.unsqueeze(-1))
+                if x.shape[1] == 2:
+                    x1, x2 = x[:, 0, :], x[:, 1, :]
+                    out_spots, y_pred = model(x1, x2)
+                else:
+                    out_spots, y_pred = model(x)
+                tgt_spots = get_spot_dict(spots_arr)
                 spots_loss_dict = spots_loss(out_spots, tgt_spots)
                 weight_dict = spots_loss.weight_dict
                 spot_loss_val = sum(spots_loss_dict[k] * weight_dict[k] for k in spots_loss_dict.keys() if k in weight_dict)
-                # print(out_att.shape, y[:,0].shape)
-                att_loss_val = att_loss(out_att.squeeze(), y[:, 0])
-                loss = spot_loss_val + att_loss_val
+                att_loss_val = att_loss(y_pred, y)
+                loss = eta*spot_loss_val + (1-eta)*att_loss_val
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                pbar.set_description(f"train loss: {loss.item()}")
+                pbar.set_description(f"train_loss:  {loss.item():.2f}, "\
+             f"spot_loss: {eta*spot_loss_val:.2f}, att_loss: {(1-eta)*att_loss_val:.2f}")
                 t_loss += loss.item()          
             train_loss.append(t_loss / max_iter)
             
@@ -169,14 +178,23 @@ def objective(trial):
                         break
                     x = x.to(DEVICE)
                     y = y.to(DEVICE)
-                    x, spots_arr = x[:,:, 0], x[:,:, 1:3]
+                    if y.dim() == 1:
+                        y = y.unsqueeze(-1)
+                    x, spots_arr = x[:, :-2, :], x[:, -2:, :]
                     tgt_spots = get_spot_dict(spots_arr)
-                    out_spots, out_att = model(x.unsqueeze(-1))
+                    if x.shape[1] == 2:
+                        x1, x2 = x[:, 0, :], x[:, 1, :]
+                        out_spots, y_pred = model(x1, x2)
+                    else:
+                        out_spots, y_pred = model(x)
+                    tgt_spots = get_spot_dict(spots_arr)
                     spots_loss_dict = spots_loss(out_spots, tgt_spots)
                     weight_dict = spots_loss.weight_dict
                     spot_loss_val = sum(spots_loss_dict[k] * weight_dict[k] for k in spots_loss_dict.keys() if k in weight_dict)
-                    att_loss_val = att_loss(out_att.squeeze(), y[:, 0])
-                    v_loss += spot_loss_val + att_loss_val
+                    att_loss_val = att_loss(y_pred, y)
+                    v_loss += eta*spot_loss_val + (1-eta)*att_loss_val
+                    pbar.set_description(f"val_loss:  {loss.item():.2f}, "\
+             f"spot_loss: {eta*spot_loss_val:.2f}, att_loss: {(1-eta)*att_loss_val:.2f}")
                 v_loss /= val_iter
                 val_loss.append(v_loss)
                 trial.report(v_loss, epoch)
@@ -188,7 +206,7 @@ def objective(trial):
 
 if __name__ == "__main__":
 
-    study = optuna.create_study(study_name='timeDetr', storage='sqlite:////data/optuna/timeDetr2.db', load_if_exists=True)
+    study = optuna.create_study(study_name='timeDetr', storage='sqlite:////data/optuna/timeDetr_new.db', load_if_exists=True)
     study.optimize(lambda trial: objective(trial), n_trials=100)
     print('Device: ', DEVICE)
     print("Best trial:")

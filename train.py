@@ -731,6 +731,7 @@ class SpotsTrainer(Trainer):
         for i, (x,y, _,_) in enumerate(pbar):
             tic = time.time()
             x, spots_arr = x[:, :-2, :], x[:, -2:, :]
+            print("min spots lat: ", spots_arr[:, 0,:].min(), "max spots lat: ", spots_arr[:,0,:].max())
             x = x.to(device)
             y = y.to(device)
             spots_arr = spots_arr.to(device)
@@ -740,7 +741,7 @@ class SpotsTrainer(Trainer):
                 x1, x2 = x[:, 0, :], x[:, 1, :]
                 out_spots, y_pred = self.model(x1, x2)
             else:
-                out_spots, y_pred = self.model(x.unsqueeze(-1))
+                out_spots, y_pred = self.model(x)
             t1 = time.time()
             src_shapes = (out_spots['pred_boxes'].shape, out_spots['pred_logits'].shape)
             if conf:
@@ -755,7 +756,7 @@ class SpotsTrainer(Trainer):
             spot_loss_val = sum(spots_loss_dict[k] * weight_dict[k] for k in spots_loss_dict.keys() if k in weight_dict)
             loss = att_loss_val
             t3 = time.time()
-            # loss = self.eta*spot_loss_val + (1-self.eta)*att_loss_val
+            loss = self.eta*spot_loss_val + (1-self.eta)*att_loss_val
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
@@ -766,7 +767,8 @@ class SpotsTrainer(Trainer):
             # train_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
             att_acc = (diff < (y/10)).sum(0)
             all_accs = all_accs + (att_acc + spots_acc)/2
-            # pbar.set_description(f"train_acc: {att_acc, spots_acc}, train_loss:  {loss.item()}")
+            pbar.set_description(f"train_acc: {att_acc, spots_acc}, train_loss:  {loss.item():.2f}, "\
+             f"spot_loss: {self.eta*spot_loss_val:.2f}, att_loss: {(1-self.eta)*att_loss_val:.2f}")
             if i > self.max_iter:
                 break
             toc = time.time()
@@ -793,20 +795,22 @@ class SpotsTrainer(Trainer):
                     x1, x2 = x[:, 0, :], x[:, 1, :]
                     out_spots, y_pred = self.model(x1, x2)
                 else:
-                    out_spots, y_pred = self.model(x.unsqueeze(-1))
+                    out_spots, y_pred = self.model(x)
                 if conf:
                     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
                     conf_y = torch.abs(y - y_pred)
                 att_loss_val = self.criterion(y_pred, y)
                 if conf:
                     att_loss_val += self.criterion(conf_pred, conf_y)
-
+                shapes_tgt = [(tgt_spots[i]['boxes'].shape, tgt_spots[i]['labels'].shape) for i in range(len(tgt_spots))]
+                shapes_src = (out_spots['pred_boxes'].shape, out_spots['pred_logits'].shape)
+                print(f"tgt shapes: {shapes_tgt}, src shapes: {shapes_src}")
                 spots_loss_dict = self.spots_loss(out_spots, tgt_spots)
                 weight_dict = self.spots_loss.weight_dict
                 spot_loss_val = sum(spots_loss_dict[k] * weight_dict[k] for k in spots_loss_dict.keys() if k in weight_dict)
                 loss = att_loss_val
 
-                # loss = self.eta*spot_loss_val + (1-self.eta)*att_loss_val
+                loss = self.eta*spot_loss_val + (1-self.eta)*att_loss_val
                 val_loss.append(loss.item())
                 spots_acc = (100 - spots_loss_dict['class_error'])
                 diff = torch.abs(y_pred - y)

@@ -569,6 +569,7 @@ class TimeSeriesDataset(Dataset):
         spots_data[:, 0] -= init_day
         if not self.p_norm:
           spots_data = self.crop_spots(spots_data, info)
+        spots_data = spots_data[spots_data[:,1] >= np.pi/2] # taking only one hemisphere
         spots_arr = np.zeros((2, x.shape[-1]))
         spot_t = (spots_data[:, 0] / self.freq_rate).astype(np.int64)
         spots_arr[:, spot_t] = spots_data[:,1:3].T
@@ -731,7 +732,7 @@ class TimeSeriesDataset(Dataset):
         t7 = time.time()
         if self.spots:
           if len(x.shape) == 1:
-            x = x.unsqueeze(-1)
+            x = x.unsqueeze(0)
           spots_arr = self.create_spots_arr(idx, info, x)
           x = torch.cat((x, torch.tensor(spots_arr).float()), dim=0)
         self.step += 1

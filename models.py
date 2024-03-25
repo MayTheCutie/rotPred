@@ -509,12 +509,11 @@ class SpotNet(LSTM_ATTN):
         x_f, h_f, c_f = self.feature_extractor(x_acf, return_cell=True) # [B, L//stride, 2*hidden_size], [B, 2*nlayers, hidden_szie], [B, 2*nlayers, hidden_Size]
         c_f = torch.cat([c_f[-1], c_f[-2]], dim=1) # [B, 2*hidden_szie]
         t_features = self.attention(c_f, x_f, x_f) # [B, 2*hidden_size]
-        d_features, memory = self.encoder(x) # [B, encoder_dims]
+        d_features, memory = self.encoder(x) # [B, encoder_dims], [B, L//stride, encoder_dims]
         features = torch.cat([t_features, d_features], dim=1) # [B, 2*hidden_size + encoder_dims]
-        query_embed = self.object_queries.weight.unsqueeze(0).repeat(bs, 1, 1)
+        query_embed = self.object_queries.weight.unsqueeze(0).repeat(bs,1, 1)
         tgt = torch.zeros_like(query_embed)
-        decoder_output = self.decoder(tgt, memory) 
-        # print("decoder_output: ", decoder_output.shape)
+        decoder_output = self.decoder(memory, tgt)
         predictions = self.pred_layer(features)
         class_logits = self.spot_class_layer(decoder_output)
         bbox_logits = self.spot_box_layer(decoder_output).sigmoid()
