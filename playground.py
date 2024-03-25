@@ -140,7 +140,7 @@ def show_samples(num_samples):
 
 
 def cxcy_to_cxcywh(arr, w, h):
-    x, y = arr[:, 0], arr[:, 1]
+    x, y = arr[0], arr[1]
     x1 = x - w / 2
     y1 = y - h / 2
     x2 = x + w / 2
@@ -198,19 +198,38 @@ def test_timeDetr():
         # if i == 3:
         #     break
 
+def get_spot_dict(spot_arr):
+    bs, _,_ = spot_arr.shape
+    idx = [spot_arr[b,0,:] != 0 for b in range(bs)]
+    res = []
+    for i in range(bs):
+        spot_dict = {'boxes': cxcy_to_cxcywh(spot_arr[i, :, idx[i]], 1/360, 1/360).to(spot_arr.device),
+                    'labels': torch.ones((spot_arr[i, :, idx[i]].shape[-1]), device=spot_arr.device).long()}
+        res.append(spot_dict)
+    return res
+
+def get_spots_from_dict(spot_dict):
+    res = []
+    for i in range(len(spot_dict)):
+        spots_box = spot_dict[i]['boxes']
+        res.append(spots_box[:, :2].cpu().numpy())
+    return np.array(res)
 def test_spots_dataset():
-    dur = 720
-    data_folder = "/data/butter/data2"
+    dur = 360
+    data_folder = "../butter/data_cos"
     transform = Compose([RandomCrop(width=int(dur/cad*DAY2MIN))])
-    train_dataset = TimeSeriesDataset(data_folder, idx_list, transforms=transform, prepare=False, acf=False,
-                                      spots=True, init_frac=0.2)
+    train_dataset = TimeSeriesDataset(data_folder, idx_list, transforms=transform, prepare=False, acf=True,
+                                      spots=True, return_raw=True, init_frac=0.2)
     for i in range(10):
         print(i)
         x, y, _, _ = train_dataset[i]
+        x, spots_arr = x[:-2, :], x[-2:, :]
+        spots_dict = get_spot_dict(spots_arr[None, :, :])
+        spots_arr = get_spots_from_dict(spots_dict).squeeze()
         fig, ax = plt.subplots(1,2)
-        ax[0].plot(x[:, 0])
-        ax[1].scatter(x[: ,2], x[:, 1])
-        plt.savefig(f'/data/tests/spots_{i}.png')
+        ax[0].plot(x[0, :])
+        ax[1].scatter(spots_arr[:, 1], spots_arr[:, 0])
+        plt.savefig(f'../tests/spots_{i}.png')
         print(x.shape, y)
         spots_arr = x[:, 1:]
         spot_idx = torch.where(spots_arr[:,0] != 0)
@@ -1539,9 +1558,9 @@ if __name__ == "__main__":
     # test_denoiser()
     # create_noise_dataset()
     # read_spots_and_lightcurve('00010', '/data/butter/data2')
-    # test_spots_dataset()
+    test_spots_dataset()
     # show_samples(48000)
-    create_period_normalized_samples('/data/butter/data_cos', 50000, num_ps=20)
+    # create_period_normalized_samples('/data/butter/data_cos', 50000, num_ps=20)
     # test_timeDetr()
 
 

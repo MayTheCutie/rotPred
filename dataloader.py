@@ -570,9 +570,14 @@ class TimeSeriesDataset(Dataset):
         if not self.p_norm:
           spots_data = self.crop_spots(spots_data, info)
         spots_data = spots_data[spots_data[:,1] >= np.pi/2] # taking only one hemisphere
+        # normalize to [0,1]
+        spots_data[:, 1] -= np.pi/2
+        spots_data[:, 1] /= np.pi/2
+        spots_data[:, 2] /= 2*np.pi
         spots_arr = np.zeros((2, x.shape[-1]))
         spot_t = (spots_data[:, 0] / self.freq_rate).astype(np.int64)
         spots_arr[:, spot_t] = spots_data[:,1:3].T
+        print("spots min lat: ", spots_data[:,1].min(), "spots min long: ", spots_data[:,2].min())
         return spots_arr
 
   def interpolate(self, x):

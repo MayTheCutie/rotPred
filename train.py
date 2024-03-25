@@ -709,13 +709,12 @@ class SpotsTrainer(Trainer):
         self.eta = eta
     
     def get_spot_dict(self, spot_arr):
-        spot_arr = spot_arr*180/np.pi
-        bs, _,_ = spot_arr.shape
-        idx = [spot_arr[b,0,:] != 0 for b in range(bs)]
+        bs, _, _ = spot_arr.shape
+        idx = [spot_arr[b, 0, :] != 0 for b in range(bs)]
         res = []
         for i in range(bs):
-            spot_dict = {'boxes': cxcy_to_cxcywh(spot_arr[i, :, idx[i]], 1, 1).transpose(0,1).to(spot_arr.device),
-                        'labels': torch.ones((spot_arr[i, :, idx[i]].shape[-1]), device=spot_arr.device).long()}
+            spot_dict = {'boxes': cxcy_to_cxcywh(spot_arr[i, :, idx[i]], 1 / 360, 1 / 360).to(spot_arr.device),
+                         'labels': torch.ones((spot_arr[i, :, idx[i]].shape[-1]), device=spot_arr.device).long()}
             res.append(spot_dict)
         return res
 
