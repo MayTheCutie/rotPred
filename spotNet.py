@@ -242,7 +242,7 @@ if __name__ == '__main__':
                         criterion=loss_fn, num_classes=len(class_labels),
                        scheduler=None, train_dataloader=train_dataloader, optim_params=optim_params,
                        val_dataloader=val_dataloader, device=local_rank,
-                           exp_num=exp_num, log_path=log_path, eta=1e-3,
+                           exp_num=exp_num, log_path=log_path, eta=1,
                         exp_name="spotNet")
     fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
                            early_stopping=40, only_p=False, best='loss', conf=True) 

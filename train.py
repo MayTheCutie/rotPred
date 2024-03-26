@@ -713,7 +713,7 @@ class SpotsTrainer(Trainer):
         idx = [spot_arr[b, 0, :] != 0 for b in range(bs)]
         res = []
         for i in range(bs):
-            spot_dict = {'boxes': cxcy_to_cxcywh(spot_arr[i, :, idx[i]], 1 / 360, 1 / 360).to(spot_arr.device),
+            spot_dict = {'boxes': cxcy_to_cxcywh(spot_arr[i, :, idx[i]], 1 / 360, 1 / 360).transpose(0,1).to(spot_arr.device),
                          'labels': torch.ones((spot_arr[i, :, idx[i]].shape[-1]), device=spot_arr.device).long()}
             res.append(spot_dict)
         return res
@@ -730,7 +730,6 @@ class SpotsTrainer(Trainer):
         for i, (x,y, _,_) in enumerate(pbar):
             tic = time.time()
             x, spots_arr = x[:, :-2, :], x[:, -2:, :]
-            print("min spots lat: ", spots_arr[:, 0,:].min(), "max spots lat: ", spots_arr[:,0,:].max())
             x = x.to(device)
             y = y.to(device)
             spots_arr = spots_arr.to(device)
@@ -771,7 +770,7 @@ class SpotsTrainer(Trainer):
             if i > self.max_iter:
                 break
             toc = time.time()
-            print(f"train time: {toc-tic}, forward time: {t1-tic}, loss time: {t2-t1}, spot loss time: {t3-t2}, step time: {toc-t3}")
+            # print(f"train time: {toc-tic}, forward time: {t1-tic}, loss time: {t2-t1}, spot loss time: {t3-t2}, step time: {toc-t3}")
         return train_loss, all_accs/len(self.train_dl.dataset)
 
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):

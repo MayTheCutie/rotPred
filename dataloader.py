@@ -577,7 +577,6 @@ class TimeSeriesDataset(Dataset):
         spots_arr = np.zeros((2, x.shape[-1]))
         spot_t = (spots_data[:, 0] / self.freq_rate).astype(np.int64)
         spots_arr[:, spot_t] = spots_data[:,1:3].T
-        print("spots min lat: ", spots_data[:,1].min(), "spots min long: ", spots_data[:,2].min())
         return spots_arr
 
   def interpolate(self, x):

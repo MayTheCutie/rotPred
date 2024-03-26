@@ -517,7 +517,7 @@ class SpotNet(LSTM_ATTN):
         predictions = self.pred_layer(features)
         class_logits = self.spot_class_layer(decoder_output)
         bbox_logits = self.spot_box_layer(decoder_output).sigmoid()
-        # print("class_logits: ", class_logits.shape, "bbox_logits: ", bbox_logits.shape)
+        print("class_logits: ", class_logits.shape, "bbox_logits: ", bbox_logits.shape)
         out_dict = {'pred_boxes': bbox_logits, 'pred_logits': class_logits}
         return out_dict, predictions
 
