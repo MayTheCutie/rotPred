@@ -185,33 +185,39 @@ class TimeSsl(Dataset):
         # print(row['KID'])
         try:
           q_sequence_idx = row['longest_consecutive_qs_indices']
-          q_sequence_idx = q_sequence_idx.strip('()').split(',')
-          q_sequence_idx = [int(i) for i in q_sequence_idx]
-          for i in range(q_sequence_idx[0], q_sequence_idx[1]):
-            # print(type(row['data_file_path']))
-            x,time,meta = read_fits(row['data_file_path'][i])
+          if isinstance(q_sequence_idx, str):
+              q_sequence_idx = q_sequence_idx.strip('()').split(',')
+              q_sequence_idx = [int(i) for i in q_sequence_idx]
+          if q_sequence_idx[1] > q_sequence_idx[0]:
+              for i in range(q_sequence_idx[0], q_sequence_idx[1]):
+                # print(row['data_file_path'])
+                x,time,meta = read_fits(row['data_file_path'][i])
 
-            x /= x.max()
-            x = fill_nan_np(np.array(x), interpolate=True)
-            if i == q_sequence_idx[0]:
-              x_tot = x.copy()
-            else:
-              border_val = np.mean(x) - np.mean(x_tot)
-              x -= border_val
-              x_tot = np.concatenate((x_tot, np.array(x)))
-          effective_qs = row['qs'][q_sequence_idx[0]: q_sequence_idx[1]]
-          # effective_qs = effective_qs.strip('[]').split(',')
-          # effective_qs = [int(i) for i in effective_qs]
-          # print("effective_qs: ",(effective_qs))
-          # meta['qs'] = effective_qs
-          x = torch.tensor(x_tot)
-          self.cur_len = len(x)
+                x /= x.max()
+                x = fill_nan_np(np.array(x), interpolate=True)
+                if i == q_sequence_idx[0]:
+                  x_tot = x.copy()
+                else:
+                  border_val = np.mean(x) - np.mean(x_tot)
+                  x -= border_val
+                  x_tot = np.concatenate((x_tot, np.array(x)))
+              effective_qs = row['qs'][q_sequence_idx[0]: q_sequence_idx[1]]
+              # effective_qs = effective_qs.strip('[]').split(',')
+              # effective_qs = [int(i) for i in effective_qs]
+              # print("effective_qs: ",(effective_qs))
+              # meta['qs'] = effective_qs
+              # x = torch.tensor(x_tot)
+              self.cur_len = len(x)
+          else:
+              print("no qs sequence found")
+              effective_qs = []
+              x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
           # meta['qs'] = row['qs']
         except (TypeError,OSError, FileNotFoundError)  as e:
             print("Error: ", e)
             effective_qs = []
-            x, meta = torch.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
-        return x, meta, effective_qs
+            x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
+        return x_tot, meta, effective_qs
     
     def __getitem__(self, idx):
         # if idx % 1000 == 0:
@@ -223,6 +229,8 @@ class TimeSsl(Dataset):
           x /= x.max()
         if self.transforms is not None:
           x, _, info = self.transforms(x, mask=None, info=dict())
+          if self.seq_len > x.shape[-1]:
+            x = np.pad(x, (0, self.seq_len - x.shape[-1]), "constant", constant_values=0)
         x = fill_nan_np(x, interpolate=True)
         if self.acf:
           xcf = A(x, nlags=len(x))
@@ -256,34 +264,54 @@ class TimeSsl(Dataset):
 
 
 class KeplerDataset(TimeSsl):
-  def __init__(self, root_dir, path_list, df=None, mask_prob=0, mask_val=-1, np=False,  **kwargs):
+  def __init__(self, root_dir, path_list, df=None, mask_prob=0, mask_val=-1, np=False,
+               keep_ratio=0.8, random_ratio=0.2, uniform_bound=2, target_transforms=None, **kwargs):
     super().__init__(root_dir, path_list, df=df, **kwargs)
     # self.df = df
     # self.length = len(self.df) if self.df is not None else len(self.paths_list)
     self.mask_prob = mask_prob
     self.mask_val = mask_val
     self.np = np
+    self.keep_ratio = keep_ratio
+    self.random_ratio = random_ratio
+    self.uniform_bound = uniform_bound
+    self.target_transforms = target_transforms
 
   def mask_array(self, array, mask_percentage=0.15, mask_value=-1):
       # if len(array.shape) == 1:
       #   array = array.unsqueeze(0)
-      len_s = array.shape[0]  
-      inverse_token_mask = torch.ones(len_s, dtype=torch.bool)  
+      len_s = array.shape[-1]
+      inverse_token_mask = torch.ones_like(array, dtype=torch.bool)
 
       mask_amount = round(len_s * mask_percentage)
       for _ in range(mask_amount):  
           i = random.randint(0, len_s - 1)  
 
           if random.random() < 0.95:  
-              array[i] = mask_value  
+              array[:, i] = mask_value
           else:
-              array[i] = random.uniform(array.min(),array.max())  
-          inverse_token_mask[i] = False  
+              array[:, i] = random.uniform(array.min(),array.max())
+          inverse_token_mask[:, i] = False
       return array, inverse_token_mask
   
   def read_np(self, idx):
     x = np.load(os.path.join(self.root_dir, self.path_list[idx]))
     return torch.tensor(x), dict()
+
+  def apply_mask(self, x, mask):
+      if mask is None:
+          out = x
+          out[torch.isnan(out)] = 0.
+          return out, torch.zeros_like(x)
+      r = torch.rand_like(x)
+      keep_mask = (~mask | (r <= self.keep_ratio)).to(x.dtype)
+      random_mask = (mask & (self.keep_ratio < r)
+                     & (r <= self.keep_ratio + self.random_ratio)).to(x.dtype)
+      # token_mask = (mask & ((1 - self.token_ratio) < r)).to(x.dtype)
+      xm, xM = -self.uniform_bound, self.uniform_bound
+      out = x * keep_mask + (torch.rand_like(x) * (xM - xm) + xm) * random_mask
+      out[torch.isnan(out)] = 0.
+      return out
 
   def __getitem__(self, idx):
     if self.df is not None:
@@ -292,41 +320,43 @@ class KeplerDataset(TimeSsl):
       x, meta = self.read_np(idx)
       qs = [] # to be implemented
     else:
-      x, meta =  self.read_data(idx).float()
-      x /= x.max()
+      x, meta = self.read_data(idx).float()
+      # x /= x.max()
       qs = [] # to be implemented
     info = dict()
     info['qs'] = qs
-    x /= x.max()
+    # x /= x.max()
+    target = x.copy()
+    if np.all(x == 0):
+        x = torch.zeros((1,len(x)))
+        return x,x,x.bool(), info
+    # print("number of differnt values (in dataset): ", len(np.where((x - target)!=0)[0]))
     if self.transforms is not None:
-          x, _, info = self.transforms(x, mask=None, info=info)
-          x = x.squeeze()
-          if self.seq_len > x.shape[-1]:
-            x = np.pad(x, (0, self.seq_len - x.shape[-1]), "constant", constant_values=0)
-    x = x[:self.seq_len]
-    if self.acf:
-      xcf = torch.tensor(A(x, nlags=len(x)))
-      if self.return_raw:
-        x = torch.stack([torch.tensor(xcf), torch.tensor(x)])
-      else:
-        x = torch.tensor(xcf).unsqueeze(0)
-    else:
-       x = x.unsqueeze(0)
-    if self.norm == 'std':
-      x = (x - x.mean())/(x.std()+1e-8)
-    elif self.norm == 'median':
-      x /= x.median()
-    elif self.norm == 'minmax':
-      mini = x.min(dim=-1).values.view(-1,1).float()
-      maxi = x.max(dim=-1).values.view(-1,1).float()
-      x = (x-mini)/(maxi - mini)
-    if self.mask_prob > 0:
-      masked_x, inv_mask = self.mask_array(x.clone(), mask_percentage=self.mask_prob, mask_value=self.mask_val)
-    else:
-      masked_x = x.clone()
-      inv_mask = torch.ones_like(x).bool()
-    torch.nan_to_num(masked_x, torch.nanmean(masked_x))
-    torch.nan_to_num(x, torch.nanmean(x))
+          x, mask, info = self.transforms(x, mask=None, info=info)
+          if self.seq_len > x.shape[0]:
+            # print("padding")
+            x = np.pad(x, ((0, self.seq_len - x.shape[-1]), (0,0)), "constant", constant_values=0)
+            mask = np.pad(mask, ((0, self.seq_len - mask.shape[-1]), (0,0)), "constant", constant_values=0)
+    if self.target_transforms is not None:
+            target, _, _ = self.target_transforms(target, mask=None, info=info)
+            if self.seq_len > target.shape[0]:
+                target = np.pad(target, ((0, self.seq_len - target.shape[-1]), (0,0)), "constant", constant_values=0)
+    x = torch.tensor(x.T[:, :self.seq_len])
+    target = torch.tensor(target.T[:, :self.seq_len])
+    mask = torch.tensor(mask.T[:, :self.seq_len])
+    out = x.clone()
+    # print("number of differnt values (in dataset2): ", len(torch.where((x - target) != 0)[0]))
+    for c in range(x.shape[0]):
+        out[c] = self.apply_mask(x[c], mask)
+    # print("number of differnt values (in dataset3): ", len(torch.where((out - target) != 0)[0]))
+    # inv_mask = torch.logical_not(mask)
+    # if self.mask_prob > 0:
+    #   masked_x, inv_mask = self.mask_array(x.clone(), mask_percentage=self.mask_prob, mask_value=self.mask_val)
+    # else:
+    #   masked_x = x.clone()
+    #   inv_mask = torch.ones_like(x).bool()
+    # torch.nan_to_num(masked_x, torch.nanmean(masked_x))
+    # torch.nan_to_num(x, torch.nanmean(x))
     # print(meta['TEFF'], meta['RADIUS'], meta['LOGG'])
     info['idx'] = idx
     if len(meta):
@@ -334,8 +364,8 @@ class KeplerDataset(TimeSsl):
       info['R'] = meta['RADIUS'] if meta['RADIUS'] is not None else 0
       info['logg'] = meta['LOGG'] if meta['LOGG'] is not None else 0
     info['path'] = self.df.iloc[idx]['data_file_path'] if self.df is not None else self.path_list[idx]
-    info['KID']  = self.df.iloc[idx]['KID'] if self.df is not None else self.path_list[idx].split("/")[-1].split("-")[0].split('kplr')[-1]
-    return x.float(), masked_x.squeeze().float(), inv_mask, info
+    info['KID'] = self.df.iloc[idx]['KID'] if self.df is not None else self.path_list[idx].split("/")[-1].split("-")[0].split('kplr')[-1]
+    return x.float(), target, mask, info
 
 
 

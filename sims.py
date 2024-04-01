@@ -113,7 +113,7 @@ if __name__ == "__main__":
     args.load_dict(yaml.safe_load(open(f'{yaml_dir}/model_config.yaml', 'r'))[args.model])
     print("args : ", vars(args))
 
-    transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)), moving_avg(49)])
+    transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)), MovingAvg(49)])
     train_ds = TimeSsl(data_folder, path_list=None, df=train_df, acf=True, return_raw=True,
      ssl_tf=DataTransform_TD_bank, t_samples=None, transforms=transform,)
     val_ds = TimeSsl(data_folder, path_list=None, df=val_df, acf=True, return_raw=True,

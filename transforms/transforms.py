@@ -26,7 +26,9 @@ class Compose:
     def __call__(self, x, mask=None, info=None, step=None):
         out = x
         for t in self.transforms:
+            # print("t: ", t, 'type: ', type(out))
             out, mask, info = t(out, mask=mask, info=info, step=step)
+            # print("after transform: ", out.shape)
         return out, mask, info
 
     def __repr__(self):
@@ -76,6 +78,8 @@ class Mask(object):
             out = x
         else:
             raise NotImplementedError
+        if len(x.shape) == 1:
+            out = out[:, np.newaxis]
         temp_out = out
         if self.exclude_mask and mask is not None:
             # only implemented for univariate at the moment.
@@ -206,24 +210,31 @@ class RandomCrop:
         assert exclude_missing_threshold is None or 0 <= exclude_missing_threshold <= 1
 
     def __call__(self, x, mask=None, info=None, step=None):
-        seq_len = x.shape[0]
-        if seq_len < self.width:
-            left_crop = 0
-            warnings.warn(
-                'cannot crop because width smaller than sequence length')
+        if isinstance(x, np.ndarray):
+            if len(x.shape) == 1:
+                x = x[:, np.newaxis]
+            if 'left_crop' in info:
+                left_crop = info['left_crop']
+            else:
+                seq_len = x.shape[0]
+                if seq_len <= self.width:
+                    left_crop = 0
+                    warnings.warn(
+                        'cannot crop because width smaller than sequence length')
+                else:
+                    left_crop = np.random.randint(seq_len-self.width)
+                info['left_crop'] = left_crop
+                info['right_crop'] = left_crop + self.width
+            out_x = x[left_crop:left_crop+self.width]
+            if mask is None:
+                return (out_x, mask, info)
+            if self.exclude_missing_threshold is not None and np.isnan(out_x).mean() >= self.exclude_missing_threshold:
+                return self.__call__(x, mask=mask, info=info)
+            out_m = mask[left_crop:left_crop+self.width]
+
+            return (out_x, out_m, info)
         else:
-            left_crop = np.random.randint(seq_len-self.width)
-        info['left_crop'] = left_crop
-        info['right_crop'] = left_crop + self.width
-
-        out_x = x[left_crop:left_crop+self.width]
-        if mask is None:
-            return (out_x, mask, info)
-        if self.exclude_missing_threshold is not None and np.isnan(out_x).mean() >= self.exclude_missing_threshold:
-            return self.__call__(x, mask=mask, info=info)
-        out_m = mask[left_crop:left_crop+self.width]
-
-        return (out_x, out_m, info)
+            raise NotImplementedError
 
 class Slice():
     def __init__(self, start, end):
@@ -254,12 +265,12 @@ class Detrend():
     def __repr__(self):
         return f"Detrend(type={self.type})"
 
-class moving_avg():
+class MovingAvg():
     """
     Moving average block to highlight the trend of time series
     """
     def __init__(self, kernel_size, stride=1):
-        super(moving_avg, self).__init__()
+        super(MovingAvg, self).__init__()
         self.kernel_size = kernel_size
         self.avg = torch.nn.AvgPool1d(kernel_size=kernel_size, stride=stride, padding=0)
 
@@ -368,3 +379,39 @@ class PeriodNorm():
         return x, mask, info
     def __repr__(self):
         return f"PeriodNorm(num_ps={self.num_ps}, orig_freq={self.orig_freq})"
+
+class ACF():
+    def __init__(self, max_lag=None):
+        self.max_lag = max_lag
+    def __call__(self, x, mask=None, info=None, step=None):
+        if isinstance(x, np.ndarray):
+            x_no_nans = x.copy()
+            nan_indices = np.where(np.isnan(x))[0]
+            x_no_nans[nan_indices] = 0
+            acf = F_np.autocorrelation(x_no_nans, max_lag=self.max_lag)[:,None]
+            if mask is not None:
+                acf[mask] = np.nan
+            x = np.hstack((acf, x))
+        else:
+            raise NotImplementedError
+        return x, mask, info
+    def __repr__(self):
+        return f"ACF(max_lag={self.max_lag})"
+
+class Normalize():
+    def __init__(self, norm='std'):
+        self.norm = norm
+    def __call__(self, x, mask=None, info=None, step=None):
+        info['norm'] = self.norm
+        params = None
+        # print(info)
+        if isinstance(x, np.ndarray):
+            if 'norm_params' in info:
+                params = info['norm_params']
+            x, params = F_np.normalize(x, mask=mask, norm_type=self.norm, params=params)
+            info['norm_params'] = params
+        else:
+            x = F_t.normalize(x, mask=mask, norm_type=self.norm)
+        return x, mask, info
+    def __repr__(self):
+        return f"Normalize(norm_type={self.norm})"

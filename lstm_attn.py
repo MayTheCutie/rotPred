@@ -153,15 +153,15 @@ if __name__ == '__main__':
     #                     ])
 
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
-                          KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                          transforms=kep_transform, min_ratio=0.02, max_ratio=0.05), 
-                        #   KeplerNoiseAddition(noise_ds),                         
-     moving_avg(49), Detrend()])
+                         KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                          transforms=kep_transform, min_ratio=0.02, max_ratio=0.05),
+                         #   KeplerNoiseAddition(noise_ds),
+                         MovingAvg(49), Detrend()])
     test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
-                            KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                            transforms=kep_transform, min_ratio=0.02, max_ratio=0.05), 
-                            # KeplerNoiseAddition(noise_ds),
-     moving_avg(49), Detrend()])
+                              KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                            transforms=kep_transform, min_ratio=0.02, max_ratio=0.05),
+                              # KeplerNoiseAddition(noise_ds),
+                              MovingAvg(49), Detrend()])
 
     train_dataset = TimeSeriesDataset(data_folder, train_list, transforms=transform,
     init_frac=0.5, acf=True, prepare=False, dur=dur)

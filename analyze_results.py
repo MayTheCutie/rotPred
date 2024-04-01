@@ -282,7 +282,7 @@ def giant_cond(x):
     return logg >= thresh
 
 
-def create_kois_mazeh(kepler_inference, mazeh_path='references/Table_1_Periodic.txt', kois_path='references/kois_no_fp.csv'):
+def create_kois_mazeh(kepler_inference, mazeh_path='tables/Table_1_Periodic.txt', kois_path='tables/kois_no_fp.csv'):
     """
     get sub samples dataframes of kois and Mazeh objects
     :param kepler_inference: all kepler objects inference results
@@ -339,7 +339,7 @@ def prepare_df(df, scale=False, filter_giants=True, filter_eb=True, filter_non_p
     # plt.xlim(0,1000)
     if 'KID' in df.columns:
         df['KID'] = df['KID'].astype(np.int64)
-        eb = pd.read_csv('references/kepler_eb.txt')
+        eb = pd.read_csv('tables/kepler_eb.txt')
         df['eb'] = df['KID'].isin(eb['KID']).astype(bool)
     # print(df['predicted inclination'].max())
     if df['predicted inclination'].max() <= 2:
@@ -379,7 +379,7 @@ def prepare_df(df, scale=False, filter_giants=True, filter_eb=True, filter_non_p
     if filter_eb:
         df = df[df['eb'] == False]
     if filter_non_ps:
-        non_ps = pd.read_csv('references/Table_2_Non_Periodic.txt')
+        non_ps = pd.read_csv('tables/Table_2_Non_Periodic.txt')
         non_ps = non_ps.dropna()
         df = pd.merge(df, non_ps, how='left', on='KID')
         df['w'] = df['w'].fillna(10)
@@ -791,7 +791,7 @@ def prepare_kois_sample(paths, indicator='kepler_name'):
             return None
         return float(row)
 
-    kois = pd.read_csv('references/kois.csv').reset_index(drop=True)
+    kois = pd.read_csv('tables/kois.csv').reset_index(drop=True)
     kois['kepler_name'] = kois['kepler_name'].astype(str).apply(lambda x: x.lower().split(" ")[0])
     duplicates_mask = kois.duplicated(subset='KID', keep='first')
     kois = kois[~duplicates_mask]
@@ -1191,8 +1191,8 @@ def real_inference():
     """
     print("pandas version ",  pd.__version__)
     # kepler_eval = pd.read_csv("kepler/kepler_eval2.csv")
-    sample_kois = prepare_kois_sample(['references/albrecht2022_clean.csv', 'references/morgan2023.csv', 'references/win2017.csv'])
-    sample_kois.to_csv('references/all_refs.csv')
+    sample_kois = prepare_kois_sample(['tables/albrecht2022_clean.csv', 'tables/morgan2023.csv', 'tables/win2017.csv'])
+    sample_kois.to_csv('tables/all_refs.csv')
     # sample_kois = prepare_kois_sample(['win2017.csv'])
 
 
@@ -1210,12 +1210,12 @@ def real_inference():
     # find_non_ps(kepler_inference)
 
     print("len df: ", len(kepler_inference))
-    ref = pd.read_csv('references/Table_1_Periodic.txt')
+    ref = pd.read_csv('tables/Table_1_Periodic.txt')
     # compare_pariod(kepler_inference, ref, ref_name='Mazeh2014')
-    ref = pd.read_csv('references/reinhold2023.csv')
+    ref = pd.read_csv('tables/reinhold2023.csv')
     # compare_pariod(kepler_inference, ref, ref_name='Reinhold2023')
 
-    merged_df_mazeh, merged_df_kois, merged_df_no_kois = create_kois_mazeh(kepler_inference, kois_path='references/kois.csv')
+    merged_df_mazeh, merged_df_kois, merged_df_no_kois = create_kois_mazeh(kepler_inference, kois_path='tables/kois.csv')
     merged_df_kois['a'] = (merged_df_kois['planet_Prot'] ** 2) ** (1 / 3)
     # compare_kois(merged_df_kois, sample_kois)
 
@@ -1278,7 +1278,7 @@ def real_inference():
     # plt.xlabel('teff')
     # plt.ylabel("predicted inclination")
     # plt.show()
-    hist_weights = np.load('references/hist_factors.npy')
+    hist_weights = np.load('tables/hist_factors.npy')
     w = np.zeros(len(kepler_inference))
     arr = np.array(kepler_inference['predicted inclination'])
     for i in range(len(kepler_inference)):

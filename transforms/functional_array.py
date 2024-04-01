@@ -1,5 +1,7 @@
 import math
 from typing import Optional
+from statsmodels.tsa.stattools import acf as A
+
 
 import numpy as np
 
@@ -41,6 +43,8 @@ def create_mask(seq_len, mask_ratio, n_dim=1, block_len=None, block_mode='geom',
 
 def create_mask_like(x, mask_ratio, block_len=None, block_mode='geom', interval_mode='geom', overlap_mode='random'):
     """A wrapper to create masks with shape from input"""
+    if len(x.shape) == 1:
+        x = x[:, np.newaxis]
     seq_len, n_dim = x.shape
     return create_mask(seq_len, mask_ratio, block_len=block_len, n_dim=n_dim, block_mode=block_mode, interval_mode=interval_mode, overlap_mode=overlap_mode)
 
@@ -148,3 +152,41 @@ def period_norm(lc, period, num_ps, orig_freq=1/48):
     new_flux = np.interp(new_time, time, flux)
     t_norm = np.linspace(0, num_ps, num=len(new_flux))
     return t_norm, new_flux
+
+def autocorrelation(x, max_lag=None):
+    """Compute the autocorrelation of x."""
+    if max_lag is None:
+        max_lag = len(x)
+    return A(x, nlags=max_lag)
+
+def normalize(x, mask = None, norm_type: str = 'std', params=None):
+    if mask is None:
+        mask = np.zeros_like(x[:,0]).astype(bool)
+    if params is None:
+        _params = []
+    for c in range(x.shape[-1]):
+        if norm_type == 'std':
+            if params is not None:
+                mean, std = params[c]
+            else:
+                mean, std = x[:,c][~mask.squeeze()].mean(), x[:,c][~mask.squeeze()].std()
+                _params.append((mean, std))
+            x[:,c] = ((x[:,c] - mean) / (std + 1e-8))
+        elif norm_type == 'median':
+            if params is not None:
+                median = params[c]
+            else:
+                median = np.median(x[:, c][~mask.squeeze()])
+                _params.append(median)
+            x[:, c] /= median
+        elif norm_type == 'minmax':
+            if params is not None:
+                mini, maxi = params[c]
+            else:
+                mini = x[:,c][~mask.squeeze()].min()
+                maxi = x[:,c][~mask.squeeze()].max()
+                _params.append((mini, maxi))
+            x[:,c] = (x[:,c] - mini) / (maxi - mini)
+    if params is None:
+        return x, _params
+    return x, params

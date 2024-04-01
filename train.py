@@ -121,55 +121,36 @@ class Trainer(object):
             t_loss, t_acc = self.train_epoch(device, epoch=epoch, only_p=only_p, plot=plot, conf=conf)
             t_loss_mean = np.mean(t_loss)
             train_loss.extend(t_loss)
-            global_train_accuracy = torch.tensor(t_acc).cuda()  # Convert accuracy to a tensor on the GPU
-            torch.distributed.reduce(global_train_accuracy, dst=0, op=torch.distributed.ReduceOp.SUM)
-            global_train_loss = torch.tensor(t_loss_mean).cuda()  # Convert loss to a tensor on the GPU
-            torch.distributed.reduce(global_train_loss, dst=0, op=torch.distributed.ReduceOp.SUM)  
-            global_train_loss /= torch.distributed.get_world_size()
-            if torch.distributed.get_rank() == 0:  # Only perform this on the master GPU
-                # global_accuracy /= torch.distributed.get_world_size()
-                train_acc.append(global_train_accuracy.mean().item())
-                self.logger.add_scalar('train_acc', global_train_accuracy.mean().item(), epoch)
-
+            global_train_accuracy, global_train_loss = self.process_loss(t_acc, t_loss_mean)
 
             v_loss, v_acc = self.eval_epoch(device, epoch=epoch, only_p=only_p, plot=plot, conf=conf)
             v_loss_mean = np.mean(v_loss)
             val_loss.extend(v_loss)
-            global_val_accuracy = torch.tensor(v_acc).cuda() 
-            torch.distributed.reduce(global_val_accuracy, dst=0, op=torch.distributed.ReduceOp.SUM) 
-            global_val_loss = torch.tensor(v_loss_mean).cuda()  # Convert loss to a tensor on the GPU
-            torch.distributed.reduce(global_val_loss, dst=0, op=torch.distributed.ReduceOp.SUM) 
-            global_val_loss /= torch.distributed.get_world_size()
-            if torch.distributed.get_rank() == 0:  # Only perform this on the master GPU
-                # global_accuracy /= torch.distributed.get_world_size()
-                # print("global_val_accuracy: ", global_val_accuracy)
-                val_acc.append(global_val_accuracy.mean().item())
-                self.logger.add_scalar('validation_acc', global_val_accuracy.mean().item(), epoch)
-
-                if self.scheduler is not None:
-                    self.scheduler.step(global_val_loss)
-                criterion = min_loss if best == 'loss' else best_acc
-                mult = 1 if best == 'loss' else -1
-                objective = global_val_loss if best == 'loss' else global_val_accuracy.mean()
-                if mult*objective < mult*criterion:
-                    print("saving model...")
-                    if best == 'loss':
-                        min_loss = global_val_loss
-                    else:
-                        best_acc = global_val_accuracy.mean()
-                    torch.save(self.model.state_dict(), f'{self.log_path}/exp{self.exp_num}/{self.exp_name}.pth')
-                    self.best_state_dict = self.model.state_dict()
-                    epochs_without_improvement = 0
+            global_val_accuracy, global_val_loss = self.process_loss(v_acc, v_loss_mean)
+            if self.scheduler is not None:
+                self.scheduler.step(global_val_loss)
+            criterion = min_loss if best == 'loss' else best_acc
+            mult = 1 if best == 'loss' else -1
+            objective = global_val_loss if best == 'loss' else global_val_accuracy.mean()
+            if mult*objective < mult*criterion:
+                print("saving model...")
+                if best == 'loss':
+                    min_loss = global_val_loss
                 else:
-                    epochs_without_improvement += 1
-                    if epochs_without_improvement == early_stopping:
-                        print('early stopping!', flush=True)
-                        break
+                    best_acc = global_val_accuracy.mean()
+                torch.save(self.model.state_dict(), f'{self.log_path}/exp{self.exp_num}/{self.exp_name}.pth')
+                self.best_state_dict = self.model.state_dict()
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement == early_stopping:
+                    print('early stopping!', flush=True)
+                    break
 
-                print(f'Epoch {epoch}: Train Loss: {global_train_loss:.6f}, Val Loss: {global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, Val Acc: {global_val_accuracy.round(decimals=4).tolist()}, Time: {time.time() - start_time:.2f}s')
+            print(f'Epoch {epoch}: Train Loss: {global_train_loss:.6f}, Val Loss: {global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, Val Acc: {global_val_accuracy.round(decimals=4).tolist()}, Time: {time.time() - start_time:.2f}s')
 
-                if epoch % 10 == 0:
-                    print(os.system('nvidia-smi'))
+            if epoch % 10 == 0:
+                print(os.system('nvidia-smi'))
 
         self.optim_params['lr'] = self.optimizer.param_groups[0]['lr']
         self.optim_params['lr_history'].append(self.optim_params['lr'])
@@ -180,7 +161,20 @@ class Trainer(object):
             self.logger.add_scalar('time', time.time() - start_time, epoch)
             self.logger.close()
         return {"num_epochs":num_epochs, "train_loss": train_loss, "val_loss": val_loss, "train_acc": train_acc, "val_acc": val_acc}
-    
+
+    def process_loss(self, acc, loss_mean):
+        print("device: ", self.device)
+        if self.device.type != 'cpu' and torch.cuda.is_available() and torch.distributed.is_initialized():
+            global_accuracy = torch.tensor(acc).cuda()  # Convert accuracy to a tensor on the GPU
+            torch.distributed.reduce(global_accuracy, dst=0, op=torch.distributed.ReduceOp.SUM)
+            global_loss = torch.tensor(loss_mean).cuda()  # Convert loss to a tensor on the GPU
+            torch.distributed.reduce(global_loss, dst=0, op=torch.distributed.ReduceOp.SUM)
+            global_loss /= torch.distributed.get_world_size()
+        else:
+            global_loss = torch.tensor(loss_mean)
+            global_accuracy = torch.tensor(acc)
+        return global_accuracy, global_loss
+
     def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
         """
         Trains the model for one epoch.
@@ -1352,21 +1346,16 @@ class MaskedSSLTrainer(Trainer):
         self.model.train()
         train_loss = []
         train_acc = 0
-        for i, (x, x_masked, mask, _) in enumerate(self.train_dl):
-            x_masked, mask, x = x_masked.to(device), mask.to(device), x.to(device)
-            out = self.model(x_masked, x).squeeze()
-            # print(mask.shape, out.shape, x.shape)
-            # tm = mask.expand_as(out)  
-            out = out.masked_fill(mask, 0)
-            x_target = x.squeeze().masked_fill(mask, 0)
-            # print(x_target.shape, out.shape ) 
-            loss = self.criterion(out, x_target)
-            # if self.logger is not None:
-            #     self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
+        pbar = tqdm(self.train_dl)
+        for i, (x, y, mask, info) in enumerate(pbar):
+            y, mask, x = y.to(device), mask.to(device), x.to(device)
+            out = self.model(x)
+            loss = self.criterion(out, y, mask)
             loss.backward()
             self.optimizer.step()
             train_loss.append(loss.item())
-            train_acc += self.mask_accuracy(out, x_target, mask).item()
+            train_acc += self.mask_accuracy(out, y, mask).item()
+            pbar.set_description(f"train_loss:  {loss.item()}")
         return train_loss, train_acc/len(self.train_dl.dataset)
 
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
@@ -1376,30 +1365,22 @@ class MaskedSSLTrainer(Trainer):
         self.model.eval()
         val_loss = []
         val_acc = 0
-        for i, (x, x_masked, mask, _) in enumerate(self.val_dl):
-            x_masked, mask, x = x_masked.to(device), mask.to(device), x.to(device)
+        pbar = tqdm(self.val_dl)
+        for i, (x, y, mask, info) in enumerate(pbar):
+            y, mask, x = y.to(device), mask.to(device), x.to(device)
             with torch.no_grad():
-                out = self.model(x_masked, x).squeeze()
-            # print(mask.shape, out.shape, x.shape)
-            # tm = mask.expand_as(out)  
-            out = out.masked_fill(mask, 0)
-            x_target = x.squeeze().masked_fill(mask, 0)
-            loss = self.criterion(out, x_target)
-            if self.logger is not None:
-                self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
-            if torch.isnan(loss).any():
-                print("loss is nan")
-                print("out: ", out, "x_target: ", x_target, "mask: ", mask)
+                out = self.model(x)
+            loss = self.criterion(out, y, mask)
             val_loss.append(loss.item())
-            val_acc += self.mask_accuracy(out, x_target, mask).item()
-            # print("val_loss: ",loss.item(), "val_acc: ", self.mask_accuracy(out, x_target, mask))
+            val_acc += self.mask_accuracy(out, y, mask).item()
+            pbar.set_description(f"val_loss:  {loss.item()}")
         return val_loss, val_acc/len(self.val_dl.dataset)
     
-    def mask_accuracy(self, result, target, inverse_token_mask):
+    def mask_accuracy(self, result, target, inverse_token_mask, epsilon=1e-3):
         # print(inverse_token_mask.shape, result.shape, target.shape)
-        r = result.masked_select(~inverse_token_mask)  
-        t = target.masked_select(~inverse_token_mask)  
-        s = (r == t).sum()  
+        r = result.masked_select(inverse_token_mask)
+        t = target.masked_select(inverse_token_mask)
+        s = (torch.abs(r - t) < epsilon).sum()
         return s
     
 

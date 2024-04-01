@@ -38,7 +38,8 @@ class Astroconformer(nn.Module):
   def forward(self, inputs: Tensor) -> Tensor:
     x = inputs #initial input_size: [B, L]
 
-    x = x.unsqueeze(1) # x: [B, 1, L]
+    if len(x.shape) == 2:
+        x = x.unsqueeze(1) # x: [B, 1, L]
     x = self.extractor(x) # x: [B, encoder_dim, L]
     x = x.permute(0,2,1) # x: [B, L, encoder_dim]
     RoPE = self.pe(x, x.shape[1]) # RoPE: [2, B, L, encoder_dim], 2: sin, cos

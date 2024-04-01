@@ -471,6 +471,16 @@ class LSTM_DUAL(LSTM_ATTN):
         out = self.pred_layer(features)
         return out
 
+class EncoderDecoder(torch.nn.Module):
+    def __init__(self, encoder, decoder):
+        super(EncoderDecoder, self).__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+    def forward(self, x):
+        enc_out, memory = self.encoder(x)
+        out = self.decoder(memory.transpose(1,2))
+        return out
+
 class SpotNet(torch.nn.Module):
     def __init__(self, encoder, encoder_dims, decoder, num_queries, num_classes=2, lstm_model=None,
      freeze=False, dropout=0.3, **kwargs):
@@ -536,6 +546,23 @@ class SpotNet(torch.nn.Module):
         # print("time: ", "lstm: ", t1-tic, "encoder: ",  t2-t1, "deocder: ", t3-t2,"linear layers: ", t4-t3)
         return out_dict, predictions
 
+class NaiveDecoder(nn.Module):
+    def __init__(self, encoder_dim, stride, hidden_dim=256):
+        super(NaiveDecoder, self).__init__()
+        self.conv = torch.nn.Sequential(nn.ConvTranspose1d(in_channels=encoder_dim,
+                                                              kernel_size=stride, out_channels=encoder_dim,
+                                                              stride=stride, padding=0, bias=True),
+                                           nn.BatchNorm1d(encoder_dim),
+                                           nn.SiLU())
+        self.linear = nn.Sequential(
+            nn.Linear(encoder_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.linear(x.transpose(1,2)).transpose(1,2)
+        return x
 class LSTM_SWIN(LSTM_ATTN):
     def __init__(self, patch_size=[16,16], im_embed_dim=64, depths=[4,6,6,4], num_heads=[4,8,8,4],
      window_size=[8,8], im_dropout=0.3, swin_weight=1, **kwargs):
@@ -610,7 +637,7 @@ class BERTEncoder(nn.Module):
         # return self.softmax(token_predictions) 
         
     
-class EncoderDecoder(nn.Module):
+class ConvEncoderDecoder(nn.Module):
     def __init__(self, dropout=0.2):
         super(EncoderDecoder, self).__init__()
         # Encoder

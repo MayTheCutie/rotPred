@@ -643,7 +643,7 @@ def convert_to_tuple(string):
 def extract_qs(path):
     qs_numbers = []
     for p in path:
-        match = re.search(r'/Q(\d+)/', p)
+        match = re.search(r'[\\/]Q(\d+)[\\/]', p)
         if match:
             qs_numbers.append(int(match.group(1)))
     return qs_numbers
@@ -660,6 +660,23 @@ def consecutive_qs(qs_list):
             current_length = 1
     return max(max_length, current_length)
 
+def find_longest_consecutive_indices(nums):
+    start, end = 0, 0
+    longest_start, longest_end = 0, 0
+    max_length = 0
+
+    for i in range(1, len(nums)):
+        if nums[i] == nums[i-1] + 1:
+            end = i
+        else:
+            start = i
+
+        if end - start > max_length:
+            max_length = end - start
+            longest_start = start
+            longest_end = end
+
+    return longest_start, longest_end
 def kepler_collate_fn(batch):
     # Separate the elements of each sample tuple (x, y, mask, info) into separate lists
     xs, ys, masks, infos = zip(*batch)

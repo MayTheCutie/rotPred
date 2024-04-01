@@ -204,8 +204,8 @@ if __name__ == '__main__':
         tic = time.time()
         print("i: ", q)
         step = int(q*int(90/cad*DAY2MIN))
-        transform = Compose([moving_avg(49), Detrend(), RandomCrop(int(dur/cad*DAY2MIN))])
-        test_transform = Compose([moving_avg(49), Detrend(), Slice(0+step, int(dur/cad*DAY2MIN) + step)])
+        transform = Compose([Moving(49), Detrend(), RandomCrop(int(dur / cad * DAY2MIN))])
+        test_transform = Compose([Moving(49), Detrend(), Slice(0 + step, int(dur / cad * DAY2MIN) + step)])
 
         full_dataset = KeplerDataset(data_folder, path_list=None, df=kepler_df, t_samples=int(dur/cad*DAY2MIN),
             transforms=test_transform, acf=True, return_raw=True)

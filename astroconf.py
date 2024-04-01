@@ -25,8 +25,8 @@ ROOT_DIR = path.dirname(path.dirname(path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 print("running from ", ROOT_DIR)   
 
-from lightPred.datasets.simulations import TimeSeriesDataset
-from lightPred.transforms import Compose, StandardScaler, Mask, RandomCrop, DownSample, AddGaussianNoise
+# from lightPred.datasets.simulations import TimeSeriesDataset
+# from lightPred.transforms import Compose, StandardScaler, Mask, RandomCrop, DownSample, AddGaussianNoise
 
 from lightPred.models import LSTM_ATTN, LSTM_DUAL
 from lightPred.Astroconf.Train.utils import init_train
@@ -183,17 +183,17 @@ if __name__ == '__main__':
     # transforms=kep_transform, acf=False, norm='none')
 
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
-                        #   KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                        #   transforms=kep_transform, min_ratio=0.02, max_ratio=0.05), 
-                          KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                          transforms=kep_transform),                         
-     moving_avg(49), Detrend()])
-    test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
-                            # KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                            # transforms=kep_transform,  min_ratio=0.02, max_ratio=0.05), 
-                            KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                         #   KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                         #   transforms=kep_transform, min_ratio=0.02, max_ratio=0.05),
+                         KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),
-     moving_avg(49), Detrend()])
+                         MovingAvg(49), Detrend()])
+    test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
+                              # KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                              # transforms=kep_transform,  min_ratio=0.02, max_ratio=0.05),
+                              KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                          transforms=kep_transform),
+                              MovingAvg(49), Detrend()])
 
 #     image_transform = torchvision.transforms.Compose([
 #     torchvision.transforms.RandomHorizontalFlip(p=0.5),

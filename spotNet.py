@@ -170,17 +170,17 @@ if __name__ == '__main__':
     kep_transform = RandomCrop(int(dur/cad*DAY2MIN))
    
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
-                        #   KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                        #   transforms=kep_transform, min_ratio=0.02, max_ratio=0.05), 
-                          KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                          transforms=kep_transform),                         
-     moving_avg(49), Detrend()])
-    test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
-                            # KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                            # transforms=kep_transform,  min_ratio=0.02, max_ratio=0.05), 
-                            KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                         #   KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                         #   transforms=kep_transform, min_ratio=0.02, max_ratio=0.05),
+                         KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),
-     moving_avg(49), Detrend()])
+                         MovingAvg(49), Detrend()])
+    test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
+                              # KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                              # transforms=kep_transform,  min_ratio=0.02, max_ratio=0.05),
+                              KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                          transforms=kep_transform),
+                              MovingAvg(49), Detrend()])
    
     train_dataset = TimeSeriesDataset(data_folder, train_list, labels=class_labels, transforms=transform,
     init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, spots=True)

@@ -516,7 +516,7 @@ def test_wavelet():
      t_samples=None, transforms=kep_transform, acf=False, norm='none')
     
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)), KeplerNoise(noise_ds, min_std=0.0005, max_std=0.01),
-                         moving_avg(kernel_size=49)])
+                         Moving(kernel_size=49)])
     data_folder = "/data/butter/data_cos"
     train_dataset = TimeSeriesDataset(data_folder, idx_list[:10], t_samples=None, norm='minmax',
                                        transforms=transform, acf=True, wavelet=True, dur=dur, kep_noise=noise_ds,
@@ -638,7 +638,7 @@ def get_dispersion():
     fluxes = []
     areas = []
     images = []
-    transform = moving_avg(49)
+    transform = Moving(49)
     incs = np.arange(0,100, 10)
     ratios = []
     mpl.rcParams['axes.linewidth'] = 2
@@ -716,7 +716,7 @@ def test_spectrogram():
 def test_lagp_dataset():
     dur = 360
     time = np.arange(0, dur, cad / DAY2MIN)
-    transform = Compose([Detrend(), moving_avg(kernel_size=49), RandomCrop(width=int(dur/cad*DAY2MIN))])
+    transform = Compose([Detrend(), Moving(kernel_size=49), RandomCrop(width=int(dur / cad * DAY2MIN))])
     train_ds = PlagDataset(data_folder, idx_list[:1000], dur=dur,lag_len=512,
      labels=None, t_samples=None, norm='std', transforms=transform, return_raw=True)
     for i, (x,y,_,_) in enumerate(train_ds):
@@ -754,7 +754,7 @@ def test_hdiff():
         return p1, p2, t1, t2
     dur = 360
     time = np.arange(0, dur, cad / DAY2MIN)
-    transform = Compose([Detrend(), moving_avg(kernel_size=49), RandomCrop(width=int(dur/cad*DAY2MIN))])
+    transform = Compose([Detrend(), Moving(kernel_size=49), RandomCrop(width=int(dur / cad * DAY2MIN))])
     train_ds = ACFDataset(data_folder, idx_list[:1000], labels=None, t_samples=None, norm='std', transforms=transform, return_raw=True)
     # train_dl = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=0)
     diffs_t = []
@@ -921,7 +921,7 @@ def test_tfc():
     dur = 180
     kepler_df = multi_quarter_kepler_df(kepler_data_folder, table_path=None, Qs=[4,5])
     kepler_df = kepler_df[kepler_df['number_of_quarters']==2]
-    transform = Compose([moving_avg(kernel_size=49), RandomCrop(int(dur/cad*DAY2MIN))])
+    transform = Compose([Moving(kernel_size=49), RandomCrop(int(dur / cad * DAY2MIN))])
     ds = TFCKeplerDataset(data_folder, path_list=None, df=kepler_df.iloc[:1000], ssl_tf=DataTransform_TD_bank,
      t_samples=transform, transforms=None, acf=True, return_raw=False)
     dl = DataLoader(ds, batch_size=4, shuffle=True, num_workers=0)
@@ -972,7 +972,7 @@ def test_sims():
     kepler_df = multi_quarter_kepler_df(kepler_data_folder, table_path=None, Qs=[4,5])
     kepler_df = kepler_df[kepler_df['number_of_quarters']==2]
     train_df, val_df = train_test_split(kepler_df, test_size=0.01, random_state=1234)
-    transform = Compose([moving_avg(kernel_size=25), RandomCrop(int(dur/cad*DAY2MIN))])
+    transform = Compose([Moving(kernel_size=25), RandomCrop(int(dur / cad * DAY2MIN))])
     # train_ds = TimeSsl(data_folder, path_list=None, df=train_df, ssl_tf=DataTransform_TD_bank, t_samples=None, transforms=transform, acf=True, return_raw=False)
     val_ds = TimeSsl(data_folder, path_list=None, df=val_df, ssl_tf=DataTransform_TD_bank, t_samples=transform, transforms=None, acf=True, return_raw=False)
 
@@ -1051,7 +1051,7 @@ def test_consistency():
     model, net_params, _ = load_model('/data/logs/lstm_attn/exp29',
      LSTM_ATTN, distribute=True, device=DEVICE, to_ddp=False)
     model.eval()
-    transform = Compose([moving_avg(49), Slice(0, int(_dur/cad*DAY2MIN))])
+    transform = Compose([Moving(49), Slice(0, int(_dur / cad * DAY2MIN))])
     kepler_df = multi_quarter_kepler_df(kepler_data_folder, table_path=table_path, Qs=[4,5])
     kepler_df_2 = multi_quarter_kepler_df(kepler_data_folder, table_path=None, Qs=[4,5])
     # kepler_df = kepler_df.sample(frac=1)
@@ -1164,7 +1164,7 @@ def test_hwin():
 def test_masked_ssl():
     _dur = 180
 
-    transform = Compose([ moving_avg(49), RandomCrop(width=int(_dur/cad*DAY2MIN))])
+    transform = Compose([Moving(49), RandomCrop(width=int(_dur / cad * DAY2MIN))])
     kepler_df = multi_quarter_kepler_df(kepler_data_folder, table_path=None, Qs=[4,5])
     # kepler_df = kepler_df.sample(frac=1)
     kepler_df = kepler_df[kepler_df['number_of_quarters']==2]
@@ -1202,7 +1202,7 @@ def test_masked_ssl():
 def test_kepler():
     kepler_df = multi_quarter_kepler_df(kepler_data_folder, table_path=None, Qs=[4,5])
     kepler_df = kepler_df[kepler_df['number_of_quarters']==2]
-    transforms = Compose([moving_avg(kernel_size=49), RandomCrop(int(dur/cad*DAY2MIN))])
+    transforms = Compose([Moving(kernel_size=49), RandomCrop(int(dur / cad * DAY2MIN))])
     # kepler_df = kepler_df.sample(frac=1)
     full_data = KeplerDataset(data_folder, path_list=None, t_samples=None, transforms=transforms, df=kepler_df)
     # dl = DataLoader(full_data, batch_size=4, shuffle=False, num_workers=0)
@@ -1543,7 +1543,7 @@ if __name__ == "__main__":
     # test_gaf()
     # test_tfc()
     # test_koi_sample(kids=['1160684', '1164584', '1995168', '2010137'], names=['noise1', 'noise2', 'noise3', 'noise4'])
-    # test_koi_sample(kids=None, names=None, df_path='/data/lightPred/tables/references.csv')
+    # test_koi_sample(kids=None, names=None, df_path='/data/lightPred/tables/tables.csv')
     # acf_on_winn()
     # test_depth_width()
     # test_hdiff()

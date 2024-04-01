@@ -171,9 +171,9 @@ def objective(trial):
 
         kep_transform = RandomCrop(int(dur/cad*DAY2MIN))
         transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
-                          KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                          transforms=kep_transform),                         
-                            moving_avg(49)])
+                             KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                          transforms=kep_transform),
+                             Moving(49)])
         train_dataset = TimeSeriesDataset(data_folder, train_list, transforms=transform, prepare=False, acf=True,
                                         spots=True, return_raw=True, init_frac=0.2, labels=class_labels)
         val_dataset = TimeSeriesDataset(data_folder, val_list, transforms=transform, prepare=False, acf=True,
