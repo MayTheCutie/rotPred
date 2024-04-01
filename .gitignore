@@ -5,7 +5,6 @@ lat.py
 bert_ssl.py
 cleean.py
 lstm.py
-masked_ssl.py
 nt_xent_loss.py
 opt_encdec.py
 augmentations.py

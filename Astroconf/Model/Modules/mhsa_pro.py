@@ -137,9 +137,9 @@ class MHA_decoder(nn.Module):
         if args.timeshift:
             self.time_shift = nn.ZeroPad2d((0,0,1,0))
 
-        self.query = nn.Linear(args.encoder_dim, args.encoder_dim)
-        self.key = nn.Linear(args.encoder_dim, args.encoder_dim)
-        self.value = nn.Linear(args.encoder_dim, args.encoder_dim)
+        self.query = nn.Linear(args.decoder_dim, args.decoder_dim)
+        self.key = nn.Linear(args.decoder_dim, args.decoder_dim)
+        self.value = nn.Linear(args.decoder_dim, args.decoder_dim)
 
         # self.register_buffer("mask", torch.tril(torch.ones(config.ctx_len, config.ctx_len)))
         
@@ -147,11 +147,11 @@ class MHA_decoder(nn.Module):
         
         self.rotary_emb = RotaryEmbedding(self.rotary_ndims)
 
-        self.output = nn.Linear(args.encoder_dim, args.encoder_dim)
+        self.output = nn.Linear(args.decoder_dim, args.decoder_dim)
 
     def forward(self, x, memory,RoPE, key_padding_mask=None):
         B, T, C = x.size()
-        _, L, _ = memory.size()
+        _, L, M = memory.size()
 
         # print("x size: ", x.size(), 'memory size: ', memory.size())
         # print('B, T, C: ', B, T, C, 'L: ', L)

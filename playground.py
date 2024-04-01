@@ -1558,9 +1558,11 @@ if __name__ == "__main__":
     # test_denoiser()
     # create_noise_dataset()
     # read_spots_and_lightcurve('00010', '/data/butter/data2')
-    test_spots_dataset()
+    # test_spots_dataset()
     # show_samples(48000)
-    # create_period_normalized_samples('/data/butter/data_cos', 50000, num_ps=20)
+    create_period_normalized_samples('/data/butter/data_cos_old', 50000, num_ps=20)
+    create_period_normalized_samples('/data/butter/data_sun_like', 50000, num_ps=20)
+
     # test_timeDetr()
 
 

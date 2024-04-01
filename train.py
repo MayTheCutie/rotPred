@@ -331,6 +331,7 @@ class DoubleInputTrainer(Trainer):
         all_accs = torch.zeros(self.num_classes, device=device)
         pbar = tqdm(self.train_dl)
         for i, (x,y, _,_) in enumerate(pbar):
+            tic = time.time()
             # print("x: ", x.shape, "y: ", y.shape)
             x1, x2 = x[:, 0, :], x[:, 1, :]
             x1 = x1.to(device)
@@ -338,6 +339,7 @@ class DoubleInputTrainer(Trainer):
             y = y.to(device)
             self.optimizer.zero_grad()
             y_pred = self.model(x1.float(), x2.float())
+            t1 =  time.time() 
             if conf:
                 y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
                 conf_y = torch.abs(y - y_pred) 
@@ -356,6 +358,7 @@ class DoubleInputTrainer(Trainer):
             # loss = loss + 0.5 * loss_std
             
             # print("loss: ", loss, "y_pred: ", y_pred, "y: ", y)
+            t2 = time.time()
             loss.backward()
             self.optimizer.step()
             train_loss.append(loss.item())
@@ -364,6 +367,8 @@ class DoubleInputTrainer(Trainer):
             all_acc = (diff < (y/10)).sum(0)
             all_accs = all_accs + all_acc
             pbar.set_description(f"train_acc: {all_acc}, train_loss:  {loss.item()}")
+            toc = time.time()
+            # print(f"train time: {toc-tic}, forward time: {t1-tic}, loss time: {t2-t1}, backward time: {toc-t2}")
             if i > self.max_iter:
                 break
         return train_loss, all_accs/len(self.train_dl.dataset)
@@ -707,6 +712,9 @@ class SpotsTrainer(Trainer):
         self.num_classes = num_classes
         self.spots_loss = spots_loss
         self.eta = eta
+        self.bbox_loss_log = []
+        self.class_loss_log = []
+        self.giou_loss_log = []
     
     def get_spot_dict(self, spot_arr):
         bs, _, _ = spot_arr.shape
@@ -745,9 +753,9 @@ class SpotsTrainer(Trainer):
             if conf:
                 y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
                 conf_y = torch.abs(y - y_pred)
-            att_loss_val = self.criterion(y_pred, y)
+            att_loss_val = self.criterion(y_pred, y.view(-1, self.num_classes))
             if conf:
-                att_loss_val += self.criterion(conf_pred, conf_y)
+                att_loss_val += self.criterion(conf_pred, conf_y.view(-1, self.num_classes))
             t2 = time.time()
             spots_loss_dict = self.spots_loss(out_spots, tgt_spots)
             weight_dict = self.spots_loss.weight_dict
@@ -759,18 +767,21 @@ class SpotsTrainer(Trainer):
             loss.backward()
             self.optimizer.step()
             train_loss.append(loss.item())
-            # print(spots_loss_dict['class_error'])
             spots_acc = (100 - spots_loss_dict['class_error'])
+           
             diff = torch.abs(y_pred - y)
             # train_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
             att_acc = (diff < (y/10)).sum(0)
-            all_accs = all_accs + (att_acc + spots_acc)/2
+            all_accs = all_accs + att_acc
+            # print("spots dict: ", spots_loss_dict)
+            # if i % 10 == 0:
             pbar.set_description(f"train_acc: {att_acc, spots_acc}, train_loss:  {loss.item():.2f}, "\
-             f"spot_loss: {self.eta*spot_loss_val:.2f}, att_loss: {(1-self.eta)*att_loss_val:.2f}")
+             f"spot_loss: {self.eta*spot_loss_val:.5f}, att_loss: {(1-self.eta)*att_loss_val:.5f}")
             if i > self.max_iter:
                 break
             toc = time.time()
-            # print(f"train time: {toc-tic}, forward time: {t1-tic}, loss time: {t2-t1}, spot loss time: {t3-t2}, step time: {toc-t3}")
+            if i % 100 == 0:
+                print(f"train time: {toc-tic}, forward time: {t1-tic}, loss time: {t2-t1}, spot loss time: {t3-t2}, step time: {toc-t3}")
         return train_loss, all_accs/len(self.train_dl.dataset)
 
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
@@ -797,12 +808,9 @@ class SpotsTrainer(Trainer):
                 if conf:
                     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
                     conf_y = torch.abs(y - y_pred)
-                att_loss_val = self.criterion(y_pred, y)
+                att_loss_val = self.criterion(y_pred, y.view(-1, self.num_classes))
                 if conf:
-                    att_loss_val += self.criterion(conf_pred, conf_y)
-                shapes_tgt = [(tgt_spots[i]['boxes'].shape, tgt_spots[i]['labels'].shape) for i in range(len(tgt_spots))]
-                shapes_src = (out_spots['pred_boxes'].shape, out_spots['pred_logits'].shape)
-                print(f"tgt shapes: {shapes_tgt}, src shapes: {shapes_src}")
+                    att_loss_val += self.criterion(conf_pred, conf_y.view(-1, self.num_classes))
                 spots_loss_dict = self.spots_loss(out_spots, tgt_spots)
                 weight_dict = self.spots_loss.weight_dict
                 spot_loss_val = sum(spots_loss_dict[k] * weight_dict[k] for k in spots_loss_dict.keys() if k in weight_dict)
@@ -814,7 +822,7 @@ class SpotsTrainer(Trainer):
                 diff = torch.abs(y_pred - y)
                 # val_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
                 att_acc = (diff < (y/10)).sum(0)
-                all_accs = all_accs + (att_acc + spots_acc)/2
+                all_accs = all_accs + att_acc
                 pbar.set_description(f"val_acc: {att_acc, spots_acc}, val_loss:  {loss.item()}")
         return val_loss, all_accs/len(self.val_dl.dataset)
     
@@ -1134,17 +1142,20 @@ class SiameseTrainer(Trainer):
         """
         self.model.train()
         train_loss = []
-        for i, (x1, x2) in enumerate(self.train_dl):
+        pbar = tqdm(self.train_dl)
+        for i, (x1, x2) in enumerate(pbar):
             # print(i)
             # print("x1: ", x1.shape, "x2: ", x2.shape)
             x1, x2 = x1.to(device), x2.to(device)
             out = self.model(x1, x2)
+            self.optimizer.zero_grad()
             loss = out['loss']
             loss.backward()
-            self.optim.step()
+            self.optimizer.step()
             train_loss.append(loss.item())  
             if i > self.max_iter:
-                break        
+                break   
+            pbar.set_description(f"train_loss:  {loss.item()}")
         return train_loss, 0
 
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
@@ -1350,10 +1361,10 @@ class MaskedSSLTrainer(Trainer):
             x_target = x.squeeze().masked_fill(mask, 0)
             # print(x_target.shape, out.shape ) 
             loss = self.criterion(out, x_target)
-            if self.logger is not None:
-                self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
+            # if self.logger is not None:
+            #     self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
             loss.backward()
-            self.optim.step()
+            self.optimizer.step()
             train_loss.append(loss.item())
             train_acc += self.mask_accuracy(out, x_target, mask).item()
         return train_loss, train_acc/len(self.train_dl.dataset)

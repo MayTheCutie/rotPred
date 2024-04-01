@@ -3,9 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 import torch.nn.init as init
+import math
 
 from .mhsa_pro import MHA_rotary, MHA_decoder
-from .cnn import ConvBlock
+from .cnn import ConvBlock, ConvBlockDecoder
 
 from typing import Optional,Tuple
       
@@ -14,7 +15,7 @@ class ResidualConnectionModule(nn.Module):
     Residual Connection Module.
     outputs = (module(inputs) x module_factor + inputs x input_factor)
     """
-    def __init__(self, module: nn.Module, args):
+    def __init__(self, module: nn.Module, dims, args):
         super(ResidualConnectionModule, self).__init__()
         self.module = module
         self.module_factor = 1
@@ -28,12 +29,12 @@ class PostNorm(nn.Module):
     Residual Connection Module.
     outputs = (module(inputs) x module_factor + inputs x input_factor)
     """
-    def __init__(self, module: nn.Module, args):
+    def __init__(self, module: nn.Module, dims, args):
         super(PostNorm, self).__init__()
         self.module = module
         input_factor = torch.FloatTensor(args.alpha) if getattr(args, 'alpha', None) else torch.tensor(1.)
         self.register_buffer('input_factor', input_factor)
-        self.norm = nn.LayerNorm(args.encoder_dim)
+        self.norm = nn.LayerNorm(dims)
 
     def forward(self, inputs: Tensor, **kwargs) -> Tensor:
         return self.norm(self.module(inputs, **kwargs) + (inputs * self.input_factor))
@@ -415,7 +416,7 @@ class ConformerBlock(nn.Module):
             'conformerconv': ConformerConvModule
         }
 
-        self.modlist = nn.ModuleList([norm_dict[args.norm](block_dict[block](args), args) for block in args.encoder]\
+        self.modlist = nn.ModuleList([norm_dict[args.norm](block_dict[block](args), args.encoder_dim, args) for block in args.encoder]\
             )
 
     def forward(self, x: Tensor, RoPE, key_padding_mask=None) -> Tensor:
@@ -464,11 +465,11 @@ class DecoderBlock(nn.Module):
             'mhsa': MultiHeadedSelfAttentionModule,
             'mhsa_pro': MHA_rotary,
             'mhsa_decoder': MHA_decoder,
-            'conv': ConvBlock,
+            'conv': ConvBlockDecoder,
             'conformerconv': ConformerConvModule
         }
 
-        self.modlist = nn.ModuleList([norm_dict[args.norm](block_dict[block](args), args) for block in args.decoder]\
+        self.modlist = nn.ModuleList([norm_dict[args.norm](block_dict[block](args),args.decoder_dim, args) for block in args.decoder]\
             )
 
     def forward(self, x: Tensor, memory:Tensor, RoPE, key_padding_mask=None) -> Tensor:

@@ -55,7 +55,12 @@ class Astroconformer(nn.Module):
 class AstroDecoder(nn.Module):
   def __init__(self, args) -> None:
     super(AstroDecoder, self).__init__()
-    self.head_size = args.encoder_dim // args.num_heads
+    self.extractor = nn.Sequential(nn.ConvTranspose1d(in_channels = args.encoder_dim,
+            kernel_size = args.stride, out_channels = args.decoder_dim, stride = args.stride, padding = 0, bias = True),
+                    nn.BatchNorm1d(args.encoder_dim),
+                    nn.SiLU(),
+    )
+    self.head_size = args.decoder_dim // args.num_heads
     self.rotary_ndims = int(self.head_size * 0.5)    
     self.pe = RotaryEmbedding(self.rotary_ndims)
     self.decoder = ConformerDecoder(args)

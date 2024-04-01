@@ -50,7 +50,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 37
+exp_num = 40
 
 log_path = '/data/logs/astroconf'
 
@@ -63,9 +63,9 @@ if not os.path.exists(f'{log_path}/exp{exp_num}'):
 
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
 # checkpoint_path = '/data/logs/astroconf/exp14'
-data_folder = "/data/butter/data_cos"
+data_folder = "/data/butter/data_sun_like"
 
-test_folder = "/data/butter/test_cos"
+test_folder = "/data/butter/test_sun_like"
 
 yaml_dir = '/data/lightPred/Astroconf/'
 
@@ -84,7 +84,7 @@ train_list, val_list = train_test_split(idx_list, test_size=0.1, random_state=12
 
 test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
-b_size = 64
+b_size = 32
 
 num_epochs = 1000
 
@@ -92,7 +92,9 @@ cad = 30
 
 DAY2MIN = 24*60
 
-dur = 360
+dur = 720
+
+freq_rate = 1/48
 
 # class_labels = ['Period', 'Decay Time', 'Cycle Length']
 class_labels = ['Inclination', 'Period']
@@ -221,11 +223,11 @@ if __name__ == '__main__':
     # test_dataset = ACFDataset(test_folder, test_idx_list, labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
    
     train_dataset = TimeSeriesDataset(data_folder, train_list, labels=class_labels, transforms=transform,
-    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur)
+    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, freq_rate=freq_rate, period_norm=False)
     val_dataset = TimeSeriesDataset(data_folder, val_list, labels=class_labels,  transforms=transform,
-     init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur)
+     init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, freq_rate=freq_rate, period_norm=False)
     test_dataset = TimeSeriesDataset(test_folder, test_idx_list, labels=class_labels, transforms=test_transform,
-    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur)
+    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, freq_rate=freq_rate, period_norm=False)
 
     # train_dataset = TimeSeriesDataset2(data_folder, train_list, labels=class_labels,
     #  t_samples=None, transforms=transform, spectrogram=False, prepare=False, p_norm=False)
@@ -262,9 +264,10 @@ if __name__ == '__main__':
 
     print("dataset length: ", len(train_dataset), len(val_dataset), len(test_dataset))
 
-    # for i in range(10):
-    #     idx = np.random.randint(0, len(train_dataset))
-    #     x,y,_,_ = train_dataset[idx]
+    for i in range(10):
+        idx = np.random.randint(0, len(train_dataset))
+        x,y,_,_ = train_dataset[idx]
+        print(x.shape, y.shape, y)
 
     # print("check weights...")
     # incs = torch.zeros(0)

@@ -38,7 +38,7 @@ print('device is ', DEVICE)
 
 if torch.cuda.is_available():
     print("gpu number: ", torch.cuda.current_device())
-exp_num = 52
+exp_num = 53
 print("gpu number: ", torch.cuda.current_device())
 
 
@@ -62,7 +62,7 @@ if (not torch.cuda.is_available()) or torch.cuda.current_device() == 0:
     #     os.makedirs(f'{log_path}/exp{exp_num}_koi')
 
 # chekpoint_path = '/data/logs/lstm_attn/exp52'
-chekpoint_path = f'{root_dir}/logs/astroconf/exp31'
+chekpoint_path = f'{root_dir}/logs/astroconf/exp40'
 data_folder =  f"{root_dir}/lightPred/data/Q4"
 root_data_folder =  f"{root_dir}/lightPred/data"
 table_path  =  f"{root_dir}/lightPred/tables/Table_1_Periodic.txt"
@@ -190,8 +190,8 @@ if __name__ == '__main__':
     # kepler_df = kepler_df.sample(frac=1)
     # kepler_df = kepler_df[kepler_df['number_of_quarters'] == len(Q)]
     num_qs = dur//90
-    # kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
-    kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3,17))
+    kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
+    # kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3,17))
     try:
         kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
     except TypeError:

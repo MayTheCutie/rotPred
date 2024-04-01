@@ -354,3 +354,17 @@ class KeplerNoiseAddition():
     
     def __repr__(self):
         return "KeplerNoiseAddition"
+
+class PeriodNorm():
+    def __init__(self, num_ps, orig_freq=1/48):
+        self.num_ps = num_ps
+        self.orig_freq = orig_freq
+    def __call__(self, x, mask=None, info=None, step=None):
+        p = info['period']
+        if isinstance(x, np.ndarray):
+            t, x = F_np.period_norm(x, p, self.num_ps, orig_freq=self.orig_freq)
+        else:
+            t, x = F_np.period_norm(x.cpu().detach().numpy(), p, self.num_ps, orig_freq=self.orig_freq)
+        return x, mask, info
+    def __repr__(self):
+        return f"PeriodNorm(num_ps={self.num_ps}, orig_freq={self.orig_freq})"

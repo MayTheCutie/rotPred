@@ -14,6 +14,8 @@ from lightPred.models import *
 from lightPred.train import *
 from lightPred.utils import *
 from lightPred.transforms import *
+from lightPred.Astroconf.Train.utils import init_train
+from lightPred.Astroconf.utils import Container, same_seeds
 
 
 from sklearn.model_selection import train_test_split
@@ -27,15 +29,19 @@ data_folder = "/data/lightPred/data"
 
 log_path = '/data/logs/simsiam'
 
+yaml_dir = '/data/lightPred/Astroconf/'
+
 exp_num = 13
 
 num_epochs = 400
 
-b_size = 200
+b_size = 16
 
-dur=180
+dur = 720
 
 cad = 30 
+
+num_qs = 8
 
 DAY2MIN = 24*60
 
@@ -51,14 +57,17 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 #     'dropout':0.3,
 #      'c_out':4,
 #      'ssl': True,}}
-net_params = {"backbone": { 'in_channels':1,
- 'dropout': 0.35,
- 'hidden_size': 64,
- 'num_layers': 5,
- 'seq_len': int(dur/cad*DAY2MIN), 
- "num_classes": 4,
-    'stride': 4,
-    'kernel_size': 4}}
+lstm_params = {
+        'dropout': 0.35,
+        'hidden_size': 64,
+        'image': False,
+        'in_channels': 1,
+        'kernel_size': 4,
+        'num_classes': 2,
+        'num_layers': 5,
+        'predict_size': 128,
+        'seq_len': int(dur/cad*DAY2MIN),
+        'stride': 4}
 
 optim_params = {"lr": 5e-5, 'weight_decay': 1e-4}
 
@@ -67,9 +76,14 @@ samples_list = [file_name for file_name in glob.glob(os.path.join(data_folder, '
 
 # samples_list = os.listdir(data_folder)
 # print("before split: ", samples_list[:10000])
-kepler_df = multi_quarter_kepler_df(data_folder, table_path=None, Qs=[4,5])
-kepler_df= kepler_df.sample(frac=1)
-kepler_df = kepler_df[kepler_df['number_of_quarters'] == 2]
+kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
+try:
+    kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
+except TypeError:
+    pass
+kepler_df['qs'] = kepler_df['data_file_path'].apply(extract_qs)  # Extract 'qs' numbers
+kepler_df['consecutive_qs'] = kepler_df['qs'].apply(consecutive_qs)  # Calculate length of longest consecutive sequence
+kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
 
 
 train_df, val_df = train_test_split(kepler_df, test_size=0.2, random_state=1234)
@@ -95,18 +109,26 @@ if __name__ == "__main__":
     torch.cuda.set_device(local_rank)
     print(f"rank: {rank}, local_rank: {local_rank}")
 
-    transform = Compose([moving_avg(kernel_size=49), RandomCrop(int(dur/cad*DAY2MIN))])
-    train_ds = TimeSsl(data_folder, path_list=None, df=train_df, ssl_tf=DataTransform_TD_bank, t_samples=None, transforms=transform, acf=True, return_raw=False)
-    val_ds = TimeSsl(data_folder, path_list=None, df=val_df, ssl_tf=DataTransform_TD_bank, t_samples=None, transforms=transform, acf=True, return_raw=False)
+    args = Container(**yaml.safe_load(open(f'{yaml_dir}/default_config.yaml', 'r')))
+    args.load_dict(yaml.safe_load(open(f'{yaml_dir}/model_config.yaml', 'r'))[args.model])
+    print("args : ", vars(args))
+
+    transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)), moving_avg(49)])
+    train_ds = TimeSsl(data_folder, path_list=None, df=train_df, acf=True, return_raw=True,
+     ssl_tf=DataTransform_TD_bank, t_samples=None, transforms=transform,)
+    val_ds = TimeSsl(data_folder, path_list=None, df=val_df, acf=True, return_raw=True,
+     ssl_tf=DataTransform_TD_bank, t_samples=None, transforms=transform)
 
 
-    train_sampler = torch.utils.data.distributed.DistributedSampler(train_ds, num_replicas=world_size, rank=rank)
+    train_sampler = torch.utils.data.distributed.DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True)
     train_dl = DataLoader(train_ds, batch_size=b_size, sampler=train_sampler, \
                                                 num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True)
-    val_dl = DataLoader(val_ds,  batch_size=b_size, \
+    val_dl = DataLoader(val_ds,  batch_size=b_size, shuffle=True, \
                                                 num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
                                     
-        
+    for i in range(4):
+        x,y = train_ds[i]
+        print(x.shape, y.shape)  
 
     # for i, (x1,x2) in enumerate(val_dl):
     #     print(x1.shape, x2.shape)
@@ -114,13 +136,16 @@ if __name__ == "__main__":
     #         break
 
     print("train size: ", len(train_ds), "val size: ", len(val_ds))
+    conf_model, _, scheduler, scaler = init_train(args, local_rank)
+    conf_model.pred_layer = nn.Identity()
+    backbone = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, **lstm_params)
+    backbone.pred_layer = nn.Identity()
 
-    backbone = LSTMFeatureExtractor(**net_params['backbone'])
 
     model = SimSiam(backbone)
     model = model.to(local_rank)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
-    # print(model)
+    print(model)
     print("number of params:", sum(p.numel() for p in model.parameters() if p.requires_grad))
 
 
@@ -134,12 +159,12 @@ if __name__ == "__main__":
 
     trainer = SiameseTrainer(model=model, optimizer=optimizer, criterion =None,
                         scheduler=scheduler, train_dataloader=train_dl, val_dataloader=val_dl,
-                            device=local_rank, optim_params=optim_params, net_params=net_params, exp_num=exp_num, log_path=log_path,
-                            exp_name="simsiam_lstm", max_iter=200)
+                            device=local_rank, optim_params=optim_params, net_params=args, exp_num=exp_num, log_path=log_path,
+                            exp_name="simsiam_astroconf", max_iter=2000)
     print("trainer: ", trainer)
     fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank, early_stopping=15)
 
-    output_filename = f'{log_path}/exp{exp_num}/sims_lstm.json'
+    output_filename = f'{log_path}/exp{exp_num}/sims_astroconf.json'
     with open(output_filename, "w") as f:
         json.dump(fit_res, f, indent=2)
 

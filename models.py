@@ -6,6 +6,7 @@ from torch.nn.utils import weight_norm
 from lightPred.utils import residual_by_period
 from lightPred.period_analysis import analyze_lc_torch, analyze_lc
 from torchvision.models.swin_transformer import SwinTransformer
+import time
 
 def D(p, z, version='simplified'): # negative cosine similarity
     if version == 'original':
@@ -22,7 +23,7 @@ def D(p, z, version='simplified'): # negative cosine similarity
 
 
 class projection_MLP(nn.Module):
-    def __init__(self, in_dim, hidden_dim=2048, out_dim=2048):
+    def __init__(self, in_dim, hidden_dim=128, out_dim=128):
         super().__init__()
         ''' page 3 baseline setting
         Projection MLP. The projection MLP (in f) has BN ap-
@@ -63,7 +64,7 @@ class projection_MLP(nn.Module):
 
 
 class prediction_MLP(nn.Module):
-    def __init__(self, in_dim=2048, hidden_dim=512, out_dim=2048): # bottleneck structure
+    def __init__(self, in_dim=128, hidden_dim=64, out_dim=128): # bottleneck structure
         super().__init__()
         ''' page 3 baseline setting
         Prediction MLP. The prediction MLP (h) has BN applied 
@@ -449,6 +450,7 @@ class LSTM_DUAL(LSTM_ATTN):
                 #     param.requires_grad = False
         num_lstm_features = self.feature_extractor.hidden_size*2
         self.num_features = num_lstm_features + encoder_dims
+        self.output_dim = self.num_features
         self.dual_model = dual_model
         self.pred_layer = nn.Sequential(
         nn.Linear(self.num_features, self.predict_size),
@@ -456,7 +458,9 @@ class LSTM_DUAL(LSTM_ATTN):
         nn.Dropout(p=0.3),
         nn.Linear(self.predict_size,self.num_classes),
     )
-    def forward(self, x, x_dual):
+    def forward(self, x, x_dual=None):
+        if x_dual is None:
+            x, x_dual = x[:,0,:], x[:,1,:]
         if len(x.shape) == 2:
             x = x.unsqueeze(1)
         x, h_f, c_f = self.feature_extractor(x, return_cell=True) # [B, L//stride, 2*hidden_size], [B, 2*nlayers, hidden_szie], [B, 2*nlayers, hidden_Size]
@@ -467,33 +471,37 @@ class LSTM_DUAL(LSTM_ATTN):
         out = self.pred_layer(features)
         return out
 
-class SpotNet(LSTM_ATTN):
-    def __init__(self, encoder, encoder_dims, decoder, num_queries, lstm_model=None,
+class SpotNet(torch.nn.Module):
+    def __init__(self, encoder, encoder_dims, decoder, num_queries, num_classes=2, lstm_model=None,
      freeze=False, dropout=0.3, **kwargs):
-        super(SpotNet, self).__init__(**kwargs)
+        super(SpotNet, self).__init__()
         # print("intializing dual model")
+        assert lstm_model is not None or encoder is not None
         if lstm_model is not None:
             self.feature_extractor = lstm_model.feature_extractor
             self.attention = lstm_model.attention
+            self.predict_size = lstm_model.predict_size
             if freeze:
                 for param in self.feature_extractor.parameters():
                     param.requires_grad = False
                 # for param in self.attention.parameters():
                 #     param.requires_grad = False
+        self.num_classes = num_classes
+        print("num clases in model: ", self.num_classes)
         num_lstm_features = self.feature_extractor.hidden_size*2
         self.num_features = num_lstm_features + encoder_dims
         self.encoder = encoder
         self.decoder = decoder
-        self.object_queries = nn.Embedding(num_queries, encoder_dims)
+        self.object_queries = nn.Embedding(num_queries, self.num_features)
         self.pred_layer = nn.Sequential(
         nn.Linear(self.num_features, self.predict_size),
         nn.GELU(),
         nn.Dropout(p=dropout),
         nn.Linear(self.predict_size,self.num_classes),
     )
-        self.spot_class_layer = nn.Linear(encoder_dims, 2)
+        self.spot_class_layer = nn.Linear(self.num_features, 2)
         self.spot_box_layer = nn.Sequential(
-        nn.Linear(encoder_dims, self.predict_size),
+        nn.Linear(self.num_features, self.predict_size),
         nn.GELU(),
         nn.Dropout(p=dropout),
         nn.Linear(self.predict_size, self.predict_size),
@@ -506,19 +514,26 @@ class SpotNet(LSTM_ATTN):
         bs, T = x.shape
         if len(x.shape) == 2:
             x_acf = x_acf.unsqueeze(1)
+        tic = time.time()
         x_f, h_f, c_f = self.feature_extractor(x_acf, return_cell=True) # [B, L//stride, 2*hidden_size], [B, 2*nlayers, hidden_szie], [B, 2*nlayers, hidden_Size]
         c_f = torch.cat([c_f[-1], c_f[-2]], dim=1) # [B, 2*hidden_szie]
         t_features = self.attention(c_f, x_f, x_f) # [B, 2*hidden_size]
+        t1 = time.time()
         d_features, memory = self.encoder(x) # [B, encoder_dims], [B, L//stride, encoder_dims]
+        t2 = time.time()
         features = torch.cat([t_features, d_features], dim=1) # [B, 2*hidden_size + encoder_dims]
+        x_f = nn.functional.adaptive_avg_pool1d(x_f.transpose(1,2), memory.shape[1]).transpose(1,2)
+        memory = torch.cat([memory, x_f], dim= -1) # [B, L//stride, 2*hidden_size + encoder_dims]
         query_embed = self.object_queries.weight.unsqueeze(0).repeat(bs,1, 1)
         tgt = torch.zeros_like(query_embed)
         decoder_output = self.decoder(memory, tgt)
+        t3 = time.time()
         predictions = self.pred_layer(features)
         class_logits = self.spot_class_layer(decoder_output)
         bbox_logits = self.spot_box_layer(decoder_output).sigmoid()
-        print("class_logits: ", class_logits.shape, "bbox_logits: ", bbox_logits.shape)
+        t4 = time.time()
         out_dict = {'pred_boxes': bbox_logits, 'pred_logits': class_logits}
+        # print("time: ", "lstm: ", t1-tic, "encoder: ",  t2-t1, "deocder: ", t3-t2,"linear layers: ", t4-t3)
         return out_dict, predictions
 
 class LSTM_SWIN(LSTM_ATTN):

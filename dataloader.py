@@ -25,7 +25,7 @@ DAY2MIN = 24*60
 min_p, max_p = 0,60
 min_lat, max_lat = 0, 80
 min_cycle, max_cycle = 1, 10
-min_i, max_i = 0, 90
+min_i, max_i = 0, np.pi/2
 min_tau, max_tau = 1,10 
 min_n, max_n = 0, 5000
 min_shear, max_shear = 0, 1
@@ -145,7 +145,8 @@ def mask_array(array, mask_percentage=0.15, mask_value=-1, vocab_size=1024):
 
 class TimeSsl(Dataset):
     def __init__(self, root_dir, path_list,
-                   df=None, t_samples=512, norm='std', ssl_tf=None, transforms=None, acf=False, return_raw=False):
+                   df=None, t_samples=512, norm='std', ssl_tf=None,
+                    transforms=None, acf=False, return_raw=False):
         # self.idx_list = idx_list
         self.path_list = path_list
         self.cur_len = None
@@ -216,17 +217,22 @@ class TimeSsl(Dataset):
         # if idx % 1000 == 0:
         #   print(idx)
         if self.df is not None:
-          x, meta = self.read_row(idx)
+          x, meta, qs = self.read_row(idx)
         else:
           x, meta =  self.read_data(idx).float()
           x /= x.max()
         if self.transforms is not None:
           x, _, info = self.transforms(x, mask=None, info=dict())
+        x = fill_nan_np(x, interpolate=True)
         if self.acf:
-          x = A(x, nlags=len(x))
+          xcf = A(x, nlags=len(x))
+          if self.return_raw:
+            x = np.vstack((xcf[None], x[None]))
+          else:
+            x = xcf[None]
         x = torch.tensor(x)
         x = torch.nan_to_num(x, torch.nanmean(x))
-        x = x.unsqueeze(0).unsqueeze(0)
+        x = x.unsqueeze(0)
         # print("before augmentation: ", x.shape)
         # x = self.x_samples[idx].unsqueeze(0).unsqueeze(0)
         if self.norm == 'std':
@@ -569,11 +575,10 @@ class TimeSeriesDataset(Dataset):
         spots_data[:, 0] -= init_day
         if not self.p_norm:
           spots_data = self.crop_spots(spots_data, info)
-        spots_data = spots_data[spots_data[:,1] >= np.pi/2] # taking only one hemisphere
         # normalize to [0,1]
-        spots_data[:, 1] -= np.pi/2
         spots_data[:, 1] /= np.pi/2
         spots_data[:, 2] /= 2*np.pi
+
         spots_arr = np.zeros((2, x.shape[-1]))
         spot_t = (spots_data[:, 0] / self.freq_rate).astype(np.int64)
         spots_arr[:, spot_t] = spots_data[:,1:3].T
@@ -587,7 +592,7 @@ class TimeSeriesDataset(Dataset):
   
   def create_data(self, x):
     if self.acf:
-      xcf = A(x, nlags=int(self.dur/self.freq_rate) - 1)
+      xcf = A(x, nlags=len(x)-1)
       if self.wavelet:
         power, phase, period = self.wavelet_from_np(x, period_samples=int(self.dur/self.freq_rate))
         gwps = power.sum(axis=-1)
@@ -632,10 +637,12 @@ class TimeSeriesDataset(Dataset):
       for i,label in enumerate(self.labels):
         if label == 'Inclination' and self.cos_inc:
           y[i] = np.cos(np.pi/2 - y[i])
+        elif label == 'Period' and self.p_norm:
+          y[i] = 1
         elif label in boundary_values_dict.keys():
           y[i] = (y[i] - boundary_values_dict[label][0])/(boundary_values_dict[label][1]-boundary_values_dict[label][0])
       if len(self.labels) == 1:
-        return y.squeeze(-1).float()
+        return y.float()
       return y.squeeze(0).squeeze(-1).float()
 
   def get_weight(self, y, counts):
@@ -708,8 +715,9 @@ class TimeSeriesDataset(Dataset):
   def __getitem__(self, idx):
       s = time.time()
       if not self.prepare:
-        info = {'idx': idx}
         sample_idx = remove_leading_zeros(self.idx_list[idx])
+        p = self.loaded_labels.iloc[sample_idx]['Period']
+        info = {'idx': idx, 'period': p}
         x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values
         t1 = time.time()
         x = x[int(self.init_frac*len(x)):,:]
@@ -717,7 +725,7 @@ class TimeSeriesDataset(Dataset):
           x = self.interpolate(x)
         t2 = time.time()
         if self.transforms is not None:
-          x, _, info = self.transforms(x[:,1], mask=None,  info=dict(), step=self.step)
+          x, _, info = self.transforms(x[:,1], mask=None,  info=info, step=self.step)
           # x = savgol(x, 49, 1, mode='mirror')
           info['idx'] = idx
         else:
@@ -726,7 +734,7 @@ class TimeSeriesDataset(Dataset):
         x = fill_nan_np(x, interpolate=True)
         t4 = time.time()
         x = self.create_data(x)
-        # print("x shape: ", x.shape)
+        x = x[:, :int(self.dur/self.freq_rate)]
         t5 = time.time()
         x = self.normalize(x)
         t6 = time.time()

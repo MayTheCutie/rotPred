@@ -65,13 +65,13 @@ if not os.path.exists(f'{log_path}/exp{exp_num}'):
 
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
 # checkpoint_path = '/data/logs/astroconf/exp14'
-data_folder = "/data/butter/data_cos"
+data_folder = "/data/butter/data_cos_old"
 
 test_folder = "/data/butter/test_cos"
 
 yaml_dir = '/data/lightPred/Astroconf/'
 
-Nlc = 5000
+Nlc = 50000
 
 test_Nlc = 5000
 
@@ -88,7 +88,7 @@ test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(te
 
 b_size = 32
 
-num_epochs = 10
+num_epochs = 1000
 
 cad = 30
 
@@ -97,7 +97,7 @@ DAY2MIN = 24*60
 dur = 360
 
 # class_labels = ['Period', 'Decay Time', 'Cycle Length']
-class_labels = ['Inclination', 'Period']
+class_labels = ['Inclination']
 
 if torch.cuda.current_device() == 0:
     if not os.path.exists(log_path):
@@ -117,7 +117,7 @@ if __name__ == '__main__':
     # "weight_decay": 3.411877716394279e-05}
     optim_params = {
     # "lr": 0.0096, "weight_decay": 0.0095
-    "lr": 5e-4
+    "lr": 1e-3, "weight_decay": 1e-5
     }
 
     lstm_params = {
@@ -126,7 +126,6 @@ if __name__ == '__main__':
         'image': False,
         'in_channels': 1,
         'kernel_size': 4,
-        'num_classes': len(class_labels)*2,
         'num_layers': 5,
         'predict_size': 128,
         'seq_len': int(dur/cad*DAY2MIN),
@@ -140,7 +139,7 @@ if __name__ == '__main__':
     # losses = ['labels', 'boxes', 'cardinality']
     weight_dict = {'loss_ce': 0.2,
      'loss_bbox': 1, 'loss_giou': 1}
-    eos = 1
+    eos = 0.1
     losses = ['labels', 'boxes', 'cardinality']
 
     num_queries = 300
@@ -165,6 +164,7 @@ if __name__ == '__main__':
 
     args = Container(**yaml.safe_load(open(f'{yaml_dir}/default_config.yaml', 'r')))
     args.load_dict(yaml.safe_load(open(f'{yaml_dir}/model_config.yaml', 'r'))[args.model])
+    args.decoder_dim = 2*lstm_params['hidden_size'] + args.encoder_dim
     print("args : ", vars(args))
 
     kep_transform = RandomCrop(int(dur/cad*DAY2MIN))
@@ -186,7 +186,7 @@ if __name__ == '__main__':
     init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, spots=True)
     val_dataset = TimeSeriesDataset(data_folder, val_list, labels=class_labels,  transforms=transform,
      init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, spots=True)
-    test_dataset = TimeSeriesDataset(test_folder, test_idx_list, labels=class_labels, transforms=test_transform,
+    test_dataset = TimeSeriesDataset(test_folder, test_idx_list, labels=class_labels,
     init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, spots=True)
 
     for i in range(10):
@@ -213,7 +213,7 @@ if __name__ == '__main__':
     conf_enc.pred_layer = nn.Identity()
     conf_dec = AstroDecoder(args)
     lstm_model = LSTM_ATTN(**lstm_params)
-    model = SpotNet(conf_enc, args.encoder_dim, conf_dec, num_queries, lstm_model)
+    model = SpotNet(conf_enc, args.encoder_dim, conf_dec, num_queries, lstm_model=lstm_model, num_classes=len(class_labels)*2)
 
     model = model.to(local_rank)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
@@ -242,8 +242,8 @@ if __name__ == '__main__':
                         criterion=loss_fn, num_classes=len(class_labels),
                        scheduler=None, train_dataloader=train_dataloader, optim_params=optim_params,
                        val_dataloader=val_dataloader, device=local_rank,
-                           exp_num=exp_num, log_path=log_path, eta=1,
-                        exp_name="spotNet")
+                           exp_num=exp_num, log_path=log_path, eta=0.2,
+                        exp_name="spotNet", max_iter=300)
     fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
                            early_stopping=40, only_p=False, best='loss', conf=True) 
     output_filename = f'{log_path}/exp{exp_num}/astroconf.json'

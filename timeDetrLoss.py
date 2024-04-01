@@ -5,6 +5,7 @@ from torch import Tensor
 from scipy.optimize import linear_sum_assignment
 from torchvision.ops.boxes import box_area
 import torch.distributed as dist
+import time
 
 
 def is_dist_avail_and_initialized():
@@ -206,9 +207,10 @@ class SetCriterion(nn.Module):
         src_logits = outputs['pred_logits']
         idx = self._get_src_permutation_idx(indices)
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
-        target_classes = torch.full(src_logits.shape[:2], 0,
+        target_classes = torch.full(src_logits.shape[:2], self.num_classes,
                                     dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
+        # print(target_classes.min(), target_classes.max(), src_logits[0].argmax(-1))
         loss_ce = F.cross_entropy(src_logits.transpose(1,2), target_classes, self.empty_weight)
         losses = {'loss_ce': loss_ce}
 
@@ -297,11 +299,12 @@ class SetCriterion(nn.Module):
              targets: list of dicts, such that len(targets) == batch_size.
                       The expected keys in each dict depends on the losses applied, see each loss' doc
         """
+        tic = time.time()
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
 
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs_without_aux, targets)
-
+        t1 = time.time()
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = sum(len(t["labels"]) for t in targets)
         num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
@@ -313,7 +316,7 @@ class SetCriterion(nn.Module):
         losses = {}
         for loss in self.losses:
             losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes))
-
+        t2 = time.time()
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
@@ -329,7 +332,8 @@ class SetCriterion(nn.Module):
                     l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)
                     l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
-
+        t3 = time.time()
+        # print(f"Time for matching: {t1-tic}, Time for loss computation: {t2-t1}, Time for aux loss computation: {t3-t2}, total time: {t3-tic}")
         return losses
 
 class TimeSeriesDetrLoss(nn.Module):
