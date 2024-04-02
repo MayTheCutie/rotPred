@@ -39,7 +39,7 @@ print('device is ', DEVICE)
 if DEVICE == 'cuda':
     print("gpu number: ", torch.cuda.current_device())
 
-local = True
+local = False
 
 root_dir = '.' if local else '/data/lightPred'
 
@@ -48,13 +48,13 @@ exp_num = 1
 log_path = '../logs/masked_ssl' if local else '/data/logs/masked_ssl'
 # print(os.listdir('lightPred/Astroconf'))
 yaml_dir = f'{root_dir}/Astroconf'
-# if DEVICE == 'cpu' or torch.cuda.current_device() == 0:
-#     if not os.path.exists(log_path):
-#         os.makedirs(log_path)
-#     if not os.path.exists(f'{log_path}/exp{exp_num}'):
-#         os.makedirs(f'{log_path}/exp{exp_num}')
-#     if not os.path.exists(f'{log_path}/exp{exp_num}_koi'):
-#         os.makedirs(f'{log_path}/exp{exp_num}_koi')
+if DEVICE.type == 'cpu' or torch.cuda.current_device() == 0:
+    if not os.path.exists(log_path):
+        os.makedirs(log_path)
+    if not os.path.exists(f'{log_path}/exp{exp_num}'):
+        os.makedirs(f'{log_path}/exp{exp_num}')
+    if not os.path.exists(f'{log_path}/exp{exp_num}_koi'):
+        os.makedirs(f'{log_path}/exp{exp_num}_koi')
 
 # chekpoint_path = '/data/logs/simsiam/exp8'
 # chekpoint_path = '/data/logs/lstm_attn/exp29'
@@ -74,7 +74,7 @@ all_samples_list = [file_name for file_name in glob.glob(os.path.join(data_folde
 # print("reduced df: ", len(kepler_df))
 
 
-b_size = 4
+b_size = 32
 
 num_epochs = 200
 
@@ -144,8 +144,8 @@ if __name__ == '__main__':
     print("args : ", vars(args))
 
 
-    # kepler_df = pd.read_csv(f'{root_dir}/tables/all_kepler_samples.csv').iloc[:1000]
-    kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3, 17))
+    kepler_df = pd.read_csv(f'{root_dir}/tables/all_kepler_samples.csv').iloc
+    # kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3, 17))
     try:
         kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
     except TypeError:
@@ -231,7 +231,7 @@ if __name__ == '__main__':
     trainer = MaskedSSLTrainer(model=model, optimizer=optimizer, criterion=loss_fn,
                         train_dataloader=train_dataloader, val_dataloader=val_dataloader,
                         device=local_rank, optim_params=optim_params, net_params=lstm_params, exp_num=exp_num, log_path=log_path,
-                        exp_name="conformer_ssl")
+                        exp_name="conformer_ssl", max_iter=1000)
     
 
     fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank, early_stopping=15, only_p=False, best='loss', conf=True)

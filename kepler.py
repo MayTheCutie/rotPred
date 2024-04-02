@@ -42,7 +42,7 @@ exp_num = 53
 print("gpu number: ", torch.cuda.current_device())
 
 
-local = True
+local = False
 
 root_dir = '/data' if not local else '../'
 
@@ -190,7 +190,7 @@ if __name__ == '__main__':
     # kepler_df = kepler_df.sample(frac=1)
     # kepler_df = kepler_df[kepler_df['number_of_quarters'] == len(Q)]
     num_qs = dur//90
-    kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
+    kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv').loc[:1000]
     # kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3,17))
     try:
         kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
@@ -204,10 +204,12 @@ if __name__ == '__main__':
         tic = time.time()
         print("i: ", q)
         step = int(q*int(90/cad*DAY2MIN))
-        transform = Compose([Moving(49), Detrend(), RandomCrop(int(dur / cad * DAY2MIN))])
-        test_transform = Compose([Moving(49), Detrend(), Slice(0 + step, int(dur / cad * DAY2MIN) + step)])
+        transform = Compose([MovingAvg(49), Detrend(), RandomCrop(int(dur / cad * DAY2MIN)), ACF()])
+        test_transform = Compose([MovingAvg(49), Detrend(), Slice(0 + step, int(dur / cad * DAY2MIN) + step),
+                                  ACF()])
 
-        full_dataset = KeplerDataset(data_folder, path_list=None, df=kepler_df, t_samples=int(dur/cad*DAY2MIN),
+        full_dataset = KeplerDataset(data_folder, path_list=None,
+                                      df=kepler_df, t_samples=int(dur/cad*DAY2MIN), skip_idx=q, num_qs=num_qs,
             transforms=test_transform, acf=True, return_raw=True)
         sampler = torch.utils.data.distributed.DistributedSampler(full_dataset, num_replicas=world_size, rank=rank)
 

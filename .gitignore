@@ -44,6 +44,7 @@ samples/*
 *.txt
 *.csv
 Astroconformer/*
+deprecated/*
 ```
 
 

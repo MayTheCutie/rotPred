@@ -531,7 +531,8 @@ class KeplerTrainer(Trainer):
         tot_qs = []
 
         print("len test dataset: ", len(test_dataloader.dataset))
-        for i,(x, y,_,info) in enumerate(test_dataloader):
+        pbar = tqdm(test_dataloader)
+        for i,(x, y,_,info) in enumerate(pbar):
             if i > self.max_iter:
                 break
             # print("batch: ", i, "x: ", x.shape, "y: ", y.shape, flush=True)
@@ -559,7 +560,7 @@ class KeplerTrainer(Trainer):
                 dist.all_gather(all_preds, y_pred_contiguous)
                 y_pred = torch.cat(all_preds, dim=0)
             preds = np.concatenate((preds, y_pred.squeeze().cpu().numpy()))
-            print("y_pred: ", y_pred.shape, "tot pred: ", preds.shape)
+            # print("y_pred: ", y_pred.shape, "tot pred: ", preds.shape)
             if isinstance(y, dict):
                 y_val = y['Period'] if only_p else y['i']
             else:
@@ -1356,6 +1357,8 @@ class MaskedSSLTrainer(Trainer):
             train_loss.append(loss.item())
             train_acc += self.mask_accuracy(out, y, mask).item()
             pbar.set_description(f"train_loss:  {loss.item()}")
+            if i > self.max_iter:
+                break
         return train_loss, train_acc/len(self.train_dl.dataset)
 
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):

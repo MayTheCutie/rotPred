@@ -24,11 +24,11 @@ class Compose:
         self.transforms = transforms
 
     def __call__(self, x, mask=None, info=None, step=None):
+        if len(x.shape) == 1:
+                x = x[:, np.newaxis]
         out = x
         for t in self.transforms:
-            # print("t: ", t, 'type: ', type(out))
             out, mask, info = t(out, mask=mask, info=info, step=step)
-            # print("after transform: ", out.shape)
         return out, mask, info
 
     def __repr__(self):
@@ -122,10 +122,6 @@ class AddGaussianNoise(object):
         assert not (exclude_mask and mask_only)
 
     def __call__(self, x, mask=None, info=None, step=None):
-        # print('x shape: ', x.shape)
-        # plt.plot(x[:,0])
-        # plt.savefig("/data/tests/x.png")
-        # plt.clf()
         exclude_mask = None
         if mask is not None:
             if self.exclude_mask:
@@ -241,6 +237,8 @@ class Slice():
         self.start = start
         self.end = end
     def __call__(self, x, mask=None, info=None, step=None):
+        if len(x.shape) == 1:
+                x = x[:, np.newaxis]
         sliced_mask = mask[self.start:self.end] if mask is not None else None
         if len(x) >= self.end:
             info['slice'] = (self.start, self.end)
@@ -279,23 +277,19 @@ class MovingAvg():
         info['moving_avg'] = self.kernel_size
         if isinstance(x, np.ndarray):
             x = savgol(x, self.kernel_size, 1, mode='mirror', axis=0)
-            # x = F_np.moving_avg(x, self.kernel_size)
-            # return x, mask, info
-            x = torch.from_numpy(x)
-        if len(x.shape) == 2:
-            flux = x[:,1].unsqueeze(-1).unsqueeze(0)
+            return x,mask, info
         else:
             flux = x.unsqueeze(-1).unsqueeze(0)
-        front = flux[:, 0:1, :].repeat(1,(self.kernel_size - 1) // 2, 1)
-        end = flux[:, -1:, :].repeat(1, (self.kernel_size - 1) // 2, 1)
-        flux = torch.cat([front, flux, end], dim=1)
-        flux = self.avg(flux.permute(0, 2, 1))
-        flux = flux.permute(0, 2, 1)
-        if len(x.shape) == 2:
-            x[:,1] = flux.squeeze().float()
-        else:
-            x = flux.squeeze()
-        return x.numpy(), mask, info
+            front = flux[:, 0:1, :].repeat(1,(self.kernel_size - 1) // 2, 1)
+            end = flux[:, -1:, :].repeat(1, (self.kernel_size - 1) // 2, 1)
+            flux = torch.cat([front, flux, end], dim=1)
+            flux = self.avg(flux.permute(0, 2, 1))
+            flux = flux.permute(0, 2, 1)
+            if len(x.shape) == 2:
+                x[:,1] = flux.squeeze().float()
+            else:
+                x = flux.squeeze()
+            return x, mask, info
     def __repr__ (self):
         return f"moving_avg(kernel_size={self.kernel_size})"
 
@@ -404,7 +398,6 @@ class Normalize():
     def __call__(self, x, mask=None, info=None, step=None):
         info['norm'] = self.norm
         params = None
-        # print(info)
         if isinstance(x, np.ndarray):
             if 'norm_params' in info:
                 params = info['norm_params']
