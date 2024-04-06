@@ -161,6 +161,7 @@ class TimeSsl(Dataset):
         self.acf = acf
         self.return_raw = return_raw
         self.length = len(self.df) if self.df is not None else len(self.path_list)
+        self.num_bad_samples = 0
       
     def __len__(self):
         return self.length
@@ -197,7 +198,7 @@ class TimeSsl(Dataset):
 
                 x /= x.max()
                 x = fill_nan_np(np.array(x), interpolate=True)
-                if i == q_sequence_idx[0]:
+                if i == q_sequence_idx[0] + self.skip_idx:
                   x_tot = x.copy()
                 else:
                   border_val = np.mean(x) - np.mean(x_tot)
@@ -206,14 +207,9 @@ class TimeSsl(Dataset):
                 if i == self.num_qs:
                   break
               effective_qs = row['qs'][q_sequence_idx[0]: q_sequence_idx[1]]
-              # effective_qs = effective_qs.strip('[]').split(',')
-              # effective_qs = [int(i) for i in effective_qs]
-              # print("effective_qs: ",(effective_qs))
-              # meta['qs'] = effective_qs
-              # x = torch.tensor(x_tot)
               self.cur_len = len(x)
           else:
-              print("no qs sequence found")
+              self.num_bad_samples += 1
               effective_qs = []
               x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
           # meta['qs'] = row['qs']
@@ -227,46 +223,30 @@ class TimeSsl(Dataset):
         # if idx % 1000 == 0:
         #   print(idx)
         if self.df is not None:
-          x, meta, qs = self.read_row(idx, self.skip_idx)
+          x, meta, qs = self.read_row(idx)
         else:
           x, meta =  self.read_data(idx).float()
           x /= x.max()
+        info = {'idx': idx, 'qs': qs}
         if self.transforms is not None:
-          x, _, info = self.transforms(x, mask=None, info=dict())
-          if self.seq_len > x.shape[-1]:
-            x = np.pad(x, (0, self.seq_len - x.shape[-1]), "constant", constant_values=0)
+          x, mask, info = self.transforms(x, mask=None, info=info)
+          if self.seq_len > x.shape[0]:
+            x = np.pad(x, ((0, self.seq_len - x.shape[-1]), (0,0)), "constant", constant_values=0)
+            if mask is not None:
+              mask = np.pad(mask, ((0, self.seq_len - mask.shape[-1]), (0,0)), "constant", constant_values=0)
         x = fill_nan_np(x, interpolate=True)
-        if self.acf:
-          xcf = A(x, nlags=len(x))
-          if self.return_raw:
-            x = np.vstack((xcf[None], x[None]))
-          else:
-            x = xcf[None]
-        x = torch.tensor(x)
-        x = torch.nan_to_num(x, torch.nanmean(x))
-        x = x.unsqueeze(0)
-        # print("before augmentation: ", x.shape)
-        # x = self.x_samples[idx].unsqueeze(0).unsqueeze(0)
-        if self.norm == 'std':
-          x = (x - x.mean())/(x.std()+1e-8)
-        elif self.norm == 'median':
-          x /= x.median()
-        elif self.norm == 'minmax':
-          mini = x.min(dim=-1).values.view(-1,1).float()
-          maxi = x.max(dim=-1).values.view(-1,1).float()
-          x = (x-mini)/(maxi - mini)
+        x = torch.tensor(x.T[:, :self.seq_len]).unsqueeze(0)
+        if mask is not None:
+          mask = torch.tensor(mask.T[:, :self.seq_len]).unsqueeze(0)
         if self.ssl_tf is not None:
-          x1 = self.ssl_tf(copy.deepcopy(x))
-          x2 = self.ssl_tf(copy.deepcopy(x))
+          x1 = self.ssl_tf(copy.deepcopy(x.transpose(1,2))).transpose(1,2).squeeze(0)
+          x2 = self.ssl_tf(copy.deepcopy(x.transpose(1,2))).transpose(1,2).squeeze(0)
           x1 = (x1 - x1.mean())/(x1.std()+1e-8)
           x2 = (x2 - x2.mean())/(x2.std()+1e-8)
-          return x1.squeeze(0).float(), x2.squeeze(0).float()
+          return x1.float(), x2.float()
         else:
           return x, torch.zeros((1,self.seq_len))
         
-        
-
-
 class KeplerDataset(TimeSsl):
   def __init__(self, root_dir, path_list, df=None, mask_prob=0, mask_val=-1, np=False,
                keep_ratio=0.8, random_ratio=0.2, uniform_bound=2, target_transforms=None, **kwargs):
@@ -326,23 +306,23 @@ class KeplerDataset(TimeSsl):
       qs = [] # to be implemented
     else:
       x, meta = self.read_data(idx).float()
-      # x /= x.max()
+      x /= x.max()
       qs = [] # to be implemented
-    info = dict()
+    info = {'idx': idx}
     info['qs'] = qs
-    # x /= x.max()
+    x /= x.max()
     target = x.copy()
-    if np.all(x == 0):
-        x = torch.zeros((1,len(x)))
-        return x,x,x.bool(), info
+    # if np.all(x == 0):
+    #     x = torch.zeros((1,len(x)))
+    #     return x,x,x.bool(), info
     toc1 = time.time()
     # print("number of differnt values (in dataset): ", len(np.where((x - target)!=0)[0]))
     if self.transforms is not None:
           x, mask, info = self.transforms(x, mask=None, info=info)
           if self.seq_len > x.shape[0]:
-            # print("padding")
             x = np.pad(x, ((0, self.seq_len - x.shape[-1]), (0,0)), "constant", constant_values=0)
-            mask = np.pad(mask, ((0, self.seq_len - mask.shape[-1]), (0,0)), "constant", constant_values=0)
+            if mask is not None:
+              mask = np.pad(mask, ((0, self.seq_len - mask.shape[-1]), (0,0)), "constant", constant_values=0)
     if self.target_transforms is not None:
             target, _, _ = self.target_transforms(target, mask=None, info=info)
             if self.seq_len > target.shape[0]:
@@ -420,7 +400,6 @@ class TimeSeriesDataset(Dataset):
       self.lc_path = os.path.join(root_dir, lc_dir)
       self.spots_path = os.path.join(root_dir, "spots")
       self.loaded_labels = pd.read_csv(self.targets_path)
-      self.seq_len = t_samples
       self.norm=norm
       self.num_classes = len(labels)
       self.transforms = transforms
@@ -434,6 +413,9 @@ class TimeSeriesDataset(Dataset):
       self.freq_rate = freq_rate
       self.init_frac = init_frac
       self.dur = dur 
+      self.seq_len = t_samples
+      if self.seq_len is None:
+         self.seq_len = int(self.dur/self.freq_rate)
       self.cos_inc = cos_inc
       self.kep_noise = kep_noise
       self.maxstds = 0.159
@@ -641,27 +623,18 @@ class TimeSeriesDataset(Dataset):
         x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values
         t1 = time.time()
         x = x[int(self.init_frac*len(x)):,:]
-        if self.seq_len:
-          x = self.interpolate(x)
+        x[:,1] = fill_nan_np(x[:,1], interpolate=True)
         t2 = time.time()
         if self.transforms is not None:
           x, _, info = self.transforms(x[:,1], mask=None,  info=info, step=self.step)
-          # x = savgol(x, 49, 1, mode='mirror')
+          if self.seq_len > x.shape[0]:
+            x = np.pad(x, ((0, self.seq_len - x.shape[-1]), (0,0)), "constant", constant_values=0)
           info['idx'] = idx
         else:
           x = x[:,1]
-        t3 = time.time()
-        x = fill_nan_np(x, interpolate=True)
-        t4 = time.time()
-        x = self.create_data(x)
-        x = x[:, :int(self.dur/self.freq_rate)]
-        t5 = time.time()
-        x = self.normalize(x)
-        t6 = time.time()
+        x = torch.tensor(x.T[:, :int(self.dur/self.freq_rate)])
         x = x.nan_to_num(0)
-        # t4 = time.time()
         y = self.get_labels(sample_idx)
-        t7 = time.time()
         if self.spots:
           if len(x.shape) == 1:
             x = x.unsqueeze(0)
@@ -679,6 +652,8 @@ class TimeSeriesDataset(Dataset):
         # t6 = time.time()
         return x_spec.unsqueeze(0), y, x.float(), info
       end = time.time()
+      if torch.isnan(x).sum():
+        print("nans! in idx: ", idx)
       # print("times: ", t1-s, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5,t7-t6, t8-t7,  "tot time: ", end-s)
       return x.float(), y, torch.ones_like(x), info
 

@@ -351,9 +351,9 @@ class KeplerNoiseAddition():
             idx = np.random.randint(0, len(samples_list))
             x_noise,_,noise_info = self.transforms(np.load(f"{self.noise_path}/{samples_list[idx]}"), info=dict())
             info['noise_KID'] = samples_list[idx].split('.')[0]
-        if len(x.shape) == 1:
-            x = x + x_noise.squeeze()
-        else:
+        if len(x.shape) == 1 or x.shape[1] == 1:
+            x = x + x_noise.reshape(-1,1)
+        else: # in case of multivariate time series the last channel is the flux
             x[:,1] = x[:,1] + x_noise.squeeze()
         return x, mask, info
     

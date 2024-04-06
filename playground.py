@@ -40,6 +40,7 @@ from lightPred.transforms import *
 from lightPred.period_analysis import analyze_lc, analyze_lc_kepler
 from lightPred.timeDetr import TimeSeriesDetrModel
 from lightPred.timeDetrLoss import TimeSeriesDetrLoss, SetCriterion, HungarianMatcher
+from lightPred.analyze_results import read_csv_folder
 
 import sys
 from butterpy import Surface
@@ -81,6 +82,107 @@ kepler_data_folder = "/data/lightPred/data"
 idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
+
+
+def test_peak_height_ratio(data_folder, num_samples):
+    lc_path = os.path.join(data_folder, 'simulations')
+    csv_path = os.path.join(data_folder, 'simulation_properties.csv')
+    labels_df = pd.read_csv(csv_path)
+    idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc)) + 1) for idx in range(test_Nlc)]
+    ratios = []
+    ps = []
+    incs = []
+    max_lats = []
+    for i, idx_s in enumerate(idx_list[:num_samples]):
+        clean_idx = remove_leading_zeros(idx_s)
+        row = labels_df.iloc[clean_idx]
+        p, inc = row['Period'], row['Inclination']*180/np.pi
+        max_lats.append(row['Spot Max'])
+        x = pd.read_parquet(os.path.join(lc_path, f"lc_{idx_s}.pqt")).values
+        p , lags, xcf, peaks = analyze_lc_kepler(x[:,1], prom=0.01)
+        if len(peaks) > 2:
+            peak_height_ratio = xcf[peaks[0]] / xcf[peaks[1]]
+        else:
+            peak_height_ratio = 0
+        if i % 100 == 0:
+            plt.plot(lags, xcf)
+            plt.plot(lags[peaks], xcf[peaks], 'o')
+            plt.title(f'peak_height_ratio: {peak_height_ratio:.2f}, p: {p:.2f}, i: {inc:.2f}')
+            plt.savefig(f'/data/tests/peaks_{i%100}.png')
+            plt.close()
+            print(peak_height_ratio, p, inc)
+        ratios.append(peak_height_ratio)
+        ps.append(p)
+        incs.append(inc)
+    plt.hist(ratios, 100)
+    plt.xlabel('peak height ratio')
+    plt.ylabel('count')
+    plt.savefig('/data/tests/peak_height_ratio_hist.png')
+    plt.close()
+    plt.scatter(ps, np.log(ratios))
+    plt.xlabel('period')
+    plt.ylabel('peak height ratio')
+    plt.savefig('/data/tests/peak_height_ratio_vs_period.png')
+    plt.close()
+    plt.scatter(incs, np.log(ratios))
+    plt.xlabel('inclination')
+    plt.ylabel('peak height ratio')
+    plt.savefig('/data/tests/peak_height_ratio_vs_inclination.png')
+    plt.close()
+    plt.scatter(max_lats, np.log(ratios))
+    plt.xlabel('max latitude')
+    plt.ylabel('peak height ratio')
+    plt.savefig('/data/tests/peak_height_ratio_vs_max_lat.png')
+    plt.close()
+
+    
+
+def sun_like_analysis():
+    T_sun = 5777
+    dur = 720
+    kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
+    try:
+        kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
+    except TypeError:
+        pass
+    kepler_df['qs'] = kepler_df['data_file_path'].apply(extract_qs)  # Extract 'qs' numbers
+    kepler_df['consecutive_qs'] = kepler_df['qs'].apply(consecutive_qs)  # Calculate length of longest consecutive sequence
+    kepler_df = kepler_df[kepler_df['consecutive_qs'] >= 8]
+    results_df = read_csv_folder('/data/logs/kepler/exp52', filter_thresh=6)
+    merged_df = pd.merge(kepler_df, results_df, on='KID', how='inner')
+    print(len(merged_df))
+    print(merged_df.columns)
+    merged_df['T_sun'] = merged_df['Teff']/T_sun
+    df_sun_like_M = merged_df[(merged_df['R'] > 0.9) & (merged_df['R'] < 1.1) & (merged_df['Teff'] > T_sun - 100)
+     & (merged_df['Teff'] < T_sun + 100)]
+    print(len(df_sun_like_M))
+    transform = Compose([RandomCrop(int(dur / cad * DAY2MIN))])
+
+    ds = KeplerDataset(data_folder, path_list=None,  df=df_sun_like_M, t_samples=int(dur/cad*DAY2MIN),\
+                             skip_idx=0, num_qs=8,  transforms=transform)
+
+    for i, (x,y,mask,info) in enumerate(ds):
+        print(i)
+        df_row = df_sun_like_M.iloc[info['idx']]
+        predicted_p = df_row['predicted period']
+        x = savgol(x, predicted_p*48 , 1, mode='mirror', axis=0)
+        other_p, lags, xcf = analyze_lc_kepler(x.squeeze())
+        print('x shape', x.shape, 'xcf shape', xcf.shape, "number of nans: ",
+         np.sum(np.isnan(x.numpy())), np.sum(np.isnan(xcf)))
+        if i % 1000 == 0:
+            fig , axis = plt.subplots(1,2)
+            axis[0].plot(x)
+            axis[1].plot(lags, xcf)
+            plt.title(f"predicted period: {predicted_p:.2f}, other periods: {other_p:.2f}")
+            plt.savefig(f'/data/tests/sun_like_{i}.png')
+            plt.close()
+        if i >= 100:
+            break
+
+        
+
+
+
 
 
 def create_period_normalized_samples(data_folder, num_samples, num_ps=20):
@@ -1560,8 +1662,10 @@ if __name__ == "__main__":
     # read_spots_and_lightcurve('00010', '/data/butter/data2')
     # test_spots_dataset()
     # show_samples(48000)
-    create_period_normalized_samples('/data/butter/data_cos_old', 50000, num_ps=20)
-    create_period_normalized_samples('/data/butter/data_sun_like', 50000, num_ps=20)
+    # create_period_normalized_samples('/data/butter/data_cos_old', 50000, num_ps=20)
+    # create_period_normalized_samples('/data/butter/data_sun_like', 50000, num_ps=20)
+    # sun_like_analysis()
+    test_peak_height_ratio('/data/butter/test_cos_old', 1000,)
 
     # test_timeDetr()
 

@@ -381,17 +381,8 @@ def add_noise(lc, seed=None):
   return lc
 
 def find_period(data, lags, prom=None, method='first', name=''):
-  data_filtered = gaussian_filter1d(data, 7.5)
 
-  peaks, _ = find_peaks(data_filtered, distance=5, prominence=prom)
-#   plt.plot(lags, data_filtered)
-#   plt.plot(lags[peaks], data_filtered[peaks], 'o')
-#   plt.savefig(f'/data/tests/peaks_{sample_num}.png')
-#   plt.clf()
-
-#   print(f'number of peaks in {name} : {len(peaks)}')
-  # plt.plot(lags, data)
-  # plt.show()
+  peaks, _ = find_peaks(data, distance=5, prominence=prom)
 
   if len(peaks):
     i = 0
@@ -406,8 +397,8 @@ def find_period(data, lags, prom=None, method='first', name=''):
     elif method == 'max':
       while i < len(peaks):
         # print(i, data_filtered[peaks[i]])
-        if data_filtered[peaks[i]] > max_peak:
-          max_peak = data_filtered[peaks[i]]
+        if data[peaks[i]] > max_peak:
+          max_peak = data[peaks[i]]
           max_idx = i
         i += 1
       p = lags[peaks[max_idx]]
@@ -432,30 +423,33 @@ def find_period(data, lags, prom=None, method='first', name=''):
         #   p= intercept
         # else:
         #   p = first_peaks[0]
+        
       else:
         print("not enough peaks consider lower threshold")
         slope, intercept = 0,0
         p = first_peaks[0]
-    return p 
-  return 0
+    return p, peaks
+  return 0, peaks
 
 def analyze_lc(lc, day_cadence=0.020832):
     try:
         fits_result, process_result = ss.process_LightCurve(lc, bs=day_cadence*3600*24)
         acf_s, acf_lags_s = fits_result['acf'], fits_result['acf_lags']
         acf_s  = acf_s/np.median(acf_s)
-        acf_period = find_period(acf_s, acf_lags_s, prom=0.001, name='ACF', method='slope')
-        return acf_period
+        acf_period, peaks, data = find_period(acf_s, acf_lags_s, prom=0.001, name='ACF', method='slope')
+        return acf_period, peaks, data
     except Exception as e:
         print(e)
-        return np.inf
+        return np.inf, None, None
 
-def analyze_lc_kepler(lc, sample_num, day_cadence=0.020832):
+def analyze_lc_kepler(lc, day_cadence=1/48, prom=0.12):
     xcf = A(lc, nlags=len(lc))
     xcf = xcf - np.median(xcf)
+    xcf = gaussian_filter1d(xcf, 7.5)
+
     xcf_lags = np.arange(0,len(xcf)*day_cadence, day_cadence)
-    xcf_period = find_period(xcf, xcf_lags, prom=0.12, name='XCF', method='slope')
-    return np.abs(xcf_period), xcf_lags, xcf
+    xcf_period, peaks = find_period(xcf, xcf_lags, prom=prom, name='XCF', method='slope')
+    return np.abs(xcf_period), xcf_lags, xcf, peaks
 
 
 def analyze_lc_torch(lc, acf=False):

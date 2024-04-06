@@ -63,9 +63,9 @@ if not os.path.exists(f'{log_path}/exp{exp_num}'):
 
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
 # checkpoint_path = '/data/logs/astroconf/exp14'
-data_folder = "/data/butter/data_sun_like"
+data_folder = "/data/butter/data_cos_old"
 
-test_folder = "/data/butter/test_sun_like"
+test_folder = "/data/butter/test_cos_old"
 
 yaml_dir = '/data/lightPred/Astroconf/'
 
@@ -187,13 +187,13 @@ if __name__ == '__main__':
                          #   transforms=kep_transform, min_ratio=0.02, max_ratio=0.05),
                          KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),
-                         MovingAvg(49), Detrend()])
+                         MovingAvg(49), Detrend(), ACF(), Normalize('median')])
     test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
                               # KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                               # transforms=kep_transform,  min_ratio=0.02, max_ratio=0.05),
                               KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),
-                              MovingAvg(49), Detrend()])
+                              MovingAvg(49), Detrend(), ACF(), Normalize('median')])
 
 #     image_transform = torchvision.transforms.Compose([
 #     torchvision.transforms.RandomHorizontalFlip(p=0.5),
@@ -223,11 +223,11 @@ if __name__ == '__main__':
     # test_dataset = ACFDataset(test_folder, test_idx_list, labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
    
     train_dataset = TimeSeriesDataset(data_folder, train_list, labels=class_labels, transforms=transform,
-    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, freq_rate=freq_rate, period_norm=False)
+    init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate, period_norm=False)
     val_dataset = TimeSeriesDataset(data_folder, val_list, labels=class_labels,  transforms=transform,
-     init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, freq_rate=freq_rate, period_norm=False)
+     init_frac=0.2, prepare=False, dur=dur, freq_rate=freq_rate, period_norm=False)
     test_dataset = TimeSeriesDataset(test_folder, test_idx_list, labels=class_labels, transforms=test_transform,
-    init_frac=0.2, acf=True, return_raw=True, prepare=False, dur=dur, freq_rate=freq_rate, period_norm=False)
+    init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate, period_norm=False)
 
     # train_dataset = TimeSeriesDataset2(data_folder, train_list, labels=class_labels,
     #  t_samples=None, transforms=transform, spectrogram=False, prepare=False, p_norm=False)

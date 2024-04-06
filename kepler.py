@@ -48,8 +48,8 @@ root_dir = '/data' if not local else '../'
 
 log_path = f'{root_dir}/logs/kepler'
 
-# yaml_dir = '/data/lightPred/Astroconf/'
-yaml_dir = 'Astroconf/'
+yaml_dir = '/data/lightPred/Astroconf'
+# yaml_dir = 'Astroconf/'
 
 
 
@@ -99,7 +99,7 @@ all_samples_list = [file_name for file_name in glob.glob(os.path.join(data_folde
 # train_df, val_df = train_test_split(train_df, test_size=0.2, random_state=42)
 # print("df shapes: ", train_df.shape, val_df.shape, test_df.shape)
 # print("df columns: ", train_df.columns)
-b_size = 128
+b_size = 32
 
 num_epochs = 200
 
@@ -117,6 +117,17 @@ dur = 720
 def setup(rank, world_size):
     # initialize the process group
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+
+def aggregate_results_from_gpus(y_pred, conf_pred, kic, teff, r, g, qs):
+        torch.distributed.gather(y_pred, [torch.zeros_like(y_pred) for _ in range(torch.distributed.get_world_size())], dst=0)
+        torch.distributed.gather(conf_pred, [torch.zeros_like(conf_pred) for _ in range(torch.distributed.get_world_size())], dst=0)
+        torch.distributed.gather(kic, [torch.zeros_like(kic) for _ in range(torch.distributed.get_world_size())], dst=0)
+        torch.distributed.gather(teff, [torch.zeros_like(teff) for _ in range(torch.distributed.get_world_size())], dst=0)
+        torch.distributed.gather(r, [torch.zeros_like(r) for _ in range(torch.distributed.get_world_size())], dst=0)
+        torch.distributed.gather(g, [torch.zeros_like(g) for _ in range(torch.distributed.get_world_size())], dst=0)
+        torch.distributed.gather(qs, [torch.zeros_like(qs) for _ in range(torch.distributed.get_world_size())], dst=0)
+        return y_pred, conf_pred, kic, teff, r, g, qs
 
 
 if __name__ == '__main__':
@@ -190,7 +201,7 @@ if __name__ == '__main__':
     # kepler_df = kepler_df.sample(frac=1)
     # kepler_df = kepler_df[kepler_df['number_of_quarters'] == len(Q)]
     num_qs = dur//90
-    kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv').loc[:1000]
+    kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
     # kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3,17))
     try:
         kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
@@ -210,7 +221,7 @@ if __name__ == '__main__':
 
         full_dataset = KeplerDataset(data_folder, path_list=None,
                                       df=kepler_df, t_samples=int(dur/cad*DAY2MIN), skip_idx=q, num_qs=num_qs,
-            transforms=test_transform, acf=True, return_raw=True)
+            transforms=test_transform)
         sampler = torch.utils.data.distributed.DistributedSampler(full_dataset, num_replicas=world_size, rank=rank)
 
         full_dataloader = DataLoader(full_dataset, batch_size=b_size, \
@@ -254,15 +265,21 @@ if __name__ == '__main__':
                             device=local_rank, optim_params=optim_params, net_params=net_params, exp_num=exp_num, log_path=log_path,
                             exp_name="lstm_attn", num_classes=len(class_labels))
 
-        preds_f, target_f, conf_f, kids_f, teff_f, radius_f, logg_f, qs_f = trainer.predict(full_dataloader, device=local_rank, conf=True, only_p=False)
+        preds_f, conf_f, kids_f, teff_f, radius_f, logg_f, qs_f = trainer.predict(full_dataloader, device=local_rank, conf=True, only_p=False)
+        # if dist.is_available() and dist.is_initialized():
+        #         if torch.distributed.get_rank() == 0:
+        #             preds_f, conf_f, kids_f, teff_f, radius_f, logg_f, qs_f = aggregate_results_from_gpus(
+        #             preds_f.contiguous().float(), conf_f.contiguous(), kids_f.contiguous(), teff_f.contiguous(),
+        #               radius_f.contiguous(), logg_f.contiguous(), qs_f.contiguous())
         # if preds_f[:,0].max() <= 1:
         print("number of predictions: ", len(preds_f))
         print("inc range ", preds_f[:, 0].max(), preds_f[:, 0].min())
 
         # preds_f[:,0] = np.arcsin(preds_f[:,0])*180/np.pi
         # target_f = np.arcsin(target_f)*180/np.pi
+        print("predictions shapes: ", preds_f.shape, conf_f.shape, kids_f.shape, teff_f.shape, radius_f.shape, logg_f.shape, qs_f.shape)
         df_full = pd.DataFrame({'KID': kids_f,  'Teff': teff_f, 'R': radius_f,
-         'logg': logg_f, 'qs': np.array(qs_f) })
+         'logg': logg_f, 'qs': qs_f.tolist()})
         df_full['start_idx'] = q
         df_full['duration(days)'] = dur
         for i,label in enumerate(class_labels):
@@ -273,7 +290,7 @@ if __name__ == '__main__':
             df_full[f'predicted {label}'] = new_pred
             df_full[f'{label} confidence'] = conf_f[:, i]
         print("df shape: ", df_full.shape)
-        df_full.to_csv(f'{log_path}/exp{exp_num}/kepler_inference_full_detrend_{q}.csv', index=False)
+        df_full.to_csv(f'{log_path}/exp{exp_num}/kepler_inference_full_detrend_{q}_rank_{rank}.csv', index=False)
         toc = time.time()
         print("time: ", toc-tic)
 

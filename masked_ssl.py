@@ -74,7 +74,7 @@ all_samples_list = [file_name for file_name in glob.glob(os.path.join(data_folde
 # print("reduced df: ", len(kepler_df))
 
 
-b_size = 32
+b_size = 8
 
 num_epochs = 200
 
@@ -144,7 +144,7 @@ if __name__ == '__main__':
     print("args : ", vars(args))
 
 
-    kepler_df = pd.read_csv(f'{root_dir}/tables/all_kepler_samples.csv').iloc
+    kepler_df = pd.read_csv(f'{root_dir}/tables/all_kepler_samples.csv')
     # kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3, 17))
     try:
         kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
@@ -160,10 +160,10 @@ if __name__ == '__main__':
     # kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3,17))
 
 
-    transform = Compose([MovingAvg(kernel_size=49), RandomCrop(int(dur / cad * DAY2MIN)),
+    transform = Compose([MovingAvg(kernel_size=49), Detrend(), RandomCrop(int(dur / cad * DAY2MIN)),
                          Mask(0.1, value=-1), Normalize(norm='minmax')])
 
-    target_transform = Compose([MovingAvg(kernel_size=49), RandomCrop(int(dur / cad * DAY2MIN)),
+    target_transform = Compose([MovingAvg(kernel_size=49), Detrend(), RandomCrop(int(dur / cad * DAY2MIN)),
                                 Normalize(norm='minmax')])
 
     
@@ -231,7 +231,7 @@ if __name__ == '__main__':
     trainer = MaskedSSLTrainer(model=model, optimizer=optimizer, criterion=loss_fn,
                         train_dataloader=train_dataloader, val_dataloader=val_dataloader,
                         device=local_rank, optim_params=optim_params, net_params=lstm_params, exp_num=exp_num, log_path=log_path,
-                        exp_name="conformer_ssl", max_iter=1000)
+                        exp_name="conformer_ssl", max_iter=5000)
     
 
     fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank, early_stopping=15, only_p=False, best='loss', conf=True)

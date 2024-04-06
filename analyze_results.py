@@ -333,8 +333,12 @@ def prepare_df(df, scale=False, filter_giants=True, filter_eb=True, filter_non_p
 
     # Rename the specified columns
     df.rename(columns=column_mapping, inplace=True)
-    err_model_p = np.load(r"C:\Users\ilaym\Desktop\kepler\acf\analyze\mock\p_std.npy")
-    err_model_i = np.load(r"C:\Users\ilaym\Desktop\kepler\acf\analyze\mock\inc_std.npy")
+    try:
+        err_model_p = np.load(r"C:\Users\ilaym\Desktop\kepler\acf\analyze\mock\p_std.npy")
+        err_model_i = np.load(r"C:\Users\ilaym\Desktop\kepler\acf\analyze\mock\inc_std.npy")
+    except FileNotFoundError:
+        err_model_p = None
+        err_model_i = None
     print(df['predicted inclination'].max(), df['predicted period'].max())
     # plt.xlim(0,1000)
     if 'KID' in df.columns:
@@ -365,13 +369,14 @@ def prepare_df(df, scale=False, filter_giants=True, filter_eb=True, filter_non_p
         df = df[(df['Teff'] < 7000) & df['Teff'] > 0]
 
     df.fillna(value=0, inplace=True)
-    rounded_inc = np.clip(np.round(df['predicted inclination']).astype(int), a_min=None, a_max=90)
-    inc_errors = err_model_i[rounded_inc]
-    df.loc[:, 'inclination model error'] = inc_errors
-    rounded_p = np.round(df['predicted period']).astype(int)
-    # print(rounded_p.max())
-    p_errors = err_model_p[rounded_p]
-    df.loc[:, 'period model error'] = p_errors
+    if err_model_p is not None:
+        rounded_inc = np.clip(np.round(df['predicted inclination']).astype(int), a_min=None, a_max=90)
+        inc_errors = err_model_i[rounded_inc]
+        df.loc[:, 'inclination model error'] = inc_errors
+        rounded_p = np.round(df['predicted period']).astype(int)
+        # print(rounded_p.max())
+        p_errors = err_model_p[rounded_p]
+        df.loc[:, 'period model error'] = p_errors
 
     if filter_giants:
         df['main_seq'] = df.apply(giant_cond, axis=1)
@@ -919,11 +924,11 @@ def find_non_ps(kepler_inference):
 def read_csv_folder(dir_name, filter_thresh=5, att='period'):
     print(f"*** reading files from kepler/{dir_name}")
     dfs = []
-    for file in os.listdir(f"../{dir_name}"):
+    for file in os.listdir(f"{dir_name}"):
         if file.endswith('csv'):
             print(file)
             df = prepare_df(
-                pd.read_csv(f"../{dir_name}/{file}", on_bad_lines='warn'),
+                pd.read_csv(f"{dir_name}/{file}", on_bad_lines='warn'),
                 filter_eb=False, filter_giants=True, filter_non_ps=True, teff_thresh=True)
             print("current df len: ", len(df))
             if not len(dfs):
