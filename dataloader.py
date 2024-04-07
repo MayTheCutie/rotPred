@@ -330,26 +330,27 @@ class KeplerDataset(TimeSsl):
     else:
         target = x.copy()
     toc2 = time.time()
-    x = torch.tensor(x.T[:, :self.seq_len])
-    target = torch.tensor(target.T[:, :self.seq_len])
+    x = x.T[:, :self.seq_len]
+    target = target.T[:, :self.seq_len]
     if mask is not None:
       mask = torch.tensor(mask.T[:, :self.seq_len])
-    out = x.clone()
+      out = x.clone()
+      for c in range(x.shape[0]):
+          out[c] = self.apply_mask(x[c], mask)
+    else:
+        mask = torch.zeros_like(x).bool()
+        out = x
     # print("number of differnt values (in dataset2): ", len(torch.where((x - target) != 0)[0]))
-    for c in range(x.shape[0]):
-        out[c] = self.apply_mask(x[c], mask)
-    info['idx'] = idx
+
     if len(meta):
       info['Teff'] = meta['TEFF'] if meta['TEFF'] is not None else 0
       info['R'] = meta['RADIUS'] if meta['RADIUS'] is not None else 0
       info['logg'] = meta['LOGG'] if meta['LOGG'] is not None else 0
     info['path'] = self.df.iloc[idx]['data_file_path'] if self.df is not None else self.path_list[idx]
     info['KID'] = self.df.iloc[idx]['KID'] if self.df is not None else self.path_list[idx].split("/")[-1].split("-")[0].split('kplr')[-1]
-    toc = time.time()
-    # print("time to read: ", toc1-tic, "time to transform: ", toc2-toc1, "total time: ", toc-tic)
-    if mask is None:
-        mask = torch.zeros((1,len(x))).bool()
-    return x.float(), target, mask, info
+    info['time'] = toc2 - tic
+    print('shapes:', x.shape, target.shape, mask.shape, info)
+    return out.float(), target, mask, info
 
    
 class KeplerNoiseDataset(KeplerDataset):

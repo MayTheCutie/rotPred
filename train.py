@@ -880,7 +880,7 @@ class SiameseTrainer(Trainer):
         self.model.train()
         train_loss = []
         pbar = tqdm(self.train_dl)
-        for i, (x1, x2) in enumerate(pbar):
+        for i, (x1, x2, _, info) in enumerate(pbar):
             # print(i)
             print("x1: ", x1.shape, "x2: ", x2.shape)
             x1, x2 = x1.to(device), x2.to(device)
@@ -901,7 +901,7 @@ class SiameseTrainer(Trainer):
         """
         self.model.eval()
         val_loss = []
-        for i, (x1, x2) in enumerate(self.val_dl):
+        for i, (x1, x2, _, info) in enumerate(self.val_dl):
             x1, x2 = x1.to(device), x2.to(device)
             with torch.no_grad():
                 out = self.model(x1, x2)

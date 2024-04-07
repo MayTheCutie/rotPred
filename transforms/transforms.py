@@ -425,3 +425,25 @@ class ToTensor():
         return x, mask, info
     def __repr__(self):
         return "ToTensor"
+
+class Identity():
+    def __init__(self):
+        pass
+    def __call__(self, x, mask=None, info=None, step=None):
+        return x, mask, info
+    def __repr__(self):
+        return "Identity"
+class RandomTransform():
+    def __init__(self, transforms, p=None):
+        self.transforms = transforms
+        self.p = p
+    def __call__(self, x, mask=None, info=None, step=None):
+        t = np.random.choice(self.transforms, p=self.p)
+        if 'random_transform' in info:
+            info['random_transform'].append(str(t))
+        else:
+            info['random_transform'] = [str(t)]
+        x, mask, info = t(x, mask=mask, info=info, step=step)
+        return x, mask, info
+    def __repr__(self):
+        return f"RandomTransform(p={self.p})"

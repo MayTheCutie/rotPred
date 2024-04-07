@@ -6,7 +6,7 @@ import torch.optim as optim
 
 ROOT_DIR = path.dirname(path.dirname(path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
-print("running from ", ROOT_DIR)    
+print("running from ", ROOT_DIR)
 
 from lightPred.augmentations import *
 from lightPred.dataloader import *
@@ -24,12 +24,13 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import glob
 
+local = True
+root_dir = '.' if local else '/data/lightPred'
+data_folder = f"{root_dir}/data"
 
-data_folder = "/data/lightPred/data"
+log_path = '../logs/simsiam' if local else '/data/logs/simsiam'
 
-log_path = '/data/logs/simsiam'
-
-yaml_dir = '/data/lightPred/Astroconf/'
+yaml_dir = f'{root_dir}/Astroconf/'
 
 exp_num = 13
 
@@ -37,9 +38,9 @@ num_epochs = 400
 
 b_size = 16
 
-dur = 720
+dur = 90
 
-cad = 30 
+cad = 30
 
 num_qs = 8
 
@@ -76,13 +77,14 @@ samples_list = [file_name for file_name in glob.glob(os.path.join(data_folder, '
 
 # samples_list = os.listdir(data_folder)
 # print("before split: ", samples_list[:10000])
-kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
+kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3, 17))
 try:
     kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
 except TypeError:
     pass
 kepler_df['qs'] = kepler_df['data_file_path'].apply(extract_qs)  # Extract 'qs' numbers
 kepler_df['consecutive_qs'] = kepler_df['qs'].apply(consecutive_qs)  # Calculate length of longest consecutive sequence
+kepler_df['longest_consecutive_qs_indices'] = kepler_df['qs'].apply(find_longest_consecutive_indices)
 kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
 
 
@@ -95,40 +97,50 @@ def setup(rank, world_size):
 
 if __name__ == "__main__":
 
-    world_size    = int(os.environ["WORLD_SIZE"])
-    rank          = int(os.environ["SLURM_PROCID"])
-    #gpus_per_node = int(os.environ["SLURM_GPUS_ON_NODE"])
-    gpus_per_node = torch.cuda.device_count()
-    print(f"Hello from rank {rank} of {world_size} where there are" \
-            f" {gpus_per_node} allocated GPUs per node.", flush=True)
+    if DEVICE == 'cuda':
+        world_size    = int(os.environ["WORLD_SIZE"])
+        rank          = int(os.environ["SLURM_PROCID"])
+        #gpus_per_node = int(os.environ["SLURM_GPUS_ON_NODE"])
+        gpus_per_node = torch.cuda.device_count()
+        print(f"Hello from rank {rank} of {world_size} where there are" \
+                f" {gpus_per_node} allocated GPUs per node.", flush=True)
 
-    setup(rank, world_size)
+        setup(rank, world_size)
 
-    if rank == 0: print(f"Group initialized? {dist.is_initialized()}", flush=True)
-    local_rank = rank - gpus_per_node * (rank // gpus_per_node)
-    torch.cuda.set_device(local_rank)
-    print(f"rank: {rank}, local_rank: {local_rank}")
+        if rank == 0: print(f"Group initialized? {dist.is_initialized()}", flush=True)
+        local_rank = rank - gpus_per_node * (rank // gpus_per_node)
+        torch.cuda.set_device(local_rank)
+        print(f"rank: {rank}, local_rank: {local_rank}")
+    else:
+        local_rank = DEVICE
+        world_size = 1
+        rank = 0
 
     args = Container(**yaml.safe_load(open(f'{yaml_dir}/default_config.yaml', 'r')))
     args.load_dict(yaml.safe_load(open(f'{yaml_dir}/model_config.yaml', 'r'))[args.model])
     print("args : ", vars(args))
 
-    transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)), MovingAvg(49), Detrend(), Normalize('std')])
-    train_ds = TimeSsl(data_folder, path_list=None, df=train_df, acf=True, return_raw=True,
-     ssl_tf=DataTransform_TD_bank, t_samples=int(dur/cad*DAY2MIN), transforms=transform,)
-    val_ds = TimeSsl(data_folder, path_list=None, df=val_df, acf=True, return_raw=True,
-     ssl_tf=DataTransform_TD_bank, t_samples=int(dur/cad*DAY2MIN), transforms=transform)
+    transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)), MovingAvg(49),
+                         RandomTransform([Mask(0.1), AddGaussianNoise(sigma=0.0001), Identity()]),
+                        ACF(), ToTensor(), Normalize('std')])
+    train_ds = KeplerDataset(data_folder, path_list=None, df=val_df, t_samples=int(dur/cad*DAY2MIN),
+     transforms=transform, target_transforms=transform)
+    val_ds = KeplerDataset(data_folder, path_list=None, df=val_df, t_samples=int(dur/cad*DAY2MIN),
+     transforms=transform, target_transforms=transform)
 
-
+    slurm_cpus_per_task = os.environ.get("SLURM_CPUS_PER_TASK", "1")
+    slurm_cpus_per_task = int(slurm_cpus_per_task)
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True)
-    train_dl = DataLoader(train_ds, batch_size=b_size, sampler=train_sampler, \
-                                                num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True)
-    val_dl = DataLoader(val_ds,  batch_size=b_size, shuffle=True, \
-                                                num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
-                                    
+    train_dl = DataLoader(train_ds, batch_size=b_size, sampler=train_sampler,  collate_fn=kepler_collate_fn,
+                                                num_workers=slurm_cpus_per_task, pin_memory=True)
+    val_dl = DataLoader(val_ds,  batch_size=b_size, shuffle=True,  collate_fn=kepler_collate_fn,
+                                                num_workers=slurm_cpus_per_task)
+
     for i in range(4):
-        x,y = train_ds[i]
-        print(x.shape, y.shape)  
+        fig, axes = plt.subplots(1, 2)
+        x,y,mask,info = train_ds[i]
+
+        print(x.shape, y.shape, info)
 
     # for i, (x1,x2) in enumerate(val_dl):
     #     print(x1.shape, x2.shape)
@@ -144,7 +156,8 @@ if __name__ == "__main__":
 
     model = SimSiam(backbone)
     model = model.to(local_rank)
-    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+    if DEVICE == 'cuda':
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     print(model)
     print("number of params:", sum(p.numel() for p in model.parameters() if p.requires_grad))
 
@@ -169,5 +182,5 @@ if __name__ == "__main__":
         json.dump(fit_res, f, indent=2)
 
     fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-    plt.savefig(f"{log_path}/exp{exp_num}/fit.png") 
-    
+    plt.savefig(f"{log_path}/exp{exp_num}/fit.png")
+

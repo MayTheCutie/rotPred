@@ -144,8 +144,8 @@ if __name__ == '__main__':
     print("args : ", vars(args))
 
 
-    kepler_df = pd.read_csv(f'{root_dir}/tables/all_kepler_samples.csv')
-    # kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3, 17))
+    # kepler_df = pd.read_csv(f'{root_dir}/tables/all_kepler_samples.csv')
+    kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3, 17))
     try:
         kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
     except TypeError:

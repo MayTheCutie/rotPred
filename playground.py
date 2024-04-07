@@ -41,6 +41,8 @@ from lightPred.period_analysis import analyze_lc, analyze_lc_kepler
 from lightPred.timeDetr import TimeSeriesDetrModel
 from lightPred.timeDetrLoss import TimeSeriesDetrLoss, SetCriterion, HungarianMatcher
 from lightPred.analyze_results import read_csv_folder
+from lightPred.augmentations import DataTransform_TD_bank
+
 
 import sys
 from butterpy import Surface
@@ -83,6 +85,36 @@ idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nl
 
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
 
+
+
+def test_time_augmentations():
+    ssl_tf = DataTransform_TD_bank
+    dur = 90
+    kepler_df = multi_quarter_kepler_df('lightPred/data/', table_path=None, Qs=np.arange(3, 17))
+    try:
+        kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
+    except TypeError:
+        pass
+    kepler_df['qs'] = kepler_df['data_file_path'].apply(extract_qs)  # Extract 'qs' numbers
+    kepler_df['consecutive_qs'] = kepler_df['qs'].apply(
+        consecutive_qs)  # Calculate length of longest consecutive sequence
+    kepler_df['longest_consecutive_qs_indices'] = kepler_df['qs'].apply(find_longest_consecutive_indices)
+    transform = Compose([MovingAvg(kernel_size=49), RandomCrop(int(dur / cad * DAY2MIN)),
+                         Normalize(norm='median')])
+    dataset = KeplerDataset(data_folder, path_list=None, df=kepler_df,
+                            t_samples=int(dur / cad * DAY2MIN), transforms=transform)
+    for i in range(10):
+        print(i)
+        fig, ax = plt.subplots(1, 2)
+        x, y, _, _ = dataset[i]
+        print(x.shape)
+        x_tf = ssl_tf(x.unsqueeze(0))
+        ax[0].plot(x)
+        ax[1].plot(x_tf)
+        plt.savefig(f'/data/tests/augment_{i}.png')
+        plt.show()
+        if i == 10:
+            break
 
 def test_peak_height_ratio(data_folder, num_samples):
     lc_path = os.path.join(data_folder, 'simulations')
@@ -1665,7 +1697,8 @@ if __name__ == "__main__":
     # create_period_normalized_samples('/data/butter/data_cos_old', 50000, num_ps=20)
     # create_period_normalized_samples('/data/butter/data_sun_like', 50000, num_ps=20)
     # sun_like_analysis()
-    test_peak_height_ratio('/data/butter/test_cos_old', 1000,)
+    # test_peak_height_ratio('/data/butter/test_cos_old', 1000,)
+    test_time_augmentations()
 
     # test_timeDetr()
 
