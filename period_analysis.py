@@ -25,7 +25,7 @@ from astropy.table import Table
 from scipy.signal import find_peaks
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import linregress
-# from pytorch_forecasting.utils import autocorrelation
+from pytorch_forecasting.utils import autocorrelation
 import torch
 from statsmodels.tsa.stattools import acf as A
 

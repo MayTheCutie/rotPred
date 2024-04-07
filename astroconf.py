@@ -183,44 +183,14 @@ if __name__ == '__main__':
     # transforms=kep_transform, acf=False, norm='none')
 
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
-                         #   KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                         #   transforms=kep_transform, min_ratio=0.02, max_ratio=0.05),
                          KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),
-                         MovingAvg(49), Detrend(), ACF(), Normalize('median')])
+                         MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(), ])
     test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
-                              # KeplerNoise(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-                              # transforms=kep_transform,  min_ratio=0.02, max_ratio=0.05),
                               KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),
-                              MovingAvg(49), Detrend(), ACF(), Normalize('median')])
+                              MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(),])
 
-#     image_transform = torchvision.transforms.Compose([
-#     torchvision.transforms.RandomHorizontalFlip(p=0.5),
-#     # torchvision.transforms.ToDtype(torch.float32, scale=True),
-#     torchvision.transforms.Normalize(mean=[0.445], std=[0.269]),
-# ])
-
-#     image_test_transform = torchvision.transforms.Compose([
-#     # torchvision.transforms.ToDtype(torch.float32, scale=True),
-#     torchvision.transforms.Normalize(mean=[0.445], std=[0.269]),
-# ])
-    
-    # train_dataset = ACFImageDataset(data_folder, train_list, t_samples=t_samples, transforms=transform, image_transform=image_transform)
-    # val_dataset = ACFImageDataset(data_folder, val_list, t_samples=t_samples, transforms=transform, image_transform=image_transform)
-    # test_dataset = ACFImageDataset(data_folder, val_list, t_samples=t_samples, transforms=test_transform, image_transform=image_test_transform)
-
-    # train_dataset = ACFDataset(data_folder, train_list,labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
-    # val_dataset = ACFDataset(data_folder, val_list, labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
-    # test_dataset = ACFDataset(test_folder, test_idx_list, labels=class_labels, t_samples=None, transforms=test_transform, return_raw=False)
-
-    # train_dataset = FourierDataset(data_folder, train_list,labels=class_labels, n_days=dur*2, )
-    # val_dataset = FourierDataset(data_folder, val_list, labels=class_labels, n_days=dur*2,)
-    # test_dataset = FourierDataset(test_folder, test_idx_list, labels=class_labels, n_days=dur*2, )
-
-    # train_dataset = ACFDataset(data_folder, train_list, labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
-    # val_dataset = ACFDataset(data_folder, val_list, labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
-    # test_dataset = ACFDataset(test_folder, test_idx_list, labels=class_labels, t_samples=None, transforms=transform, return_raw=False)
    
     train_dataset = TimeSeriesDataset(data_folder, train_list, labels=class_labels, transforms=transform,
     init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate, period_norm=False)
@@ -228,31 +198,12 @@ if __name__ == '__main__':
      init_frac=0.2, prepare=False, dur=dur, freq_rate=freq_rate, period_norm=False)
     test_dataset = TimeSeriesDataset(test_folder, test_idx_list, labels=class_labels, transforms=test_transform,
     init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate, period_norm=False)
-
-    # train_dataset = TimeSeriesDataset2(data_folder, train_list, labels=class_labels,
-    #  t_samples=None, transforms=transform, spectrogram=False, prepare=False, p_norm=False)
-    # val_dataset = TimeSeriesDataset2(data_folder, val_list, labels=class_labels,
-    #  t_samples=None, transforms=transform, spectrogram=False, prepare=False, p_norm=False)
-    # test_dataset = TimeSeriesDataset2(test_folder, test_idx_list, labels=class_labels,
-    #  t_samples=None, transforms=test_transform, spectrogram=False, prepare=False, p_norm=False)
   
 
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
     train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler, \
                                                num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True)
 
-    # print("calculating weights...")
-    # if os.path.exists(f'{log_path}/exp{exp_num}/train_weights.npy'):
-    #     train_weights = np.load(f'{log_path}/exp{exp_num}/train_weights.npy')
-    # else:
-    #     train_weights = dataset_weights(train_dataloader, Nlc)
-    #     os.makedirs(f'{log_path}/exp{exp_num}', exist_ok=True)
-    #     np.save(f'{log_path}/exp{exp_num}/train_weights.npy', train_weights)
-
-    # train_sampler_weighted = DistributedSamplerWrapper(sampler=WeightedRandomSampler(train_weights, len(train_weights)),
-    #                                             num_replicas=world_size, rank=rank)
-    # train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler_weighted,\
-    #                                               num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True) 
 
     val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
     val_dataloader = DataLoader(val_dataset, batch_size=b_size, sampler=val_sampler, \
@@ -264,10 +215,14 @@ if __name__ == '__main__':
 
     print("dataset length: ", len(train_dataset), len(val_dataset), len(test_dataset))
 
-    for i in range(10):
+    profile = []
+    for i in range(100):
         idx = np.random.randint(0, len(train_dataset))
-        x,y,_,_ = train_dataset[idx]
-        print(x.shape, y.shape, y)
+        x,y,_,info = train_dataset[idx]
+        profile.append(info['time'])
+        print(x.shape, y.shape)
+    print("average time: ", np.mean(profile))
+    
 
     # print("check weights...")
     # incs = torch.zeros(0)

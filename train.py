@@ -338,10 +338,16 @@ class DoubleInputTrainer(Trainer):
             y = y.to(device)
             self.optimizer.zero_grad()
             y_pred = self.model(x1.float(), x2.float())
+            if y_pred.isnan().any():
+                print("y_pred is nan")
+                print("y_pred: ", y_pred)
             t1 =  time.time() 
             if conf:
                 y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
                 conf_y = torch.abs(y - y_pred) 
+                if conf_pred.isnan().any():
+                    print("conf_pred is nan")
+                    print("conf_pred: ", conf_pred)
                 
             # y_std = torch.std(y.squeeze(), dim=1)
             # y_pred_std = torch.std(y_pred.squeeze(), dim=1)
@@ -349,6 +355,9 @@ class DoubleInputTrainer(Trainer):
                 inc_idx = 0
                 y_pred[:, inc_idx] = torch.cos(y_pred[:, inc_idx]*np.pi/2)
                 y[:, inc_idx] = torch.cos(y[:, inc_idx]*np.pi/2)
+            if y.isnan().any():
+                print("y is nan")
+                print("y: ", y)
             loss = self.criterion(y_pred, y)
             if conf:
                 loss += self.criterion(conf_pred, conf_y)

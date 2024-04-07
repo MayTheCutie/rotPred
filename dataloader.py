@@ -632,7 +632,10 @@ class TimeSeriesDataset(Dataset):
           info['idx'] = idx
         else:
           x = x[:,1]
-        x = torch.tensor(x.T[:, :int(self.dur/self.freq_rate)])
+        t3 = time.time()
+        x = x.T[:, :self.seq_len]
+        # x = torch.tensor(x.T[:, :int(self.dur/self.freq_rate)])
+        t4 = time.time()
         x = x.nan_to_num(0)
         y = self.get_labels(sample_idx)
         if self.spots:
@@ -641,7 +644,6 @@ class TimeSeriesDataset(Dataset):
           spots_arr = self.create_spots_arr(idx, info, x)
           x = torch.cat((x, torch.tensor(spots_arr).float()), dim=0)
         self.step += 1
-        t8 = time.time()
       else:
         x, y, info = self.samples[idx]
         x = self.normalize(x)
@@ -654,7 +656,7 @@ class TimeSeriesDataset(Dataset):
       end = time.time()
       if torch.isnan(x).sum():
         print("nans! in idx: ", idx)
-      # print("times: ", t1-s, t2-t1, t3-t2, t4-t3, t5-t4, t6-t5,t7-t6, t8-t7,  "tot time: ", end-s)
+      info['time'] = end-s
       return x.float(), y, torch.ones_like(x), info
 
 

@@ -2,7 +2,7 @@ import warnings
 
 import numpy as np
 import torch
-
+import time
 from . import functional_array as F_np
 from . import functional_tensor as F_t
 from lightPred.util.stats import nanstd
@@ -10,6 +10,8 @@ from lightPred.util.stats import nanstd
 from matplotlib import pyplot as plt
 import os
 from scipy.signal import savgol_filter as savgol
+from pytorch_forecasting.utils import autocorrelation
+
 
 class Compose:
     """Composes several transforms together. 
@@ -27,8 +29,10 @@ class Compose:
         if len(x.shape) == 1:
                 x = x[:, np.newaxis]
         out = x
+        t0 = time.time()
         for t in self.transforms:
             out, mask, info = t(out, mask=mask, info=info, step=step)
+            # print(f"{t} took {time.time()-t0} seconds")
         return out, mask, info
 
     def __repr__(self):
@@ -379,15 +383,18 @@ class ACF():
         self.max_lag = max_lag
     def __call__(self, x, mask=None, info=None, step=None):
         if isinstance(x, np.ndarray):
-            x_no_nans = x.copy()
-            nan_indices = np.where(np.isnan(x))[0]
-            x_no_nans[nan_indices] = 0
-            acf = F_np.autocorrelation(x_no_nans, max_lag=self.max_lag)[:,None]
+            # x_no_nans = x.copy()
+            # nan_indices = np.where(np.isnan(x))[0]
+            # x_no_nans[nan_indices] = 0
+            acf = F_np.autocorrelation(x, max_lag=self.max_lag)[:,None]
             if mask is not None:
                 acf[mask] = np.nan
             x = np.hstack((acf, x))
         else:
-            raise NotImplementedError
+            acf = autocorrelation(x, dim=0)
+            if mask is not None:
+                acf[mask] = np.nan
+            x = torch.cat((acf, x), dim=1)
         return x, mask, info
     def __repr__(self):
         return f"ACF(max_lag={self.max_lag})"
@@ -408,3 +415,13 @@ class Normalize():
         return x, mask, info
     def __repr__(self):
         return f"Normalize(norm_type={self.norm})"
+    
+class ToTensor():
+    def __init__(self):
+        pass
+    def __call__(self, x, mask=None, info=None, step=None):
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x)
+        return x, mask, info
+    def __repr__(self):
+        return "ToTensor"
