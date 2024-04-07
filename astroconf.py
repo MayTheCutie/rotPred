@@ -313,19 +313,19 @@ if __name__ == '__main__':
                          optim_params=optim_params, net_params=lstm_params,
                            exp_num=exp_num, log_path=log_path,
                         exp_name="astroconf") 
-    fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
-                           early_stopping=40, only_p=False, best='loss', conf=True) 
-    output_filename = f'{log_path}/exp{exp_num}/astroconf.json'
-    with open(output_filename, "w") as f:
-        json.dump(fit_res, f, indent=2)
-    fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-    plt.savefig(f"{log_path}/exp{exp_num}/fit.png")
-    plt.clf()
+    # fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
+    #                        early_stopping=40, only_p=False, best='loss', conf=True) 
+    # output_filename = f'{log_path}/exp{exp_num}/astroconf.json'
+    # with open(output_filename, "w") as f:
+    #     json.dump(fit_res, f, indent=2)
+    # fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+    # plt.savefig(f"{log_path}/exp{exp_num}/fit.png")
+    # plt.clf()
 
     print("Evaluation on test set:")
 
     preds, targets, confs = trainer.predict(test_dataloader, device=local_rank,
-                                             conf=True, load_best=False)
+                                             conf=True, load_best=True)
 
     eval_results(preds, targets, confs, labels=class_labels, data_dir=f'{log_path}/exp{exp_num}',
                   model_name=model.module.__class__.__name__,  num_classes=len(class_labels), cos_inc=False)

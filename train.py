@@ -113,6 +113,7 @@ class Trainer(object):
         train_acc, val_acc = [], []
         self.optim_params['lr_history'] = []
         epochs_without_improvement = 0
+        main_proccess = (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0) or self.device == 'cpu'
 
         print(f"Starting training for {num_epochs} epochs with parameters: {self.optim_params}, {self.net_params}")
         for epoch in range(num_epochs):
@@ -122,39 +123,38 @@ class Trainer(object):
             t_loss_mean = np.mean(t_loss)
             train_loss.extend(t_loss)
             global_train_accuracy, global_train_loss = self.process_loss(t_acc, t_loss_mean)
-            if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:  # Only perform this on the master GPU
+            if main_proccess:  # Only perform this on the master GPU
                 train_acc.append(global_train_accuracy.mean().item())
 
             v_loss, v_acc = self.eval_epoch(device, epoch=epoch, only_p=only_p, plot=plot, conf=conf)
             v_loss_mean = np.mean(v_loss)
             val_loss.extend(v_loss)
             global_val_accuracy, global_val_loss = self.process_loss(v_acc, v_loss_mean)
-            if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:  # Only perform this on the master GPU                
+            if main_proccess:  # Only perform this on the master GPU                
                 val_acc.append(global_val_accuracy.mean().item())
             if self.scheduler is not None:
                 self.scheduler.step(global_val_loss)
             criterion = min_loss if best == 'loss' else best_acc
             mult = 1 if best == 'loss' else -1
             objective = global_val_loss if best == 'loss' else global_val_accuracy.mean()
-            if mult*objective < mult*criterion:
-                print("saving model...")
-                if best == 'loss':
-                    min_loss = global_val_loss
+            if main_proccess:
+                if mult*objective < mult*criterion:
+                    print("saving model...")
+                    if best == 'loss':
+                        min_loss = global_val_loss
+                    else:
+                        best_acc = global_val_accuracy.mean()
+                    torch.save(self.model.state_dict(), f'{self.log_path}/exp{self.exp_num}/{self.exp_name}.pth')
+                    self.best_state_dict = self.model.state_dict()
+                    epochs_without_improvement = 0
                 else:
-                    best_acc = global_val_accuracy.mean()
-                torch.save(self.model.state_dict(), f'{self.log_path}/exp{self.exp_num}/{self.exp_name}.pth')
-                self.best_state_dict = self.model.state_dict()
-                epochs_without_improvement = 0
-            else:
-                epochs_without_improvement += 1
-                if epochs_without_improvement == early_stopping:
-                    print('early stopping!', flush=True)
-                    break
-
-            print(f'Epoch {epoch}: Train Loss: {global_train_loss:.6f}, Val Loss: {global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, Val Acc: {global_val_accuracy.round(decimals=4).tolist()}, Time: {time.time() - start_time:.2f}s')
-
-            if epoch % 10 == 0:
-                print(os.system('nvidia-smi'))
+                    epochs_without_improvement += 1
+                    if epochs_without_improvement == early_stopping:
+                        print('early stopping!', flush=True)
+                        break
+                print(f'Epoch {epoch}: Train Loss: {global_train_loss:.6f}, Val Loss: {global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, Val Acc: {global_val_accuracy.round(decimals=4).tolist()}, Time: {time.time() - start_time:.2f}s')
+                if epoch % 10 == 0:
+                    print(os.system('nvidia-smi'))
 
         self.optim_params['lr'] = self.optimizer.param_groups[0]['lr']
         self.optim_params['lr_history'].append(self.optim_params['lr'])
@@ -168,14 +168,12 @@ class Trainer(object):
 
     def process_loss(self, acc, loss_mean):
         if  torch.cuda.is_available() and torch.distributed.is_initialized():
-            print("reducing loss and accuracy")
             global_accuracy = torch.tensor(acc).cuda()  # Convert accuracy to a tensor on the GPU
             torch.distributed.reduce(global_accuracy, dst=0, op=torch.distributed.ReduceOp.SUM)
             global_loss = torch.tensor(loss_mean).cuda()  # Convert loss to a tensor on the GPU
             torch.distributed.reduce(global_loss, dst=0, op=torch.distributed.ReduceOp.SUM)
             global_loss /= torch.distributed.get_world_size()
         else:
-            print("not reducing loss and accuracy")
             global_loss = torch.tensor(loss_mean)
             global_accuracy = torch.tensor(acc)
         return global_accuracy, global_loss

@@ -84,55 +84,126 @@ idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nl
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
 
 
-def test_peak_height_ratio(data_folder, num_samples):
+def test_peak_height_ratio(data_folder, num_samples, eval_folder):
     lc_path = os.path.join(data_folder, 'simulations')
     csv_path = os.path.join(data_folder, 'simulation_properties.csv')
     labels_df = pd.read_csv(csv_path)
+    eval_df = pd.read_csv(os.path.join(eval_folder, 'eval.csv'))
     idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc)) + 1) for idx in range(test_Nlc)]
     ratios = []
     ps = []
     incs = []
     max_lats = []
-    for i, idx_s in enumerate(idx_list[:num_samples]):
-        clean_idx = remove_leading_zeros(idx_s)
-        row = labels_df.iloc[clean_idx]
+    pred_ps = []
+    pred_incs =[]
+    acf_ps = []
+    conf_inc = []
+    conf_p = []
+    for i, row in eval_df.iterrows():
+        label_row = labels_df.iloc[i]
+        idx_s = str(i).zfill(int(np.log10(test_Nlc))+1)
         p, inc = row['Period'], row['Inclination']*180/np.pi
-        max_lats.append(row['Spot Max'])
+        pred_p, pred_inc = row['predicted Period'], row['predicted Inclination']*180/np.pi
+        conf_p.append(row['Period confidence'])
+        conf_inc.append(row['Inclination confidence'])
+        max_lats.append(label_row['Spot Max'])
         x = pd.read_parquet(os.path.join(lc_path, f"lc_{idx_s}.pqt")).values
-        p , lags, xcf, peaks = analyze_lc_kepler(x[:,1], prom=0.01)
+        p_acf , lags, xcf, peaks = analyze_lc_kepler(x[:,1], prom=0.01)
         if len(peaks) > 2:
             peak_height_ratio = xcf[peaks[0]] / xcf[peaks[1]]
         else:
             peak_height_ratio = 0
-        if i % 100 == 0:
+        if i % 1000 == 0:
             plt.plot(lags, xcf)
             plt.plot(lags[peaks], xcf[peaks], 'o')
             plt.title(f'peak_height_ratio: {peak_height_ratio:.2f}, p: {p:.2f}, i: {inc:.2f}')
-            plt.savefig(f'/data/tests/peaks_{i%100}.png')
+            plt.savefig(f'/data/tests/peaks_{i%1000}.png')
             plt.close()
             print(peak_height_ratio, p, inc)
         ratios.append(peak_height_ratio)
         ps.append(p)
         incs.append(inc)
+        pred_ps.append(pred_p)
+        pred_incs.append(pred_inc)
+        acf_ps.append(p_acf)
+    plt.scatter(ps, pred_ps)
+    plt.xlabel('period')
+    plt.ylabel('predicted period')
+    plt.xlim(0, 60)
+    acc = (np.abs(np.array(ps) - np.array(pred_ps)) < np.array(ps)/10).sum() / len(ps)
+    plt.title(f'accuracy: {acc:.2f}')
+    plt.savefig('/data/tests/p_vs_pred_p.png')
+    plt.close()
+
+    plt.scatter(ps, acf_ps)
+    plt.xlabel('period')
+    plt.ylabel('acf predicted period')
+    plt.xlim(0, 60)
+    acc = (np.abs(np.array(ps) - np.array(acf_ps)) < np.array(ps)/10).sum() / len(ps)
+    plt.title(f'accuracy: {acc:.2f}')
+    plt.savefig('/data/tests/p_vs_acf_p.png')
+    plt.close()
+
+    plt.scatter(acf_ps, pred_ps)
+    plt.xlabel('acf period')
+    plt.ylabel('predicted period')
+    plt.xlim(0, 60)
+    acc = (np.abs(np.array(acf_ps) - np.array(pred_ps)) < np.array(pred_ps)/10).sum() / len(pred_ps)
+    plt.title(f'accuracy: {acc:.2f}')
+    plt.savefig('/data/tests/acf_p_vs_pred_p.png')
+
+    plt.title(f'accuracy: {acc:.2f}')
+    plt.savefig('/data/tests/acf_vs_pred_p.png')
     plt.hist(ratios, 100)
     plt.xlabel('peak height ratio')
     plt.ylabel('count')
     plt.savefig('/data/tests/peak_height_ratio_hist.png')
     plt.close()
-    plt.scatter(ps, np.log(ratios))
+
+    plt.scatter(pred_ps, np.log(ratios))
     plt.xlabel('period')
-    plt.ylabel('peak height ratio')
+    plt.ylabel('log(peak height ratio)')
     plt.savefig('/data/tests/peak_height_ratio_vs_period.png')
     plt.close()
-    plt.scatter(incs, np.log(ratios))
+
+    plt.scatter(pred_incs, 1-np.exp(-np.array(ratios).abs()))
     plt.xlabel('inclination')
-    plt.ylabel('peak height ratio')
+    plt.ylabel('log(peak height ratio)')
     plt.savefig('/data/tests/peak_height_ratio_vs_inclination.png')
     plt.close()
-    plt.scatter(max_lats, np.log(ratios))
-    plt.xlabel('max latitude')
-    plt.ylabel('peak height ratio')
-    plt.savefig('/data/tests/peak_height_ratio_vs_max_lat.png')
+
+    plt.scatter(ps, pred_ps)
+    plt.xlabel('period')
+    plt.ylabel('predicted period')
+    plt.xlim(0, 60)
+    acc = (np.abs(np.array(ps) - np.array(pred_ps)) < np.array(ps)/10).sum() / len(ps)
+    plt.title(f'accuracy: {acc:.2f}')
+    plt.savefig('/data/tests/p_vs_pred_p.png')
+    plt.close()
+
+    plt.scatter(np.abs(np.array(ps) - np.array(pred_ps))/ps, np.log(ratios))
+    plt.xlabel('error in period')
+    plt.ylabel('log(peak height ratio)')
+    plt.savefig('/data/tests/peak_height_ratio_vs_err_p.png')
+    plt.close()
+
+    plt.scatter(conf_inc, np.log(ratios))
+    plt.xlabel('inclination confidence')
+    plt.ylabel('log(peak height ratio)')
+    plt.savefig('/data/tests/peak_height_ratio_vs_conf_i.png')
+    plt.close()
+
+    plt.scatter(conf_p, np.log(ratios))
+    plt.xlabel('period confidence')
+    plt.ylabel('log(peak height ratio)')
+    plt.savefig('/data/tests/peak_height_ratio_vs_conf_p.png')
+    plt.close()
+
+
+    plt.scatter(np.abs(np.array(incs) - np.array(pred_incs))/incs, np.log(ratios))
+    plt.xlabel('error in inclination')
+    plt.ylabel('log(peak height ratio)')
+    plt.savefig('/data/tests/peak_height_ratio_vs_err_i.png')
     plt.close()
 
     
@@ -1665,7 +1736,7 @@ if __name__ == "__main__":
     # create_period_normalized_samples('/data/butter/data_cos_old', 50000, num_ps=20)
     # create_period_normalized_samples('/data/butter/data_sun_like', 50000, num_ps=20)
     # sun_like_analysis()
-    test_peak_height_ratio('/data/butter/test_cos_old', 1000,)
+    test_peak_height_ratio('/data/butter/test_cos_old', 1000, '/data/logs/astroconf/exp40')
 
     # test_timeDetr()
 

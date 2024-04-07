@@ -621,10 +621,8 @@ class TimeSeriesDataset(Dataset):
         p = self.loaded_labels.iloc[sample_idx]['Period']
         info = {'idx': idx, 'period': p}
         x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values
-        t1 = time.time()
         x = x[int(self.init_frac*len(x)):,:]
         x[:,1] = fill_nan_np(x[:,1], interpolate=True)
-        t2 = time.time()
         if self.transforms is not None:
           x, _, info = self.transforms(x[:,1], mask=None,  info=info, step=self.step)
           if self.seq_len > x.shape[0]:
@@ -632,10 +630,7 @@ class TimeSeriesDataset(Dataset):
           info['idx'] = idx
         else:
           x = x[:,1]
-        t3 = time.time()
         x = x.T[:, :self.seq_len]
-        # x = torch.tensor(x.T[:, :int(self.dur/self.freq_rate)])
-        t4 = time.time()
         x = x.nan_to_num(0)
         y = self.get_labels(sample_idx)
         if self.spots:
@@ -651,7 +646,6 @@ class TimeSeriesDataset(Dataset):
       if self.spec:
         spec = T.Spectrogram(n_fft=self.n_fft, win_length=4, hop_length=4)
         x_spec = spec(x)
-        # t6 = time.time()
         return x_spec.unsqueeze(0), y, x.float(), info
       end = time.time()
       if torch.isnan(x).sum():
