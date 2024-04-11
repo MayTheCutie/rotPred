@@ -23,7 +23,7 @@ def D(p, z, version='simplified'): # negative cosine similarity
 
 
 class projection_MLP(nn.Module):
-    def __init__(self, in_dim, hidden_dim=128, out_dim=128):
+    def __init__(self, in_dim, hidden_dim=64, out_dim=64):
         super().__init__()
         ''' page 3 baseline setting
         Projection MLP. The projection MLP (in f) has BN ap-
@@ -64,7 +64,7 @@ class projection_MLP(nn.Module):
 
 
 class prediction_MLP(nn.Module):
-    def __init__(self, in_dim=128, hidden_dim=64, out_dim=128): # bottleneck structure
+    def __init__(self, in_dim=64, hidden_dim=32, out_dim=64): # bottleneck structure
         super().__init__()
         ''' page 3 baseline setting
         Prediction MLP. The prediction MLP (h) has BN applied 
@@ -458,7 +458,7 @@ class LSTM_DUAL(LSTM_ATTN):
         nn.Dropout(p=0.3),
         nn.Linear(self.predict_size,self.num_classes),
     )
-    def forward(self, x, x_dual=None):
+    def forward(self, x, x_dual=None, acf_phr=None):
         if x_dual is None:
             x, x_dual = x[:,0,:], x[:,1,:]
         if len(x.shape) == 2:
@@ -468,6 +468,11 @@ class LSTM_DUAL(LSTM_ATTN):
         t_features = self.attention(c_f, x, x) # [B, 2*hidden_size]
         d_features, _ = self.dual_model(x_dual) # [B, encoder_dims]
         features = torch.cat([t_features, d_features], dim=1) # [B, 2*hidden_size + encoder_dims]
+        # if acf_phr is not None:
+        #     phr = acf_phr.reshape(-1,1).float()
+        # else:
+        #     phr = torch.zeros(features.shape[0],1, device=features.device)
+        # features = torch.cat([features, phr], dim=1)
         out = self.pred_layer(features)
         return out
 

@@ -50,7 +50,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 40
+exp_num = 44
 
 log_path = '/data/logs/astroconf'
 
@@ -259,16 +259,16 @@ if __name__ == '__main__':
 
 
 
-    # state_dict = torch.load(f'{log_path}/exp34/astroconf.pth')
-    # new_state_dict = OrderedDict()
-    # for key, value in state_dict.items():
-    #     if key.startswith('module.'):
-    #         while key.startswith('module.'):
-    #             key = key[7:]
-    #     new_state_dict[key] = value
-    # state_dict = new_state_dict
-    # print("loading state dict...")
-    # model.load_state_dict(new_state_dict)
+    state_dict = torch.load(f'{log_path}/exp31/astroconf.pth')
+    new_state_dict = OrderedDict()
+    for key, value in state_dict.items():
+        if key.startswith('module.'):
+            while key.startswith('module.'):
+                key = key[7:]
+        new_state_dict[key] = value
+    state_dict = new_state_dict
+    print("loading state dict...")
+    model.load_state_dict(new_state_dict)
 
     # state_dict = torch.load(f'/data/logs/lstm_attn/exp77/lstm_attn_acc2.pth')
     # new_state_dict = OrderedDict()
@@ -325,7 +325,7 @@ if __name__ == '__main__':
     print("Evaluation on test set:")
 
     preds, targets, confs = trainer.predict(test_dataloader, device=local_rank,
-                                             conf=True, load_best=True)
+                                             conf=True, load_best=False)
 
     eval_results(preds, targets, confs, labels=class_labels, data_dir=f'{log_path}/exp{exp_num}',
                   model_name=model.module.__class__.__name__,  num_classes=len(class_labels), cos_inc=False)

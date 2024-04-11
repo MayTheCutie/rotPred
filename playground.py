@@ -85,7 +85,6 @@ idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nl
 
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
 
-
 def test_time_augmentations():
     ssl_tf = DataTransform_TD_bank
     dur = 90
@@ -115,7 +114,7 @@ def test_time_augmentations():
         if i == 10:
             break
 
-def test_peak_height_ratio(data_folder, num_samples):
+def test_peak_height_ratio(data_folder, num_samples, eval_folder):
     lc_path = os.path.join(data_folder, 'simulations')
     csv_path = os.path.join(data_folder, 'simulation_properties.csv')
     labels_df = pd.read_csv(csv_path)
@@ -157,6 +156,9 @@ def test_peak_height_ratio(data_folder, num_samples):
         pred_ps.append(pred_p)
         pred_incs.append(pred_inc)
         acf_ps.append(p_acf)
+        if i > num_samples:
+            break
+    err = np.tanh(np.abs(ratios)/5)
     plt.scatter(ps, pred_ps)
     plt.xlabel('period')
     plt.ylabel('predicted period')
@@ -197,7 +199,7 @@ def test_peak_height_ratio(data_folder, num_samples):
     plt.savefig('/data/tests/peak_height_ratio_vs_period.png')
     plt.close()
 
-    plt.scatter(pred_incs, 1-np.exp(-np.array(ratios).abs()))
+    plt.scatter(pred_incs,  np.log(ratios))
     plt.xlabel('inclination')
     plt.ylabel('log(peak height ratio)')
     plt.savefig('/data/tests/peak_height_ratio_vs_inclination.png')
@@ -212,7 +214,7 @@ def test_peak_height_ratio(data_folder, num_samples):
     plt.savefig('/data/tests/p_vs_pred_p.png')
     plt.close()
 
-    plt.scatter(np.abs(np.array(ps) - np.array(pred_ps))/ps, np.log(ratios))
+    plt.scatter(np.abs(np.array(ps) - np.array(pred_ps))/ps, err)
     plt.xlabel('error in period')
     plt.ylabel('log(peak height ratio)')
     plt.savefig('/data/tests/peak_height_ratio_vs_err_p.png')
@@ -231,9 +233,9 @@ def test_peak_height_ratio(data_folder, num_samples):
     plt.close()
 
 
-    plt.scatter(np.abs(np.array(incs) - np.array(pred_incs))/incs, np.log(ratios))
+    plt.scatter(np.abs(np.array(incs) - np.array(pred_incs))/incs, err)
     plt.xlabel('error in inclination')
-    plt.ylabel('log(peak height ratio)')
+    plt.ylabel('tanh(abs(peak height ratio))')
     plt.savefig('/data/tests/peak_height_ratio_vs_err_i.png')
     plt.close()
 
@@ -1767,12 +1769,9 @@ if __name__ == "__main__":
     # create_period_normalized_samples('/data/butter/data_cos_old', 50000, num_ps=20)
     # create_period_normalized_samples('/data/butter/data_sun_like', 50000, num_ps=20)
     # sun_like_analysis()
-<<<<<<< HEAD
     test_peak_height_ratio('/data/butter/test_cos_old', 1000, '/data/logs/astroconf/exp40')
-=======
     # test_peak_height_ratio('/data/butter/test_cos_old', 1000,)
-    test_time_augmentations()
->>>>>>> 8828aa7d4be3a2774404ed0abb98e95efa4f331f
+    # test_time_augmentations()
 
     # test_timeDetr()
 

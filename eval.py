@@ -40,14 +40,6 @@ print('device is ', DEVICE)
 
 test_data_folder = "/data/butter/test2"
 
-max_p, min_p = 60, 0
-max_i, min_i = np.pi/2, 0
-min_cycle, max_cycle = 1, 10
-min_tau, max_tau = 1,10
-min_lat, max_lat = 0, 80
-
-boundary_values_dict = {'Period': (min_p, max_p), 'Inclination': (min_i, max_i),
- 'Decay Time': (min_tau, max_tau), 'Cycle Length': (min_cycle, max_cycle), 'Spot Max': (min_lat, max_lat),}
 
 # filtered_idx = filter_p( os.path.join(data_folder, "simulation_properties.csv"), max_p)
 
@@ -298,6 +290,8 @@ def eval_results(output, target, conf, data_dir, model_name, cls=False, labels=[
     if not cls:
         if scale_target:
             print("scaling target with cos_inc: ", cos_inc)
+            print("target before ", target[:,1].max(), target[:,1].min())
+            print("output before ", output[:,1].max(), output[:,1].min())
             for i in range(len(labels)):
                 if labels[i] == 'Inclination' and cos_inc:
                     target[:,i] = np.pi/2 - np.arccos(target[:,i])

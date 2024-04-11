@@ -679,14 +679,14 @@ def find_longest_consecutive_indices(nums):
     return longest_start, longest_end
 def kepler_collate_fn(batch):
     # Separate the elements of each sample tuple (x, y, mask, info) into separate lists
-    xs, ys, masks, infos = zip(*batch)
+    xs, ys, masks, masks_y, infos, infos_y = zip(*batch)
 
     # Convert lists to tensors
     xs_tensor = torch.stack(xs, dim=0)
     ys_tensor = torch.stack(ys, dim=0)
     masks_tensor = torch.stack(masks, dim=0)
-
-    return xs_tensor, ys_tensor, masks_tensor, infos
+    masks_y_tensor = torch.stack(masks_y, dim=0)
+    return xs_tensor, ys_tensor, masks_tensor, masks_y_tensor, infos, infos_y
 
 def calc_luminosity(Teff, R):
     return 4*np.pi*(R)**2 * (Teff)**4 * 5.670373e-8
