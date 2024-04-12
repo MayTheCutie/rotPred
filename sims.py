@@ -24,21 +24,22 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import glob
 
-local = True
+local = False
 root_dir = '.' if local else '/data/lightPred'
+
 data_folder = f"{root_dir}/data"
 
 log_path = '../logs/simsiam' if local else '/data/logs/simsiam'
 
 yaml_dir = f'{root_dir}/Astroconf/'
 
-exp_num = 13
+exp_num = 14
 
 num_epochs = 400
 
 b_size = 16
 
-dur = 90
+dur = 720
 
 cad = 30
 
@@ -72,12 +73,9 @@ lstm_params = {
 
 optim_params = {"lr": 5e-5, 'weight_decay': 1e-4}
 
-# samples_list = list_files_in_directory(data_folder)
-samples_list = [file_name for file_name in glob.glob(os.path.join(data_folder, '*')) if not os.path.isdir(file_name)]
 
-# samples_list = os.listdir(data_folder)
-# print("before split: ", samples_list[:10000])
-kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3, 17))
+kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
+
 try:
     kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
 except TypeError:
@@ -89,15 +87,16 @@ kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
 
 
 train_df, val_df = train_test_split(kepler_df, test_size=0.2, random_state=1234)
-# print("after split:" ,train_list[:1000], val_list[:10])
 
 def setup(rank, world_size):
     # initialize the process group
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 if __name__ == "__main__":
+    print(DEVICE)
 
-    if DEVICE == 'cuda':
+    if DEVICE.type == 'cuda':
+        print("cuda is available")
         world_size    = int(os.environ["WORLD_SIZE"])
         rank          = int(os.environ["SLURM_PROCID"])
         #gpus_per_node = int(os.environ["SLURM_GPUS_ON_NODE"])
@@ -112,6 +111,7 @@ if __name__ == "__main__":
         torch.cuda.set_device(local_rank)
         print(f"rank: {rank}, local_rank: {local_rank}")
     else:
+        print("cuda is not available")
         local_rank = DEVICE
         world_size = 1
         rank = 0
@@ -123,7 +123,7 @@ if __name__ == "__main__":
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)), MovingAvg(49),
                          RandomTransform([Mask(0.1), AddGaussianNoise(sigma=0.0001), Identity()]),
                         ACF(), ToTensor(), Normalize('std')])
-    train_ds = KeplerDataset(data_folder, path_list=None, df=val_df, t_samples=int(dur/cad*DAY2MIN),
+    train_ds = KeplerDataset(data_folder, path_list=None, df=train_df, t_samples=int(dur/cad*DAY2MIN),
      transforms=transform, target_transforms=transform)
     val_ds = KeplerDataset(data_folder, path_list=None, df=val_df, t_samples=int(dur/cad*DAY2MIN),
      transforms=transform, target_transforms=transform)
@@ -138,9 +138,9 @@ if __name__ == "__main__":
 
     for i in range(4):
         fig, axes = plt.subplots(1, 2)
-        x,y,mask,info = train_ds[i]
+        x,y,mask, mask_y, info, info_y = train_ds[i]
 
-        print(x.shape, y.shape, info)
+        print(x.shape, y.shape, info['random_transform'], info_y['random_transform'])
 
     # for i, (x1,x2) in enumerate(val_dl):
     #     print(x1.shape, x2.shape)

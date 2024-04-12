@@ -11,6 +11,7 @@ from matplotlib import pyplot as plt
 import os
 from scipy.signal import savgol_filter as savgol
 # from pytorch_forecasting.utils import autocorrelation
+from scipy.signal import find_peaks
 
 
 class Compose:
@@ -379,8 +380,10 @@ class PeriodNorm():
         return f"PeriodNorm(num_ps={self.num_ps}, orig_freq={self.orig_freq})"
 
 class ACF():
-    def __init__(self, max_lag=None):
+    def __init__(self, max_lag=None, prom=0.001, calc_phr=False):
         self.max_lag = max_lag
+        self.prom = prom
+        self.calc_phr = calc_phr
     def __call__(self, x, mask=None, info=None, step=None):
         if isinstance(x, np.ndarray):
             # x_no_nans = x.copy()
@@ -390,6 +393,13 @@ class ACF():
             if mask is not None:
                 acf[mask] = np.nan
             x = np.hstack((acf, x))
+            if self.calc_phr:
+                peaks, _ = find_peaks(x[:,0], distance=5, prominence=self.prom)
+                if len(peaks) >= 2:
+                    phr = (acf[peaks[0]] / acf[peaks[1]])[0]
+                else:
+                    phr = 0
+                info['acf_phr'] = np.abs(phr)
         else:
             acf = autocorrelation(x, dim=0)
             if mask is not None:
@@ -420,8 +430,9 @@ class ToTensor():
     def __init__(self):
         pass
     def __call__(self, x, mask=None, info=None, step=None):
-        if isinstance(x, np.ndarray):
-            x = torch.from_numpy(x)
+        x = torch.tensor(x)
+        if mask is not None:
+            mask = torch.tensor(mask)
         return x, mask, info
     def __repr__(self):
         return "ToTensor"

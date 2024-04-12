@@ -195,8 +195,8 @@ if __name__ == '__main__':
                          KeplerNoiseAddition(noise_dataset=None, noise_path=f'{root_dir}/data/noise',
                           transforms=kep_transform),
                          MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(), ])
-    test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
-                              KeplerNoiseAddition(noise_dataset=None, noise_path=f'{root_dir}/data/noise',
+    test_transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
+                              KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),
                               MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(),])
 
@@ -268,16 +268,24 @@ if __name__ == '__main__':
 
 
 
-    # state_dict = torch.load(f'{log_path}/exp34/astroconf.pth')
+    # state_dict = torch.load(f'/data/logs/simsiam/exp14/simsiam_astroconf.pth')
+    # initialized_layers=[]
     # new_state_dict = OrderedDict()
     # for key, value in state_dict.items():
     #     if key.startswith('module.'):
     #         while key.startswith('module.'):
-    #             key = key[7:]
-    #     new_state_dict[key] = value
+    #             key = key.replace('module.', '')
+    #     if key.startswith('backbone.'):
+    #         print(key)
+    #         new_state_dict[key.replace('backbone.', '')] = value
+    #         initialized_layers.append(key.replace('backbone.', ''))
     # state_dict = new_state_dict
     # print("loading state dict...")
-    # model.load_state_dict(new_state_dict)
+    # missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
+    # print("Missing keys:")
+    # print(missing)
+    # print("Unexpected keys:")
+    # print(unexpected)
 
     # state_dict = torch.load(f'/data/logs/lstm_attn/exp77/lstm_attn_acc2.pth')
     # new_state_dict = OrderedDict()
@@ -334,7 +342,7 @@ if __name__ == '__main__':
 
     print("Evaluation on test set:")
 
-    preds, targets, confs = trainer.predict(test_dataloader, device=local_rank,
+    preds, targets, confs = trainer.predict(val_dataloader, device=local_rank,
                                              conf=True, load_best=False)
 
     eval_results(preds, targets, confs, labels=class_labels, data_dir=f'{log_path}/exp{exp_num}',

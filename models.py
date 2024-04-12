@@ -23,7 +23,7 @@ def D(p, z, version='simplified'): # negative cosine similarity
 
 
 class projection_MLP(nn.Module):
-    def __init__(self, in_dim, hidden_dim=128, out_dim=128):
+    def __init__(self, in_dim, hidden_dim=64, out_dim=64):
         super().__init__()
         ''' page 3 baseline setting
         Projection MLP. The projection MLP (in f) has BN ap-
@@ -64,7 +64,7 @@ class projection_MLP(nn.Module):
 
 
 class prediction_MLP(nn.Module):
-    def __init__(self, in_dim=128, hidden_dim=64, out_dim=128): # bottleneck structure
+    def __init__(self, in_dim=64, hidden_dim=32, out_dim=64): # bottleneck structure
         super().__init__()
         ''' page 3 baseline setting
         Prediction MLP. The prediction MLP (h) has BN applied 
@@ -456,9 +456,13 @@ class LSTM_DUAL(LSTM_ATTN):
         nn.Linear(self.num_features, self.predict_size),
         nn.GELU(),
         nn.Dropout(p=0.3),
-        nn.Linear(self.predict_size,self.num_classes),
-    )
-    def forward(self, x, x_dual=None):
+        nn.Linear(self.predict_size,self.num_classes//2),)
+        self.conf_layer = nn.Sequential(
+        nn.Linear(16, 16),
+        nn.GELU(),
+        nn.Dropout(p=0.3),
+        nn.Linear(16,self.num_classes//2),)
+    def forward(self, x, x_dual=None, acf_phr=None):
         if x_dual is None:
             x, x_dual = x[:,0,:], x[:,1,:]
         if len(x.shape) == 2:
@@ -469,7 +473,14 @@ class LSTM_DUAL(LSTM_ATTN):
         d_features, _ = self.dual_model(x_dual) # [B, encoder_dims]
         features = torch.cat([t_features, d_features], dim=1) # [B, 2*hidden_size + encoder_dims]
         out = self.pred_layer(features)
-        return out
+        if acf_phr is not None:
+            phr = acf_phr.reshape(-1,1).float()
+        else:
+            phr = torch.zeros(features.shape[0],1, device=features.device)
+        mean_features = torch.nn.functional.adaptive_avg_pool1d(features.unsqueeze(1), 16).squeeze(1)
+        mean_features += phr
+        conf = self.conf_layer(mean_features)
+        return torch.cat([out, conf], dim=1)
 
 class EncoderDecoder(torch.nn.Module):
     def __init__(self, encoder, decoder):

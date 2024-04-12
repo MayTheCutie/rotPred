@@ -282,11 +282,8 @@ class KeplerDataset(TimeSsl):
     x = np.load(os.path.join(self.root_dir, self.path_list[idx]))
     return torch.tensor(x), dict()
 
-  def apply_mask(self, x, mask):
-      if mask is None:
-          out = x
-          out[torch.isnan(out)] = 0.
-          return out
+
+  def apply_mask_one_channel(self, x, mask):
       r = torch.rand_like(x)
       keep_mask = (~mask | (r <= self.keep_ratio)).to(x.dtype)
       random_mask = (mask & (self.keep_ratio < r)
@@ -296,6 +293,18 @@ class KeplerDataset(TimeSsl):
       out = x * keep_mask + (torch.rand_like(x) * (xM - xm) + xm) * random_mask
       out[torch.isnan(out)] = 0.
       return out
+
+  def apply_mask(self, x, mask):
+      if mask is None:
+          out = x
+          mask = torch.zeros_like(x).bool()
+          return out, mask
+      mask = torch.tensor(mask.T[:, :self.seq_len])
+      out = x.clone()
+      for c in range(x.shape[0]):
+          out[c] = self.apply_mask_one_channel(x[c], mask)
+      mask = mask.repeat(x.shape[0],1)
+      return out, mask
 
   def __getitem__(self, idx):
     tic = time.time()
@@ -310,37 +319,29 @@ class KeplerDataset(TimeSsl):
       qs = [] # to be implemented
     info = {'idx': idx}
     info['qs'] = qs
+    info_y = copy.deepcopy(info)
     x /= x.max()
     target = x.copy()
-    # if np.all(x == 0):
-    #     x = torch.zeros((1,len(x)))
-    #     return x,x,x.bool(), info
-    toc1 = time.time()
-    # print("number of differnt values (in dataset): ", len(np.where((x - target)!=0)[0]))
     if self.transforms is not None:
           x, mask, info = self.transforms(x, mask=None, info=info)
           if self.seq_len > x.shape[0]:
-            x = np.pad(x, ((0, self.seq_len - x.shape[-1]), (0,0)), "constant", constant_values=0)
+            x = F.pad(x, ((0,0, 0, self.seq_len - x.shape[-1])), "constant", value=0)
             if mask is not None:
-              mask = np.pad(mask, ((0, self.seq_len - mask.shape[-1]), (0,0)), "constant", constant_values=0)
+              mask = F.pad(mask, ((0,0,0, self.seq_len - mask.shape[-1])), "constant", value=0)
     if self.target_transforms is not None:
-            target, _, _ = self.target_transforms(target, mask=None, info=info)
+            target, mask_y, info_y = self.target_transforms(target, mask=None, info=info_y)
             if self.seq_len > target.shape[0]:
-                target = np.pad(target, ((0, self.seq_len - target.shape[-1]), (0,0)), "constant", constant_values=0)
+                target = F.pad(target, ((0,0,0, self.seq_len - target.shape[-1])), "constant", value=0)
+                if mask_y is not None:
+                  mask_y = F.pad(mask_y, ((0,0,0, self.seq_len - mask_y.shape[-1])), "constant", value=0)
+            target = target.T[:, :self.seq_len].nan_to_num(0)
     else:
         target = x.copy()
-    toc2 = time.time()
-    x = x.T[:, :self.seq_len]
-    target = target.T[:, :self.seq_len]
-    if mask is not None:
-      mask = torch.tensor(mask.T[:, :self.seq_len])
-      out = x.clone()
-      for c in range(x.shape[0]):
-          out[c] = self.apply_mask(x[c], mask)
-    else:
-        mask = torch.zeros_like(x).bool()
-        out = x
-    # print("number of differnt values (in dataset2): ", len(torch.where((x - target) != 0)[0]))
+        mask_y = None
+    # print(x.shape, target.shape)
+    x = x.T[:, :self.seq_len].nan_to_num(0)
+    x,mask = self.apply_mask(x, mask)
+    target, mask_y = self.apply_mask(target, mask_y)
 
     if len(meta):
       info['Teff'] = meta['TEFF'] if meta['TEFF'] is not None else 0
@@ -348,9 +349,9 @@ class KeplerDataset(TimeSsl):
       info['logg'] = meta['LOGG'] if meta['LOGG'] is not None else 0
     info['path'] = self.df.iloc[idx]['data_file_path'] if self.df is not None else self.path_list[idx]
     info['KID'] = self.df.iloc[idx]['KID'] if self.df is not None else self.path_list[idx].split("/")[-1].split("-")[0].split('kplr')[-1]
-    info['time'] = toc2 - tic
-    print('shapes:', x.shape, target.shape, mask.shape, info)
-    return out.float(), target, mask, info
+    toc = time.time()
+    info['time'] = toc - tic
+    return x.float(), target.float(), mask, mask_y, info, info_y
 
    
 class KeplerNoiseDataset(KeplerDataset):
@@ -622,10 +623,8 @@ class TimeSeriesDataset(Dataset):
         p = self.loaded_labels.iloc[sample_idx]['Period']
         info = {'idx': idx, 'period': p}
         x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values
-        t1 = time.time()
         x = x[int(self.init_frac*len(x)):,:]
         x[:,1] = fill_nan_np(x[:,1], interpolate=True)
-        t2 = time.time()
         if self.transforms is not None:
           x, _, info = self.transforms(x[:,1], mask=None,  info=info, step=self.step)
           if self.seq_len > x.shape[0]:
@@ -633,10 +632,7 @@ class TimeSeriesDataset(Dataset):
           info['idx'] = idx
         else:
           x = x[:,1]
-        t3 = time.time()
         x = x.T[:, :self.seq_len]
-        # x = torch.tensor(x.T[:, :int(self.dur/self.freq_rate)])
-        t4 = time.time()
         x = x.nan_to_num(0)
         y = self.get_labels(sample_idx)
         if self.spots:
@@ -652,7 +648,6 @@ class TimeSeriesDataset(Dataset):
       if self.spec:
         spec = T.Spectrogram(n_fft=self.n_fft, win_length=4, hop_length=4)
         x_spec = spec(x)
-        # t6 = time.time()
         return x_spec.unsqueeze(0), y, x.float(), info
       end = time.time()
       if torch.isnan(x).sum():

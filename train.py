@@ -40,7 +40,7 @@ class Trainer(object):
     """
     A class that encapsulates the training loop for a PyTorch model.
     """
-    def __init__(self, model, optimizer, criterion, train_dataloader, device, num_classes=2, scheduler=None, val_dataloader=None,
+    def __init__(self, model, optimizer, criterion, train_dataloader, device, world_size=1, num_classes=2, scheduler=None, val_dataloader=None,
                  optim_params=None, max_iter=np.inf, net_params=None, scaler=None, grad_clip=False,
                    exp_num=None, log_path=None, exp_name=None, plot_every=None, cos_inc=False):
         self.model = model
@@ -55,6 +55,7 @@ class Trainer(object):
         self.val_dl = val_dataloader
         self.max_iter = max_iter
         self.device = device
+        self.world_size = world_size
         self.optim_params = optim_params
         self.net_params = net_params
         self.exp_num = exp_num
@@ -113,48 +114,52 @@ class Trainer(object):
         train_acc, val_acc = [], []
         self.optim_params['lr_history'] = []
         epochs_without_improvement = 0
+        main_proccess = (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0) or self.device == 'cpu'
 
         print(f"Starting training for {num_epochs} epochs with parameters: {self.optim_params}, {self.net_params}")
+        print("is main process: ", main_proccess, flush=True)
         for epoch in range(num_epochs):
+            print("device: ", torch.distributed.get_rank(), self.device, flush=True)
             start_time = time.time()
             plot = (self.plot_every is not None) and (epoch % self.plot_every == 0)
             t_loss, t_acc = self.train_epoch(device, epoch=epoch, only_p=only_p, plot=plot, conf=conf)
             t_loss_mean = np.mean(t_loss)
             train_loss.extend(t_loss)
             global_train_accuracy, global_train_loss = self.process_loss(t_acc, t_loss_mean)
-            if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:  # Only perform this on the master GPU
+            if main_proccess:  # Only perform this on the master GPU
                 train_acc.append(global_train_accuracy.mean().item())
+                
 
             v_loss, v_acc = self.eval_epoch(device, epoch=epoch, only_p=only_p, plot=plot, conf=conf)
             v_loss_mean = np.mean(v_loss)
             val_loss.extend(v_loss)
             global_val_accuracy, global_val_loss = self.process_loss(v_acc, v_loss_mean)
-            if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:  # Only perform this on the master GPU                
+            if main_proccess:  # Only perform this on the master GPU                
                 val_acc.append(global_val_accuracy.mean().item())
-            if self.scheduler is not None:
-                self.scheduler.step(global_val_loss)
-            criterion = min_loss if best == 'loss' else best_acc
-            mult = 1 if best == 'loss' else -1
-            objective = global_val_loss if best == 'loss' else global_val_accuracy.mean()
-            if mult*objective < mult*criterion:
-                print("saving model...")
-                if best == 'loss':
-                    min_loss = global_val_loss
+                if self.scheduler is not None:
+                    self.scheduler.step(global_val_loss)
+                criterion = min_loss if best == 'loss' else best_acc
+                mult = 1 if best == 'loss' else -1
+                objective = global_val_loss if best == 'loss' else global_val_accuracy.mean()
+                if mult*objective < mult*criterion:
+                    print("saving model...")
+                    if best == 'loss':
+                        min_loss = global_val_loss
+                    else:
+                        best_acc = global_val_accuracy.mean()
+                    torch.save(self.model.state_dict(), f'{self.log_path}/exp{self.exp_num}/{self.exp_name}.pth')
+                    self.best_state_dict = self.model.state_dict()
+                    epochs_without_improvement = 0
                 else:
-                    best_acc = global_val_accuracy.mean()
-                torch.save(self.model.state_dict(), f'{self.log_path}/exp{self.exp_num}/{self.exp_name}.pth')
-                self.best_state_dict = self.model.state_dict()
-                epochs_without_improvement = 0
-            else:
-                epochs_without_improvement += 1
-                if epochs_without_improvement == early_stopping:
-                    print('early stopping!', flush=True)
-                    break
-
-            print(f'Epoch {epoch}: Train Loss: {global_train_loss:.6f}, Val Loss: {global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, Val Acc: {global_val_accuracy.round(decimals=4).tolist()}, Time: {time.time() - start_time:.2f}s')
-
-            if epoch % 10 == 0:
-                print(os.system('nvidia-smi'))
+                    epochs_without_improvement += 1
+                    if epochs_without_improvement == early_stopping:
+                        print('early stopping!', flush=True)
+                        break
+                print(f'Epoch {epoch}: Train Loss: {global_train_loss:.6f}, Val Loss:'\
+                f'{global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, '\
+                 f'Val Acc: {global_val_accuracy.round(decimals=4).tolist()}, Time: {time.time() - start_time:.2f}s', flush=True)
+                if epoch % 10 == 0:
+                    print(os.system('nvidia-smi'))
 
         self.optim_params['lr'] = self.optimizer.param_groups[0]['lr']
         self.optim_params['lr_history'].append(self.optim_params['lr'])
@@ -168,14 +173,12 @@ class Trainer(object):
 
     def process_loss(self, acc, loss_mean):
         if  torch.cuda.is_available() and torch.distributed.is_initialized():
-            print("reducing loss and accuracy")
             global_accuracy = torch.tensor(acc).cuda()  # Convert accuracy to a tensor on the GPU
             torch.distributed.reduce(global_accuracy, dst=0, op=torch.distributed.ReduceOp.SUM)
             global_loss = torch.tensor(loss_mean).cuda()  # Convert loss to a tensor on the GPU
             torch.distributed.reduce(global_loss, dst=0, op=torch.distributed.ReduceOp.SUM)
             global_loss /= torch.distributed.get_world_size()
         else:
-            print("not reducing loss and accuracy")
             global_loss = torch.tensor(loss_mean)
             global_accuracy = torch.tensor(acc)
         return global_accuracy, global_loss
@@ -270,7 +273,7 @@ class Trainer(object):
         state_dict_files = glob.glob(data_dir + '/*.pth')
         print("loading model from ", state_dict_files[-1])
         
-        state_dict = torch.load(state_dict_files[-1]) if to_ddp else torch.load(state_dict_files[0],map_location=device)
+        state_dict = torch.load(state_dict_files[-1]) if to_ddp else torch.load(state_dict_files[0],map_location=self.device)
     
         if from_ddp:
             print("loading distributed model")
@@ -305,7 +308,6 @@ class Trainer(object):
             x = x.to(device)
             with torch.no_grad():
                 y_pred = self.model(x)
-                # print(i, " y_pred: ", y_pred.shape, "y: ", y.shape)
                 if conf:
                     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
             preds = np.concatenate((preds, y_pred.cpu().numpy()))
@@ -329,7 +331,7 @@ class DoubleInputTrainer(Trainer):
         train_acc = 0
         all_accs = torch.zeros(self.num_classes, device=device)
         pbar = tqdm(self.train_dl)
-        for i, (x,y, _,_) in enumerate(pbar):
+        for i, (x,y, _,info) in enumerate(pbar):
             tic = time.time()
             # print("x: ", x.shape, "y: ", y.shape)
             x1, x2 = x[:, 0, :], x[:, 1, :]
@@ -337,11 +339,13 @@ class DoubleInputTrainer(Trainer):
             x2 = x2.to(device)
             y = y.to(device)
             self.optimizer.zero_grad()
-            y_pred = self.model(x1.float(), x2.float())
+            if 'acf_phr' in info:
+                y_pred = self.model(x1.float(), x2.float(), acf_phr=info['acf_phr'])
+            else:
+                y_pred = self.model(x1.float(), x2.float())
             if y_pred.isnan().any():
                 print("y_pred is nan")
                 print("y_pred: ", y_pred)
-            t1 =  time.time() 
             if conf:
                 y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
                 conf_y = torch.abs(y - y_pred) 
@@ -390,13 +394,16 @@ class DoubleInputTrainer(Trainer):
         val_acc = 0
         all_accs = torch.zeros(self.num_classes, device=device)
         pbar = tqdm(self.val_dl)
-        for i, (x,y, _,_) in enumerate(pbar):
+        for i, (x,y, _,info) in enumerate(pbar):
             x1, x2 = x[:, 0, :], x[:, 1, :]
             x1 = x1.to(device)
             x2 = x2.to(device)
             y = y.to(device)
             with torch.no_grad():
-                y_pred = self.model(x1.float().squeeze(), x2.float().squeeze())
+                if 'acf_phr' in info:
+                    y_pred = self.model(x1.float(), x2.float(), acf_phr=info['acf_phr'])
+                else:
+                    y_pred = self.model(x1.float(), x2.float())
                 if conf:
                     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
                     conf_y = torch.abs(y - y_pred)
@@ -437,13 +444,16 @@ class DoubleInputTrainer(Trainer):
         confs = np.zeros((0, self.num_classes))
         tot_kic = []
         tot_teff = []
-        for i,(x,y,_,_) in enumerate(test_dataloader):
+        for i,(x,y,_,info) in enumerate(test_dataloader):
             x1, x2 = x[:, 0, :], x[:, 1, :]
             x1 = x1.to(device)
             x2 = x2.to(device)
             with torch.no_grad():
-                y_pred = self.model(x1.float(), x2.float())
-                # print(i, " y_pred: ", y_pred.shape, "y: ", y.shape)
+                if 'acf_phr' in info:
+                    y_pred = self.model(x1.float(), x2.float(), acf_phr=info['acf_phr'])
+                else:
+                    y_pred = self.model(x1.float(), x2.float())
+                # print(i, " y_pred: ", y_pred, "y: ", y)
                 if conf:
                     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
             preds = np.concatenate((preds, y_pred.cpu().numpy()))
@@ -451,6 +461,8 @@ class DoubleInputTrainer(Trainer):
                 targets = np.concatenate((targets, y.cpu().numpy()))
             if conf:
                 confs = np.concatenate((confs, conf_pred.cpu().numpy()))
+            if i >= self.max_iter:
+                break
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
         return preds, targets, confs
     
@@ -467,7 +479,7 @@ class KeplerTrainer(Trainer):
         train_loss = []
         train_acc = 0
         pbar = tqdm(self.train_dl)
-        for i, (x, y, _,info) in enumerate(pbar):
+        for i, (x, y, _, _, info, _) in enumerate(pbar):
             y = y.to(device)
             self.optimizer.zero_grad()
             if x.shape[1] == 2:
@@ -500,7 +512,7 @@ class KeplerTrainer(Trainer):
         self.model.eval()
         val_loss = []
         val_acc = 0
-        for i, (x, y, _,info) in enumerate(self.val_dl):
+        for i, (x, y, _, _, info, _) in enumerate(self.val_dl):
             x = x.to(device)
             y = y.to(device)
             self.optimizer.zero_grad()
@@ -548,7 +560,7 @@ class KeplerTrainer(Trainer):
 
         print("len test dataset: ", len(test_dataloader.dataset))
         pbar = tqdm(test_dataloader)
-        for i,(x, y,_,info) in enumerate(pbar):
+        for i,(x, y, _, _, info, _) in enumerate(pbar):
             if i > self.max_iter:
                 break
             # print("batch: ", i, "x: ", x.shape, "y: ", y.shape, flush=True)
@@ -880,9 +892,8 @@ class SiameseTrainer(Trainer):
         self.model.train()
         train_loss = []
         pbar = tqdm(self.train_dl)
-        for i, (x1, x2, _, info) in enumerate(pbar):
+        for i, (x1, x2, _, _, info1, info2) in enumerate(pbar):
             # print(i)
-            print("x1: ", x1.shape, "x2: ", x2.shape)
             x1, x2 = x1.to(device), x2.to(device)
             out = self.model(x1, x2)
             self.optimizer.zero_grad()
@@ -890,10 +901,10 @@ class SiameseTrainer(Trainer):
             loss.backward()
             self.optimizer.step()
             train_loss.append(loss.item())  
-            if i > self.max_iter:
+            if i > (self.max_iter//self.world_size):
                 break   
             pbar.set_description(f"train_loss:  {loss.item()}")
-        return train_loss, 0
+        return train_loss, 0.
 
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
         """
@@ -901,15 +912,17 @@ class SiameseTrainer(Trainer):
         """
         self.model.eval()
         val_loss = []
-        for i, (x1, x2, _, info) in enumerate(self.val_dl):
+        pbar = tqdm(self.val_dl)
+        for i, (x1, x2, _, _, info1, info2) in enumerate(pbar):
             x1, x2 = x1.to(device), x2.to(device)
             with torch.no_grad():
                 out = self.model(x1, x2)
             loss = out['loss']
             val_loss.append(loss.item())  
-            if i > self.max_iter/5:
-                break       
-        return val_loss, 0
+            if i > (self.max_iter//self.world_size/5):
+                break  
+            pbar.set_description(f"val_loss:  {loss.item()}")     
+        return val_loss, 0.
 
 
 class MaskedSSLTrainer(Trainer):
