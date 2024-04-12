@@ -10,7 +10,7 @@ import torch.optim as optim
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 import time
 import yaml
 import torch.distributed as dist

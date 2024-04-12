@@ -5,8 +5,8 @@ import numpy as np
 from astropy.table import Table
 import torch
 from torch.optim import AdamW, Adam
-from torchinfo import summary
-from nvitop import Device
+# from torchinfo import summary
+# from nvitop import Device
 import matplotlib.pyplot as plt
 from torch.nn.parallel import DistributedDataParallel as DDP
 

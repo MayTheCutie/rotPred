@@ -12,14 +12,14 @@ import yaml
 from collections import OrderedDict
 import time
 import lightkurve as lk
-# from butterpy import Spots
+# from butterpy_local import Spots
 from sklearn.model_selection import train_test_split
 from astropy.io import fits
 from typing import Callable, Dict, Optional, Tuple, Type, Union
 import collections
 import contextlib
 import re
-from scipy.signal import convolve, boxcar, medfilt
+# from scipy.signal import convolve, boxcar, medfilt
 
 
 
@@ -482,7 +482,7 @@ def evaluate_acf(root_dir, idx_list, max_p=60):
         # idx = remove_leading_zeros(idx)
         lc = pd.read_parquet(os.path.join(lc_path, f"lc_{idx}.pqt"))
         lc = lc.values.astype(np.float32)
-        meta = {'TARGETID':idx, 'OBJECT':'butterpy'}
+        meta = {'TARGETID':idx, 'OBJECT':'butterpy_local'}
         x_smoothed = convolve(medfilt(lc[:,1], kernel_size=51), boxcar_window, mode='same')
         x = lc[:,1] - x_smoothed + 1
         x = x[window_size//2:-window_size//2]

@@ -50,9 +50,11 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
+local = True
+
 exp_num = 40
 
-log_path = '/data/logs/astroconf'
+log_path = '/data/logs/astroconf' if not local else './logs/astroconf'
 
 if not os.path.exists(f'{log_path}/exp{exp_num}'):
     try:
@@ -61,13 +63,14 @@ if not os.path.exists(f'{log_path}/exp{exp_num}'):
     except OSError as e:
         print(e)
 
+root_dir = 'lightPred' if local else '/data/lightPred'
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
 # checkpoint_path = '/data/logs/astroconf/exp14'
-data_folder = "/data/butter/data_cos_old"
+data_folder = "/data/butter/data_cos_old" if not local else 'butter/data_cos_old'
 
-test_folder = "/data/butter/test_cos_old"
+test_folder = "/data/butter/test_cos_old" if local else 'butter/test_cos_old'
 
-yaml_dir = '/data/lightPred/Astroconf/'
+yaml_dir = f'{root_dir}/Astroconf/'
 
 Nlc = 50000
 
@@ -84,7 +87,7 @@ train_list, val_list = train_test_split(idx_list, test_size=0.1, random_state=12
 
 test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
-b_size = 32
+b_size = 16
 
 num_epochs = 1000
 
@@ -105,8 +108,9 @@ if torch.cuda.current_device() == 0:
     
 
 def setup(rank, world_size):
-    # initialize the process group
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    if world_size > 1:
+        # initialize the process group
+        dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 
 if __name__ == '__main__':
@@ -142,10 +146,15 @@ if __name__ == '__main__':
  "num_classes": 4,
     'stride': 4,
     'kernel_size': 4}
-      
-    world_size    = int(os.environ["WORLD_SIZE"])
-    rank          = int(os.environ["SLURM_PROCID"])
-    jobid         = int(os.environ["SLURM_JOBID"])
+
+    slurm_cpus_per_task = os.environ.get("SLURM_CPUS_PER_TASK", "1")
+    slurm_world_size = os.environ.get("WORLD_SIZE", 1)
+    slurm_rank = os.environ.get("SLURM_PROCID", 0)
+    slurm_jobid = os.environ.get("SLURM_JOBID", 0)
+    cpus_per_task = int(slurm_cpus_per_task)
+    world_size = int(slurm_world_size)
+    rank = int(slurm_rank)
+    jobid = int(slurm_jobid)
     #gpus_per_node = int(os.environ["SLURM_GPUS_ON_NODE"])
     # gpus_per_node = 4
     gpus_per_node = torch.cuda.device_count()
@@ -183,11 +192,11 @@ if __name__ == '__main__':
     # transforms=kep_transform, acf=False, norm='none')
 
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
-                         KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                         KeplerNoiseAddition(noise_dataset=None, noise_path=f'{root_dir}/data/noise',
                           transforms=kep_transform),
                          MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(), ])
     test_transform = Compose([Slice(0, int(dur/cad*DAY2MIN)),
-                              KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                              KeplerNoiseAddition(noise_dataset=None, noise_path=f'{root_dir}/data/noise',
                           transforms=kep_transform),
                               MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(),])
 
@@ -202,16 +211,16 @@ if __name__ == '__main__':
 
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
     train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler, \
-                                               num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True)
+                                               num_workers=cpus_per_task, pin_memory=True)
 
 
     val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
     val_dataloader = DataLoader(val_dataset, batch_size=b_size, sampler=val_sampler, \
-                                 num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
+                                 num_workers=cpus_per_task)
     
 
     test_dataloader = DataLoader(test_dataset, batch_size=b_size, \
-                                  num_workers=int(os.environ["SLURM_CPUS_PER_TASK"])) 
+                                  num_workers=cpus_per_task)
 
     print("dataset length: ", len(train_dataset), len(val_dataset), len(test_dataset))
 
@@ -282,7 +291,8 @@ if __name__ == '__main__':
     # model.load_state_dict(new_state_dict)
 
     model = model.to(local_rank)
-    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+    if torch.cuda.device_count() > 1:
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     print("number of params:", count_params(model))
     
     loss_fn = nn.L1Loss()
@@ -292,12 +302,12 @@ if __name__ == '__main__':
     # loss_fn = nn.SmoothL1Loss(beta=0.0005)
     # loss_fn = WeightedMSELoss(factor=1.2)
     # loss_fn = nn.GaussianNLLLoss()
-
+    model_name = model.module.__class__.__name__ if torch.cuda.device_count() > 1 else model.__class__.__name__
     data_dict = {'dataset': train_dataset.__class__.__name__,
                    'transforms': transform,  'batch_size': b_size,
      'num_epochs':num_epochs, 'checkpoint_path': f'{log_path}/exp{exp_num}', 'loss_fn':
       loss_fn.__class__.__name__,
-     'model': model.module.__class__.__name__, 'optimizer': optimizer.__class__.__name__,
+     'model': model_name, 'optimizer': optimizer.__class__.__name__,
      'data_folder': data_folder, 'test_folder': test_folder, 'class_labels': class_labels}
 
     with open(f'{log_path}/exp{exp_num}/data_params.yml', 'w') as outfile:

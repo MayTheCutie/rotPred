@@ -12,7 +12,7 @@ from astropy.io import fits
 from lightPred.utils import create_kepler_df
 from matplotlib import pyplot as plt
 from lightPred.utils import fill_nan_np, replace_zeros_with_average
-from pyts.image import GramianAngularField
+# from pyts.image import GramianAngularField
 from scipy.signal import stft, correlate2d
 from scipy import signal
 import time

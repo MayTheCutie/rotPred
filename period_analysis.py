@@ -25,7 +25,7 @@ from astropy.table import Table
 from scipy.signal import find_peaks
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import linregress
-from pytorch_forecasting.utils import autocorrelation
+# from pytorch_forecasting.utils import autocorrelation
 import torch
 from statsmodels.tsa.stattools import acf as A
 
@@ -339,7 +339,7 @@ def create_lc_object(root, id, butterpy=True, t_cutoff=0.4):
   if butterpy:
     lcc, prop = read_butterpy_lc(root, id)
     # lcc = lcc[50000:100000]
-    meta = {'TARGETID':id, 'OBJECT':'butterpy'}
+    meta = {'TARGETID':id, 'OBJECT':'butterpy_local'}
     lc = lk.LightCurve(time=lcc[int(len(lcc)*t_cutoff):,0], flux=lcc[int(len(lcc)*t_cutoff):,1], meta=meta)
   else:
     prop = None
