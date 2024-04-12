@@ -456,8 +456,12 @@ class LSTM_DUAL(LSTM_ATTN):
         nn.Linear(self.num_features, self.predict_size),
         nn.GELU(),
         nn.Dropout(p=0.3),
-        nn.Linear(self.predict_size,self.num_classes),
-    )
+        nn.Linear(self.predict_size,self.num_classes//2),)
+        self.conf_layer = nn.Sequential(
+        nn.Linear(16, 16),
+        nn.GELU(),
+        nn.Dropout(p=0.3),
+        nn.Linear(16,self.num_classes//2),)
     def forward(self, x, x_dual=None, acf_phr=None):
         if x_dual is None:
             x, x_dual = x[:,0,:], x[:,1,:]
@@ -468,13 +472,15 @@ class LSTM_DUAL(LSTM_ATTN):
         t_features = self.attention(c_f, x, x) # [B, 2*hidden_size]
         d_features, _ = self.dual_model(x_dual) # [B, encoder_dims]
         features = torch.cat([t_features, d_features], dim=1) # [B, 2*hidden_size + encoder_dims]
-        # if acf_phr is not None:
-        #     phr = acf_phr.reshape(-1,1).float()
-        # else:
-        #     phr = torch.zeros(features.shape[0],1, device=features.device)
-        # features = torch.cat([features, phr], dim=1)
         out = self.pred_layer(features)
-        return out
+        if acf_phr is not None:
+            phr = acf_phr.reshape(-1,1).float()
+        else:
+            phr = torch.zeros(features.shape[0],1, device=features.device)
+        mean_features = torch.nn.functional.adaptive_avg_pool1d(features.unsqueeze(1), 16).squeeze(1)
+        mean_features += phr
+        conf = self.conf_layer(mean_features)
+        return torch.cat([out, conf], dim=1)
 
 class EncoderDecoder(torch.nn.Module):
     def __init__(self, encoder, decoder):

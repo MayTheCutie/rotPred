@@ -449,10 +449,10 @@ class DoubleInputTrainer(Trainer):
             x1 = x1.to(device)
             x2 = x2.to(device)
             with torch.no_grad():
-                # if 'acf_phr' in info:
-                #     y_pred = self.model(x1.float(), x2.float(), acf_phr=info['acf_phr'])
-                # else:
-                y_pred = self.model(x1.float(), x2.float())
+                if 'acf_phr' in info:
+                    y_pred = self.model(x1.float(), x2.float(), acf_phr=info['acf_phr'])
+                else:
+                    y_pred = self.model(x1.float(), x2.float())
                 # print(i, " y_pred: ", y_pred, "y: ", y)
                 if conf:
                     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
