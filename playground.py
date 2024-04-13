@@ -8,7 +8,6 @@ import pandas as pd
 from matplotlib import pyplot as plt
 from statsmodels.tsa.stattools import acf as A
 from collections import OrderedDict
-from pyts.image import GramianAngularField
 import shutil
 from scipy.signal import find_peaks, peak_prominences, peak_widths
 from matplotlib.lines import Line2D
@@ -41,7 +40,7 @@ from lightPred.period_analysis import analyze_lc, analyze_lc_kepler
 from lightPred.timeDetr import TimeSeriesDetrModel
 from lightPred.timeDetrLoss import TimeSeriesDetrLoss, SetCriterion, HungarianMatcher
 from lightPred.analyze_results import read_csv_folder
-from lightPred.augmentations import DataTransform_TD_bank
+# from lightPred.augmentations import DataTransform_TD_bank
 
 
 import sys
@@ -84,6 +83,92 @@ kepler_data_folder = "/data/lightPred/data"
 idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
+
+def compare_butterpy(num_samples):
+    from butterpy_local.deprecated import regions, spots
+    from butterpy import Surface
+    FLUX_SCALE = 3e-4
+    dur = 500
+    incl = np.arccos(np.random.uniform(0, 1, Nlc))
+    period1 = 10 ** np.random.uniform(low=1, high=np.log10(50), size=int(0.9 * Nlc))
+    period2 = 10 ** np.random.uniform(low=0, high=1, size=Nlc - int(0.9 * Nlc))
+    period = np.concatenate((period1, period2))
+    clen = 10 ** np.random.uniform(low=np.log10(5), high=np.log10(40), size=Nlc)
+    cover = 10 ** np.random.uniform(low=-1, high=np.log10(3), size=Nlc)
+    theta_low = np.random.uniform(low=0, high=40, size=Nlc)
+    theta_high = np.random.uniform(low=theta_low, high=80, size=Nlc)
+    diffrot_shear1 = np.zeros(Nlc // 3)
+    diffrot_shear2 = 10.0 ** np.random.uniform(low=-1, high=0, size=Nlc - Nlc // 3)
+    diffrot_shear = np.concatenate((diffrot_shear1, diffrot_shear2))
+    np.random.shuffle(diffrot_shear)
+    omega = 2 * np.pi / period
+    tau_evol = 10.0 ** np.random.uniform(low=1, high=1.4, size=Nlc)
+    butterfly = np.random.choice([True, False], size=Nlc, p=[0.8, 0.2])
+    sims = {}
+    sims["Activity Rate"] = 1
+    sims["Cycle Length"] = clen
+    sims["Cycle Overlap"] = cover
+    sims["Inclination"] = incl
+    sims["Spot Min"] = theta_low
+    sims["Spot Max"] = theta_high
+    sims["Period"] = period
+    sims["Omega"] = omega
+    sims["Shear"] = diffrot_shear
+    sims["Decay Time"] = tau_evol
+    sims["Butterfly"] = butterfly
+    sims = pd.DataFrame.from_dict(sims)
+    time = np.arange(0, dur, cad / DAY2MIN)
+    for i, s in sims.iloc[:num_samples].iterrows():
+        spot_properties = regions.regions(
+            butterfly=s["Butterfly"],
+            activity_rate=s["Activity Rate"],
+            cycle_length=s["Cycle Length"],
+            cycle_overlap=s["Cycle Overlap"],
+            max_ave_lat=s["Spot Max"],
+            min_ave_lat=s["Spot Min"],
+            tsim=dur,
+            tstart=0,
+            seed=1234
+        )
+        lc = spots.Spots(
+            spot_properties,
+            incl=s["Inclination"],
+            period=s["Period"],
+            diffrot_shear=s["Shear"],
+            alpha_med=s["Activity Rate"] * FLUX_SCALE,
+            decay_timescale=s["Decay Time"],
+            dur=dur
+        )
+        df_old = lc.calc(time) + 1
+
+        surf = Surface()
+        spot_properties_new = surf.emerge_regions(
+            butterfly=s["Butterfly"],
+            activity_level=s["Activity Rate"],
+            cycle_period=s["Cycle Length"],
+            cycle_overlap=s["Cycle Overlap"],
+            max_lat=s["Spot Max"],
+            min_lat=s["Spot Min"],
+            ndays=dur,
+            seed=1234
+        )
+        lc = surf.evolve_spots(
+            inclination=s["Inclination"]*180/np.pi,
+            period=s["Period"],
+            shear=s["Shear"],
+            alpha_med=np.sqrt(s["Activity Rate"]) * FLUX_SCALE,
+            tau_evol=s["Decay Time"],
+            time=time
+        )
+        df_new = lc.flux
+
+        print(df_old.shape, df_new.shape)
+        print((df_old - df_new).sum())
+        plt.plot(time, df_old)
+        plt.plot(time, df_new)
+        plt.show()
+        # print(s)
+
 
 def test_time_augmentations():
     ssl_tf = DataTransform_TD_bank
@@ -1769,10 +1854,10 @@ if __name__ == "__main__":
     # create_period_normalized_samples('/data/butter/data_cos_old', 50000, num_ps=20)
     # create_period_normalized_samples('/data/butter/data_sun_like', 50000, num_ps=20)
     # sun_like_analysis()
-    test_peak_height_ratio('/data/butter/test_cos_old', 1000, '/data/logs/astroconf/exp40')
+    # test_peak_height_ratio('/data/butter/test_cos_old', 1000, '/data/logs/astroconf/exp40')
     # test_peak_height_ratio('/data/butter/test_cos_old', 1000,)
     # test_time_augmentations()
-
+    compare_butterpy(10)
     # test_timeDetr()
 
 

@@ -87,7 +87,7 @@ train_list, val_list = train_test_split(idx_list, test_size=0.1, random_state=12
 
 test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
-b_size = 16
+b_size = 2
 
 num_epochs = 1000
 
@@ -194,7 +194,7 @@ if __name__ == '__main__':
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
                          KeplerNoiseAddition(noise_dataset=None, noise_path=f'{root_dir}/data/noise',
                           transforms=kep_transform),
-                         MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(), ])
+                         MovingAvg(49), Detrend(), ACF(), Normalize('median'), ToTensor(), ])
     test_transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
                               KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),

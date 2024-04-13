@@ -119,7 +119,6 @@ class Trainer(object):
         print(f"Starting training for {num_epochs} epochs with parameters: {self.optim_params}, {self.net_params}")
         print("is main process: ", main_proccess, flush=True)
         for epoch in range(num_epochs):
-            print("device: ", torch.distributed.get_rank(), self.device, flush=True)
             start_time = time.time()
             plot = (self.plot_every is not None) and (epoch % self.plot_every == 0)
             t_loss, t_acc = self.train_epoch(device, epoch=epoch, only_p=only_p, plot=plot, conf=conf)

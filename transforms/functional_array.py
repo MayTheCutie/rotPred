@@ -160,6 +160,7 @@ def autocorrelation(x, max_lag=None):
     return A(x, nlags=max_lag)
 
 def normalize(x, mask = None, norm_type: str = 'std', params=None):
+    x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     if mask is None:
         mask = np.zeros_like(x[:,0]).astype(bool)
     if params is None:
@@ -176,7 +177,7 @@ def normalize(x, mask = None, norm_type: str = 'std', params=None):
             if params is not None:
                 median = params[c]
             else:
-                median = np.median(x[:, c][~mask.squeeze()])
+                median = np.nanmedian(x[:, c][~mask.squeeze()])
                 _params.append(median)
             x[:, c] /= median
         elif norm_type == 'minmax':

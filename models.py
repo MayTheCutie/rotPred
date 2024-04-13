@@ -299,6 +299,18 @@ class LSTMFeatureExtractor(nn.Module):
         # finally:
         #     torch.set_rng_state(rng_state)
 
+    def init_weights(self):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv1d, nn.Conv2d)):
+                torch.nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    torch.nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LSTM):
+                for param in m.parameters():
+                    if len(param.shape) >= 2:
+                        torch.nn.init.xavier_uniform_(param)
+                    else:
+                        torch.nn.init.constant_(param, 0)
     def forward(self, x, return_cell=False):
         if len(x.shape) == 2:
             x = x.unsqueeze(1)
@@ -472,9 +484,10 @@ class LSTM_DUAL(LSTM_ATTN):
         t_features = self.attention(c_f, x, x) # [B, 2*hidden_size]
         d_features, _ = self.dual_model(x_dual) # [B, encoder_dims]
         features = torch.cat([t_features, d_features], dim=1) # [B, 2*hidden_size + encoder_dims]
+
         out = self.pred_layer(features)
         if acf_phr is not None:
-            phr = acf_phr.reshape(-1,1).float()
+            phr = acf_phr.reshape(-1,1).float().to(features.device)
         else:
             phr = torch.zeros(features.shape[0],1, device=features.device)
         mean_features = torch.nn.functional.adaptive_avg_pool1d(features.unsqueeze(1), 16).squeeze(1)
