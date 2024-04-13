@@ -87,7 +87,7 @@ train_list, val_list = train_test_split(idx_list, test_size=0.1, random_state=12
 
 test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
-b_size = 2
+b_size = 32
 
 num_epochs = 1000
 
@@ -198,15 +198,15 @@ if __name__ == '__main__':
     test_transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
                               KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),
-                              MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(),])
+                              MovingAvg(49), Detrend(), ])
 
    
-    train_dataset = TimeSeriesDataset(data_folder, train_list, labels=class_labels, transforms=transform,
-    init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate, period_norm=False)
-    val_dataset = TimeSeriesDataset(data_folder, val_list, labels=class_labels,  transforms=transform,
-     init_frac=0.2, prepare=False, dur=dur, freq_rate=freq_rate, period_norm=False)
-    test_dataset = TimeSeriesDataset(test_folder, test_idx_list, labels=class_labels, transforms=test_transform,
-    init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate, period_norm=False)
+    train_dataset = TimeSeriesDatasetLegacy(data_folder, train_list, labels=class_labels, transforms=transform,
+    init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True)
+    val_dataset = TimeSeriesDatasetLegacy(data_folder, val_list, labels=class_labels,  transforms=transform,
+     init_frac=0.2, prepare=False, dur=dur, freq_rate=freq_rate, acf=True, return_raw=True, )
+    test_dataset = TimeSeriesDatasetLegacy(test_folder, test_idx_list, labels=class_labels, transforms=test_transform,
+    init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True)
   
 
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
@@ -255,19 +255,21 @@ if __name__ == '__main__':
 
    
 
-    # model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
+    # model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', LSTM_DUAL, distribute=True, device=local_rank, to_ddp=True)
     
     # lstm, lstm_params, _ = load_model(f'/data/logs/lstm_attn/exp77', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
 
     conf_model, _, scheduler, scaler = init_train(args, local_rank)
     conf_model.pred_layer = nn.Identity()
-    model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, **lstm_params)
+    model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, lstm_args=lstm_params)
+
+    model, net_params, _ = load_model(f'{log_path}/exp31', model, distribute=True, device=local_rank, to_ddp=True)
 
     # model = conf_model
 
 
 
-
+    # load self supervised weights
     # state_dict = torch.load(f'/data/logs/simsiam/exp14/simsiam_astroconf.pth')
     # initialized_layers=[]
     # new_state_dict = OrderedDict()
@@ -286,17 +288,6 @@ if __name__ == '__main__':
     # print(missing)
     # print("Unexpected keys:")
     # print(unexpected)
-
-    # state_dict = torch.load(f'/data/logs/lstm_attn/exp77/lstm_attn_acc2.pth')
-    # new_state_dict = OrderedDict()
-    # for key, value in state_dict.items():
-    #     if key.startswith('module.'):
-    #         while key.startswith('module.'):
-    #             key = key[7:]
-    #     new_state_dict[key] = value
-    # state_dict = new_state_dict
-    # print("loading state dict...")
-    # model.load_state_dict(new_state_dict)
 
     model = model.to(local_rank)
     if torch.cuda.device_count() > 1:
