@@ -328,6 +328,9 @@ class KeplerDataset(TimeSsl):
             x = F.pad(x, ((0,0, 0, self.seq_len - x.shape[-1])), "constant", value=0)
             if mask is not None:
               mask = F.pad(mask, ((0,0,0, self.seq_len - mask.shape[-1])), "constant", value=0)
+          x = x.T[:, :self.seq_len].nan_to_num(0)
+    else:
+       x = torch.tensor(x)
     if self.target_transforms is not None:
             target, mask_y, info_y = self.target_transforms(target, mask=None, info=info_y)
             if self.seq_len > target.shape[0]:
@@ -336,10 +339,9 @@ class KeplerDataset(TimeSsl):
                   mask_y = F.pad(mask_y, ((0,0,0, self.seq_len - mask_y.shape[-1])), "constant", value=0)
             target = target.T[:, :self.seq_len].nan_to_num(0)
     else:
-        target = x.copy()
+        target = x.clone()
         mask_y = None
     # print(x.shape, target.shape)
-    x = x.T[:, :self.seq_len].nan_to_num(0)
     x,mask = self.apply_mask(x, mask)
     target, mask_y = self.apply_mask(target, mask_y)
 

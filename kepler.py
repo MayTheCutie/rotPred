@@ -38,7 +38,7 @@ print('device is ', DEVICE)
 
 if torch.cuda.is_available():
     print("gpu number: ", torch.cuda.current_device())
-exp_num = 53
+exp_num = 54
 print("gpu number: ", torch.cuda.current_device())
 
 
@@ -62,7 +62,7 @@ if (not torch.cuda.is_available()) or torch.cuda.current_device() == 0:
     #     os.makedirs(f'{log_path}/exp{exp_num}_koi')
 
 # chekpoint_path = '/data/logs/lstm_attn/exp52'
-chekpoint_path = f'{root_dir}/logs/astroconf/exp40'
+chekpoint_path = f'{root_dir}/logs/astroconf/exp45'
 data_folder =  f"{root_dir}/lightPred/data/Q4"
 root_data_folder =  f"{root_dir}/lightPred/data"
 table_path  =  f"{root_dir}/lightPred/tables/Table_1_Periodic.txt"
@@ -144,7 +144,6 @@ if __name__ == '__main__':
 
     net_params = {
          'in_channels':1,
-        'predict_size':128,
  'dropout': 0.35,
  'hidden_size': 64,
  'num_layers': 5,
@@ -215,9 +214,10 @@ if __name__ == '__main__':
         tic = time.time()
         print("i: ", q)
         step = int(q*int(90/cad*DAY2MIN))
-        transform = Compose([MovingAvg(49), Detrend(), RandomCrop(int(dur / cad * DAY2MIN)), ACF()])
-        test_transform = Compose([MovingAvg(49), Detrend(), Slice(0 + step, int(dur / cad * DAY2MIN) + step),
-                                  ACF()])
+        transform = Compose([RandomCrop(int(dur / cad * DAY2MIN)), MovingAvg(49), Detrend(),
+                              ACF(), Normalize('std'), ToTensor()])
+        test_transform = Compose([Slice(0 + step, int(dur / cad * DAY2MIN) + step), MovingAvg(49), Detrend(),
+                                  ACF(), Normalize('std'), ToTensor()])
 
         full_dataset = KeplerDataset(data_folder, path_list=None,
                                       df=kepler_df, t_samples=int(dur/cad*DAY2MIN), skip_idx=q, num_qs=num_qs,
@@ -236,7 +236,7 @@ if __name__ == '__main__':
         args.load_dict(yaml.safe_load(open(f'{yaml_dir}/model_config.yaml', 'r'))[args.model])
         conf_model, _, scheduler, scaler = init_train(args, local_rank)
         conf_model.pred_layer = nn.Identity()
-        model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, **net_params)
+        model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, lstm_args=net_params)
 
         state_dict = torch.load(f'{chekpoint_path}/astroconf.pth', map_location=torch.device('cpu'))
         new_state_dict = OrderedDict()

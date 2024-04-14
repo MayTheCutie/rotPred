@@ -50,7 +50,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 100
+exp_num = 46
 
 log_path = '/data/logs/astroconf'
 
@@ -181,30 +181,23 @@ if __name__ == '__main__':
     # noise_ds = KeplerDataset(kepler_data_folder, path_list=None, df=merged_df,
     # transforms=kep_transform, acf=False, norm='none')
 
-    # transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
-    #                      KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-    #                       transforms=kep_transform), 
-    #                      MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(), ])
-    # test_transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
-    #                           KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
-    #                       transforms=kep_transform),
-    #                           MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(),])
-
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
                          KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform), 
-                         MovingAvg(49), Detrend(), ])
+                         MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(), ])
     test_transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
                               KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),
-                              MovingAvg(49), Detrend(), ])
+                              MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(),])
+
+    
 
    
-    train_dataset = TimeSeriesDatasetLegacy(data_folder, train_list, labels=class_labels, transforms=transform,
+    train_dataset = TimeSeriesDataset(data_folder, train_list, labels=class_labels, transforms=transform,
     init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True)
-    val_dataset = TimeSeriesDatasetLegacy(data_folder, val_list, labels=class_labels,  transforms=transform,
+    val_dataset = TimeSeriesDataset(data_folder, val_list, labels=class_labels,  transforms=transform,
      init_frac=0.2, prepare=False, dur=dur, freq_rate=freq_rate, acf=True, return_raw=True, )
-    test_dataset = TimeSeriesDatasetLegacy(test_folder, test_idx_list, labels=class_labels, transforms=test_transform,
+    test_dataset = TimeSeriesDataset(test_folder, test_idx_list, labels=class_labels, transforms=test_transform,
     init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True)
   
 
@@ -247,11 +240,7 @@ if __name__ == '__main__':
     conf_model.pred_layer = nn.Identity()
     model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, lstm_args=lstm_params)
 
-    model, net_params, _ = load_model(f'{log_path}/exp31', model, distribute=True, device=local_rank, to_ddp=True)
-
-    # model = conf_model
-
-
+    # model, net_params, _ = load_model(f'{log_path}/exp31', model, distribute=True, device=local_rank, to_ddp=True
 
     # load self supervised weights
     # state_dict = torch.load(f'/data/logs/simsiam/exp14/simsiam_astroconf.pth')
@@ -274,7 +263,7 @@ if __name__ == '__main__':
     # print(unexpected)
 
     model = model.to(local_rank)
-    model = DDP(model, device_ids=[local_rank])
+    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     print("number of params:", count_params(model))
     
     loss_fn = nn.L1Loss()
@@ -305,18 +294,18 @@ if __name__ == '__main__':
                          optim_params=optim_params, net_params=lstm_params,
                            exp_num=exp_num, log_path=log_path,
                         exp_name="astroconf") 
-    # fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
-    #                        early_stopping=40, only_p=False, best='loss', conf=True) 
-    # output_filename = f'{log_path}/exp{exp_num}/astroconf.json'
-    # with open(output_filename, "w") as f:
-    #     json.dump(fit_res, f, indent=2)
-    # fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-    # plt.savefig(f"{log_path}/exp{exp_num}/fit.png")
-    # plt.clf()
+    fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
+                           early_stopping=40, only_p=False, best='loss', conf=True) 
+    output_filename = f'{log_path}/exp{exp_num}/astroconf.json'
+    with open(output_filename, "w") as f:
+        json.dump(fit_res, f, indent=2)
+    fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+    plt.savefig(f"{log_path}/exp{exp_num}/fit.png")
+    plt.clf()
 
     print("Evaluation on test set:")
 
-    preds, targets, confs = trainer.predict(val_dataloader, device=local_rank,
+    preds, targets, confs = trainer.predict(test_dataloader, device=local_rank,
                                              conf=True, load_best=False)
 
     eval_results(preds, targets, confs, labels=class_labels, data_dir=f'{log_path}/exp{exp_num}',

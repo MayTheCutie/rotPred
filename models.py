@@ -437,12 +437,12 @@ class LSTM_ATTN_QUANT(LSTM):
         return out.transpose(1,2)
 
 class LSTM_DUAL(nn.Module):
-    def __init__(self, dual_model, encoder_dims, lstm_args, predict_size=128, freeze=False, **kwargs):
+    def __init__(self, dual_model, encoder_dims, lstm_args, predict_size=128,
+                 num_classes=4, freeze=False, **kwargs):
         super(LSTM_DUAL, self).__init__(**kwargs)
         # print("intializing dual model")
         # if lstm_model is not None:
         self.feature_extractor = LSTMFeatureExtractor(**lstm_args)
-        num_classes = lstm_args['num_classes']
         # self.attention = lstm_model.attention
         if freeze:
             for param in self.feature_extractor.parameters():
@@ -457,12 +457,13 @@ class LSTM_DUAL(nn.Module):
         nn.Linear(self.num_features, predict_size),
         nn.GELU(),
         nn.Dropout(p=0.3),
-        nn.Linear(predict_size,num_classes),)
-        # self.conf_layer = nn.Sequential(
-        # nn.Linear(16, 16),
-        # nn.GELU(),
-        # nn.Dropout(p=0.3),
-        # nn.Linear(16,num_classes//2),)
+        nn.Linear(predict_size,num_classes//2),)
+
+        self.conf_layer = nn.Sequential(
+        nn.Linear(16, 16),
+        nn.GELU(),
+        nn.Dropout(p=0.3),
+        nn.Linear(16,num_classes//2),)
 
     def lstm_attention(self, query, keys, values):
         # Query = [BxQ]
@@ -491,15 +492,14 @@ class LSTM_DUAL(nn.Module):
         d_features, _ = self.dual_model(x_dual) # [B, encoder_dims]
         features = torch.cat([t_features, d_features], dim=1) # [B, 2*hidden_size + encoder_dims]
         out = self.pred_layer(features)
-        return out
-        # if acf_phr is not None:
-        #     phr = acf_phr.reshape(-1,1).float()
-        # else:
-        #     phr = torch.zeros(features.shape[0],1, device=features.device)
-        # mean_features = torch.nn.functional.adaptive_avg_pool1d(features.unsqueeze(1), 16).squeeze(1)
-        # mean_features += phr
-        # conf = self.conf_layer(mean_features)
-        # return torch.cat([out, conf], dim=1)
+        if acf_phr is not None:
+            phr = acf_phr.reshape(-1,1).float()
+        else:
+            phr = torch.zeros(features.shape[0],1, device=features.device)
+        mean_features = torch.nn.functional.adaptive_avg_pool1d(features.unsqueeze(1), 16).squeeze(1)
+        mean_features += phr
+        conf = self.conf_layer(mean_features)
+        return torch.cat([out, conf], dim=1)
 
 class EncoderDecoder(torch.nn.Module):
     def __init__(self, encoder, decoder):
