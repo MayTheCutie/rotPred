@@ -50,7 +50,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 46
+exp_num = 47
 
 log_path = '/data/logs/astroconf'
 
@@ -76,13 +76,16 @@ test_Nlc = 5000
 CUDA_LAUNCH_BLOCKING='1'
 
 
-# idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc))+1) for idx in range(Nlc)]
-samples = os.listdir(os.path.join(data_folder, 'simulations'))
-idx_list = [sample.split('_')[1].split('.')[0] for sample in samples if sample.startswith('lc_')]
+idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc))+1) for idx in range(Nlc)]
+# samples = os.listdir(os.path.join(data_folder, 'simulations'))
+# idx_list = [sample.split('_')[1].split('.')[0] for sample in samples if sample.startswith('lc_')]
 
-train_list, val_list = train_test_split(idx_list, test_size=0.1, random_state=1234)
+train_list, test_list = train_test_split(idx_list, test_size=0.1, random_state=1234)
+train_list, val_list = train_test_split(train_list, test_size=0.1, random_state=1234)
 
-test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
+
+
+# test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
 b_size = 32
 
@@ -197,7 +200,7 @@ if __name__ == '__main__':
     init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True)
     val_dataset = TimeSeriesDataset(data_folder, val_list, labels=class_labels,  transforms=transform,
      init_frac=0.2, prepare=False, dur=dur, freq_rate=freq_rate, acf=True, return_raw=True, )
-    test_dataset = TimeSeriesDataset(test_folder, test_idx_list, labels=class_labels, transforms=test_transform,
+    test_dataset = TimeSeriesDataset(data_folder, test_list, labels=class_labels, transforms=test_transform,
     init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True)
   
 
@@ -210,8 +213,8 @@ if __name__ == '__main__':
     val_dataloader = DataLoader(val_dataset, batch_size=b_size, sampler=val_sampler, \
                                  num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
     
-
-    test_dataloader = DataLoader(test_dataset, batch_size=b_size, \
+    # test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, num_replicas=world_size, rank=rank)
+    test_dataloader = DataLoader(test_dataset, batch_size=b_size,
                                   num_workers=int(os.environ["SLURM_CPUS_PER_TASK"])) 
 
     print("dataset length: ", len(train_dataset), len(val_dataset), len(test_dataset))
@@ -240,7 +243,7 @@ if __name__ == '__main__':
     conf_model.pred_layer = nn.Identity()
     model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, lstm_args=lstm_params)
 
-    # model, net_params, _ = load_model(f'{log_path}/exp31', model, distribute=True, device=local_rank, to_ddp=True
+    model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', model, distribute=True, device=local_rank, to_ddp=True)
 
     # load self supervised weights
     # state_dict = torch.load(f'/data/logs/simsiam/exp14/simsiam_astroconf.pth')
@@ -263,7 +266,7 @@ if __name__ == '__main__':
     # print(unexpected)
 
     model = model.to(local_rank)
-    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+    model = DDP(model, device_ids=[local_rank])
     print("number of params:", count_params(model))
     
     loss_fn = nn.L1Loss()
@@ -294,17 +297,18 @@ if __name__ == '__main__':
                          optim_params=optim_params, net_params=lstm_params,
                            exp_num=exp_num, log_path=log_path,
                         exp_name="astroconf") 
-    fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
-                           early_stopping=40, only_p=False, best='loss', conf=True) 
-    output_filename = f'{log_path}/exp{exp_num}/astroconf.json'
-    with open(output_filename, "w") as f:
-        json.dump(fit_res, f, indent=2)
-    fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-    plt.savefig(f"{log_path}/exp{exp_num}/fit.png")
-    plt.clf()
+    # fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
+    #                        early_stopping=40, only_p=False, best='loss', conf=True) 
+    # output_filename = f'{log_path}/exp{exp_num}/astroconf.json'
+    # with open(output_filename, "w") as f:
+    #     json.dump(fit_res, f, indent=2)
+    # fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+    # plt.savefig(f"{log_path}/exp{exp_num}/fit.png")
+    # plt.clf()
 
+    
     print("Evaluation on test set:")
-
+   
     preds, targets, confs = trainer.predict(test_dataloader, device=local_rank,
                                              conf=True, load_best=False)
 

@@ -431,18 +431,18 @@ def find_period(data, lags, prom=None, method='first', name=''):
     return p, peaks
   return 0, peaks
 
-def analyze_lc(lc, day_cadence=0.020832):
-    try:
-        fits_result, process_result = ss.process_LightCurve(lc, bs=day_cadence*3600*24)
-        acf_s, acf_lags_s = fits_result['acf'], fits_result['acf_lags']
-        acf_s  = acf_s/np.median(acf_s)
-        acf_period, peaks, data = find_period(acf_s, acf_lags_s, prom=0.001, name='ACF', method='slope')
-        return acf_period, peaks, data
-    except Exception as e:
-        print(e)
-        return np.inf, None, None
+# def analyze_lc(lc, day_cadence=0.020832):
+#     try:
+#         fits_result, process_result = ss.process_LightCurve(lc, bs=day_cadence*3600*24)
+#         acf_s, acf_lags_s = fits_result['acf'], fits_result['acf_lags']
+#         acf_s  = acf_s/np.median(acf_s)
+#         acf_period, peaks, data = find_period(acf_s, acf_lags_s, prom=0.001, name='ACF', method='slope')
+#         return acf_period, peaks, data
+#     except Exception as e:
+#         print(e)
+#         return np.inf, None, None
 
-def analyze_lc_kepler(lc, day_cadence=1/48, prom=0.12):
+def analyze_lc(lc, day_cadence=1/48, prom=0.01):
     xcf = A(lc, nlags=len(lc))
     xcf = xcf - np.median(xcf)
     xcf = gaussian_filter1d(xcf, 7.5)

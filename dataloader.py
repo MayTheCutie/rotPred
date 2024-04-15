@@ -22,7 +22,7 @@ from scipy.signal import find_peaks, peak_prominences, peak_widths, savgol_filte
 
 cad = 30
 DAY2MIN = 24*60
-min_p, max_p = 0,60
+min_p, max_p = 0,50
 min_lat, max_lat = 0, 80
 min_cycle, max_cycle = 1, 10
 min_i, max_i = 0, np.pi/2
@@ -188,6 +188,10 @@ class TimeSsl(Dataset):
         # print(row['KID'])
         try:
           q_sequence_idx = row['longest_consecutive_qs_indices']
+          if q_sequence_idx is np.nan:
+              q_sequence_idx = (0, 0)
+              # x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
+              # effective_qs = []
           if isinstance(q_sequence_idx, str):
               q_sequence_idx = q_sequence_idx.strip('()').split(',')
               q_sequence_idx = [int(i) for i in q_sequence_idx]
@@ -213,7 +217,7 @@ class TimeSsl(Dataset):
               effective_qs = []
               x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
           # meta['qs'] = row['qs']
-        except (TypeError,OSError, FileNotFoundError)  as e:
+        except (FileNotFoundError)  as e:
             print("Error: ", e)
             effective_qs = []
             x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
@@ -377,17 +381,16 @@ class KeplerLabeledDataset(KeplerDataset):
 
 
   def __getitem__(self, idx): 
-    x, masked_x, inv_mask, info = super().__getitem__(idx)
+    x, y, mask, mask_y, info, info_y = super().__getitem__(idx)
     if self.df is not None:
       row = self.df.iloc[idx]
-    if 'Prot' in row:
-      val = (row['Prot'] - boundary_values_dict['Period'][0])\
-      /(boundary_values_dict['Period'][1]-boundary_values_dict['Period'][0])
-    elif 'i' in row:
-      val = (row['Inclination'] - boundary_values_dict['Inclination'][0])\
-      /(boundary_values_dict['Inclination'][1]-boundary_values_dict['Inclination'][0])
+    # if 'Prot' in row:
+    #   val = (row['Prot'] - boundary_values_dict['Period'][0])\
+    #   /(boundary_values_dict['Period'][1]-boundary_values_dict['Period'][0])
+    if 'i' in row:
+      val = row['i']/90
     y = torch.tensor(val)
-    return x.float(), y, inv_mask, info
+    return x.float(), y, mask, mask_y, info, info_y
 
 
 class TimeSeriesDataset(Dataset):
