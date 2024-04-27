@@ -22,7 +22,7 @@ import SpinSpotter as ss
 import os
 from astropy.io import fits
 from astropy.table import Table 
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, argrelmin
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import linregress
 # from pytorch_forecasting.utils import autocorrelation
@@ -380,10 +380,43 @@ def add_noise(lc, seed=None):
   # print(f'number of samples in kepler df : {len(kepler_df)}, number of noise samples : {len(no_p)}')
   return lc
 
+def find_local_minima(array):
+    local_mins = [i for i in range(len(array) - 1)
+                  if (array[i - 1] > array[i]) & (array[i] < array[i + 1])]
+    return np.array(local_mins)
+def find_closest_minima(array, peaks):
+    # Find peaks
+    if len(peaks) == 0:
+        print("No peaks found.")
+        return None, None, None
+    minima = find_local_minima(array)
 
+    # Find index of the highest peak
+    highest_peak_index = peaks[np.argmax(array[peaks])]
+
+    # Find closest minima on both sides of the highest peak
+    left_minima = minima[minima < highest_peak_index]
+    right_minima = minima[minima > highest_peak_index]
+
+    closest_left_min_index = np.argmax(left_minima) if len(left_minima) else None
+    closest_right_min_index = np.argmin(right_minima) if len(right_minima) else None
+
+    closest_left_min_index = left_minima[closest_left_min_index] if len(left_minima) > 0 else None
+    closest_right_min_index = right_minima[closest_right_min_index] if len(right_minima) > 0 else None
+
+    return highest_peak_index, closest_left_min_index, closest_right_min_index
 def find_period(data, lags, prom=None, method='first', name=''):
     peaks, _ = find_peaks(data, distance=5, prominence=prom)
-
+    highest_peak, closest_left, closest_right = find_closest_minima(data, peaks)
+    plt.plot(lags, data)
+    plt.scatter(lags[highest_peak], data[highest_peak], color='red')
+    plt.scatter(lags[closest_left], data[closest_left], color='blue')
+    plt.scatter(lags[closest_right], data[closest_right], color='blue')
+    plt.show()
+    if closest_left is not None and closest_right is not None:
+        lph = data[highest_peak] - np.mean((data[closest_left], data[closest_right]))
+    else:
+        lph = 0
     if len(peaks):
         i = 0
         max_peak = -np.inf
@@ -428,7 +461,7 @@ def find_period(data, lags, prom=None, method='first', name=''):
                 # print("not enough peaks consider lower threshold")
                 slope, intercept = 0, 0
                 p = first_peaks[0]
-        return p, peaks
+        return p, peaks, lph
     return 0, peaks
 
 def analyze_lc(lc, day_cadence=1/48, prom=0.01, max_period=50):
@@ -437,8 +470,8 @@ def analyze_lc(lc, day_cadence=1/48, prom=0.01, max_period=50):
     xcf = A(lc, nlags=max_period/day_cadence - 1)
     xcf = (xcf - xcf.min())/(xcf.max() - xcf.min())
     xcf_lags = np.arange(0,50, day_cadence)
-    xcf_period, peaks = find_period(xcf, xcf_lags, prom=prom, name='XCF', method='max')
-    return np.abs(xcf_period), xcf_lags, xcf, peaks
+    xcf_period, peaks, lph = find_period(xcf, xcf_lags, prom=prom, name='XCF', method='max')
+    return np.abs(xcf_period), xcf_lags, xcf, peaks, lph
 
 def analyze_lc_kepler(lc, day_cadence=1/48, prom=0.12):
     xcf = A(lc, nlags=len(lc))
