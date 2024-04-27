@@ -32,7 +32,7 @@ sys.path.append(ROOT_DIR)
 print("running from ", ROOT_DIR)   
 # print('in data folder:', os.listdir('/data/lightPred/data')[:10]) 
 
-from lightPred.period_analysis import analyze_lc, analyze_lc_kepler
+from lightPred.period_analysis import analyze_lc
 
 
 def read_fits(filename):
@@ -647,6 +647,10 @@ def convert_to_tuple(string):
     # Convert strings to integers and create a tuple
     return tuple(int(value) for value in values)
 
+def convert_ints_to_list(string):
+    values = string.strip('()').split(',')
+    return [int(value) for value in values]
+
 # Function to extract 'qs' numbers from a path
 def extract_qs(path):
     qs_numbers = []
@@ -685,6 +689,20 @@ def find_longest_consecutive_indices(nums):
             longest_end = end
 
     return longest_start, longest_end
+
+def get_all_samples_df(num_qs=8):
+    kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
+    # kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3,17))
+    try:
+        kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
+    except TypeError:
+        pass
+    kepler_df['qs'] = kepler_df['data_file_path'].apply(extract_qs)  # Extract 'qs' numbers
+    kepler_df['consecutive_qs'] = kepler_df['qs'].apply(consecutive_qs)  # Calculate length of longest consecutive sequence
+    kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
+    kepler_df['longest_consecutive_qs_indices'] = kepler_df['longest_consecutive_qs_indices'].apply(convert_ints_to_list)
+    return kepler_df
+    
 def kepler_collate_fn(batch):
     # Separate the elements of each sample tuple (x, y, mask, info) into separate lists
     xs, ys, masks, masks_y, infos, infos_y = zip(*batch)

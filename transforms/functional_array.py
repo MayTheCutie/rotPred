@@ -2,8 +2,6 @@ import math
 from typing import Optional
 from statsmodels.tsa.stattools import acf as A
 from lightPred.wavelet import wavelet as wvt
-import pycwt
-import pywt
 
 
 import numpy as np
@@ -162,8 +160,14 @@ def autocorrelation(x, max_lag=None):
         max_lag = len(x)
     return A(x, nlags=max_lag)
 
+def wavelet_from_np(lc,num_scales=-1, sample_rate =1/48):
+        wave, period, scale, coi = wvt(lc, dt=sample_rate, J1=num_scales)
+        freqs = 1/period
+        power = (np.abs(wave)) ** 2
+        power = power.mean(axis=1)
+        return power, freqs
+
 def normalize(x, mask = None, norm_type: str = 'std', params=None):
-    x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     if mask is None:
         mask = np.zeros_like(x[:,0]).astype(bool)
     if params is None:
@@ -180,7 +184,7 @@ def normalize(x, mask = None, norm_type: str = 'std', params=None):
             if params is not None:
                 median = params[c]
             else:
-                median = np.nanmedian(x[:, c][~mask.squeeze()])
+                median = np.median(x[:, c][~mask.squeeze()])
                 _params.append(median)
             x[:, c] /= median
         elif norm_type == 'minmax':
@@ -194,19 +198,3 @@ def normalize(x, mask = None, norm_type: str = 'std', params=None):
     if params is None:
         return x, _params
     return x, params
-
-def wavelet_from_np(lc,num_scales=-1, sample_rate =1/48):
-        dj = 1 / 4  # Twelve sub-octaves per octaves
-        s0 = 2*sample_rate  # 2 * dt                    # Starting scale, here 6 months
-        J = -1  # 7 / dj                     # Seven powers of two with dj sub-octaves
-        mother = pycwt.Paul(6)
-        # wave, scales, freqs, coi, fft, fftfreqs = pycwt.cwt(lc, sample_rate, dj, s0, J,
-        #                                                       mother)
-        wave, period, scale, coi = wvt(lc, dt=sample_rate, J1=num_scales)
-        freqs = 1/period
-        power = (np.abs(wave)) ** 2
-        power = power.mean(axis=1)
-        # power = power[-1]
-        # power = np.abs(cwtm)**2 / widths[:, np.newaxis]
-        # phase = np.angle(cwtm[-1])
-        return power, freqs

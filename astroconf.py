@@ -50,11 +50,9 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-local = True
+exp_num = 52
 
-exp_num = 40
-
-log_path = '/data/logs/astroconf' if not local else './logs/astroconf'
+log_path = '/data/logs/astroconf'
 
 if not os.path.exists(f'{log_path}/exp{exp_num}'):
     try:
@@ -63,14 +61,13 @@ if not os.path.exists(f'{log_path}/exp{exp_num}'):
     except OSError as e:
         print(e)
 
-root_dir = 'lightPred' if local else '/data/lightPred'
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
 # checkpoint_path = '/data/logs/astroconf/exp14'
-data_folder = "/data/butter/data_cos_old" if not local else 'butter/data_cos_old'
+data_folder = "/data/butter/data_aigrain2"
 
-test_folder = "/data/butter/test_cos_old" if local else 'butter/test_cos_old'
+# test_folder = "/data/butter/test_cos_old"
 
-yaml_dir = f'{root_dir}/Astroconf/'
+yaml_dir = '/data/lightPred/Astroconf/'
 
 Nlc = 50000
 
@@ -79,13 +76,13 @@ test_Nlc = 5000
 CUDA_LAUNCH_BLOCKING='1'
 
 
-# idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc))+1) for idx in range(Nlc)]
-samples = os.listdir(os.path.join(data_folder, 'simulations'))
-idx_list = [sample.split('_')[1].split('.')[0] for sample in samples if sample.startswith('lc_')]
+idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc))+1) for idx in range(Nlc)]
+train_list, test_list = train_test_split(idx_list, test_size=0.1, random_state=1234)
+train_list, val_list = train_test_split(train_list, test_size=0.1, random_state=1234)
 
-train_list, val_list = train_test_split(idx_list, test_size=0.1, random_state=1234)
 
-test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
+
+# test_idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
 b_size = 32
 
@@ -108,9 +105,8 @@ if torch.cuda.current_device() == 0:
     
 
 def setup(rank, world_size):
-    if world_size > 1:
-        # initialize the process group
-        dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    # initialize the process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 
 if __name__ == '__main__':
@@ -132,7 +128,6 @@ if __name__ == '__main__':
         'kernel_size': 4,
         'num_classes': len(class_labels)*2,
         'num_layers': 5,
-        'predict_size': 128,
         'seq_len': int(dur/cad*DAY2MIN),
         'stride': 4}
     # 'num_att_layers':2,
@@ -146,15 +141,10 @@ if __name__ == '__main__':
  "num_classes": 4,
     'stride': 4,
     'kernel_size': 4}
-
-    slurm_cpus_per_task = os.environ.get("SLURM_CPUS_PER_TASK", "1")
-    slurm_world_size = os.environ.get("WORLD_SIZE", 1)
-    slurm_rank = os.environ.get("SLURM_PROCID", 0)
-    slurm_jobid = os.environ.get("SLURM_JOBID", 0)
-    cpus_per_task = int(slurm_cpus_per_task)
-    world_size = int(slurm_world_size)
-    rank = int(slurm_rank)
-    jobid = int(slurm_jobid)
+      
+    world_size    = int(os.environ["WORLD_SIZE"])
+    rank          = int(os.environ["SLURM_PROCID"])
+    jobid         = int(os.environ["SLURM_JOBID"])
     #gpus_per_node = int(os.environ["SLURM_GPUS_ON_NODE"])
     # gpus_per_node = 4
     gpus_per_node = torch.cuda.device_count()
@@ -192,35 +182,37 @@ if __name__ == '__main__':
     # transforms=kep_transform, acf=False, norm='none')
 
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
-                         KeplerNoiseAddition(noise_dataset=None, noise_path=f'{root_dir}/data/noise',
-                          transforms=kep_transform),
-                         MovingAvg(49), Detrend(), ACF(), Normalize('median'), ToTensor(), ])
+                         KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
+                          transforms=kep_transform), 
+                         MovingAvg(13), Detrend(), ACF(), Normalize('std'), ToTensor(), ])
     test_transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
                               KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),
-                              MovingAvg(49), Detrend(), ])
+                              MovingAvg(13), Detrend(), ACF(), Normalize('std'), ToTensor(),])
+
+    
 
    
-    train_dataset = TimeSeriesDatasetLegacy(data_folder, train_list, labels=class_labels, transforms=transform,
+    train_dataset = TimeSeriesDataset(data_folder, train_list, labels=class_labels, transforms=transform,
     init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True)
-    val_dataset = TimeSeriesDatasetLegacy(data_folder, val_list, labels=class_labels,  transforms=transform,
+    val_dataset = TimeSeriesDataset(data_folder, val_list, labels=class_labels,  transforms=transform,
      init_frac=0.2, prepare=False, dur=dur, freq_rate=freq_rate, acf=True, return_raw=True, )
-    test_dataset = TimeSeriesDatasetLegacy(test_folder, test_idx_list, labels=class_labels, transforms=test_transform,
+    test_dataset = TimeSeriesDataset(data_folder, test_list, labels=class_labels, transforms=test_transform,
     init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True)
   
 
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
     train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler, \
-                                               num_workers=cpus_per_task, pin_memory=True)
+                                               num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True)
 
 
     val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
     val_dataloader = DataLoader(val_dataset, batch_size=b_size, sampler=val_sampler, \
-                                 num_workers=cpus_per_task)
+                                 num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
     
-
-    test_dataloader = DataLoader(test_dataset, batch_size=b_size, \
-                                  num_workers=cpus_per_task)
+    # test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, num_replicas=world_size, rank=rank)
+    test_dataloader = DataLoader(test_dataset, batch_size=b_size,
+                                  num_workers=int(os.environ["SLURM_CPUS_PER_TASK"])) 
 
     print("dataset length: ", len(train_dataset), len(val_dataset), len(test_dataset))
 
@@ -233,20 +225,6 @@ if __name__ == '__main__':
     print("average time: ", np.mean(profile))
     
 
-    # print("check weights...")
-    # incs = torch.zeros(0)
-    # for i, (x,y,_,_) in enumerate(test_dataloader):
-    #     print(i)
-    #     incs = torch.cat((incs, y[:,0]*90), dim=0)
-    # plt.hist(incs.squeeze(), 80)
-    # plt.savefig('/data/tests/incs_hist_test_lstm_attn.png')
-    # plt.clf()
-    # print("done")
-    # train_dataset = TimeSeriesDataset(data_folder, train_list, t_samples=net_params['seq_len'])
-    # val_dataset = TimeSeriesDataset(data_folder, val_list, t_samples=net_params['seq_len'])
-    # test_dataset = TimeSeriesDataset(test_folder, test_idx_list, t_samples=net_params['seq_len'])
-
-
     # train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
     # train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler, \
     #                                            num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True)
@@ -257,20 +235,15 @@ if __name__ == '__main__':
 
     # model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', LSTM_DUAL, distribute=True, device=local_rank, to_ddp=True)
     
-    # lstm, lstm_params, _ = load_model(f'/data/logs/lstm_attn/exp77', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
 
     conf_model, _, scheduler, scaler = init_train(args, local_rank)
     conf_model.pred_layer = nn.Identity()
     model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, lstm_args=lstm_params)
 
-    model, net_params, _ = load_model(f'{log_path}/exp31', model, distribute=True, device=local_rank, to_ddp=True)
-
-    # model = conf_model
-
-
+    # model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', model, distribute=True, device=local_rank, to_ddp=True)
 
     # load self supervised weights
-    # state_dict = torch.load(f'/data/logs/simsiam/exp14/simsiam_astroconf.pth')
+    # state_dict = torch.load(f'/data/logs/simsiam/exp15/simsiam_astroconf.pth')
     # initialized_layers=[]
     # new_state_dict = OrderedDict()
     # for key, value in state_dict.items():
@@ -290,8 +263,7 @@ if __name__ == '__main__':
     # print(unexpected)
 
     model = model.to(local_rank)
-    if torch.cuda.device_count() > 1:
-        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+    model = DDP(model, device_ids=[local_rank])
     print("number of params:", count_params(model))
     
     loss_fn = nn.L1Loss()
@@ -301,13 +273,13 @@ if __name__ == '__main__':
     # loss_fn = nn.SmoothL1Loss(beta=0.0005)
     # loss_fn = WeightedMSELoss(factor=1.2)
     # loss_fn = nn.GaussianNLLLoss()
-    model_name = model.module.__class__.__name__ if torch.cuda.device_count() > 1 else model.__class__.__name__
+
     data_dict = {'dataset': train_dataset.__class__.__name__,
                    'transforms': transform,  'batch_size': b_size,
      'num_epochs':num_epochs, 'checkpoint_path': f'{log_path}/exp{exp_num}', 'loss_fn':
       loss_fn.__class__.__name__,
-     'model': model_name, 'optimizer': optimizer.__class__.__name__,
-     'data_folder': data_folder, 'test_folder': test_folder, 'class_labels': class_labels}
+     'model': model.module.__class__.__name__, 'optimizer': optimizer.__class__.__name__,
+     'data_folder': data_folder,  'class_labels': class_labels}
 
     with open(f'{log_path}/exp{exp_num}/data_params.yml', 'w') as outfile:
         yaml.dump(data_dict, outfile, default_flow_style=False)
@@ -331,9 +303,10 @@ if __name__ == '__main__':
     plt.savefig(f"{log_path}/exp{exp_num}/fit.png")
     plt.clf()
 
+    
     print("Evaluation on test set:")
-
-    preds, targets, confs = trainer.predict(val_dataloader, device=local_rank,
+   
+    preds, targets, confs = trainer.predict(test_dataloader, device=local_rank,
                                              conf=True, load_best=False)
 
     eval_results(preds, targets, confs, labels=class_labels, data_dir=f'{log_path}/exp{exp_num}',

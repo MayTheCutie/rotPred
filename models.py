@@ -438,11 +438,12 @@ class LSTM_ATTN_QUANT(LSTM):
 
 class LSTM_DUAL(nn.Module):
     def __init__(self, dual_model, encoder_dims, lstm_args, predict_size=128,
-                 num_classes=4, freeze=False, **kwargs):
+                 num_classes=4, freeze=False, ssl=False, **kwargs):
         super(LSTM_DUAL, self).__init__(**kwargs)
         # print("intializing dual model")
         # if lstm_model is not None:
         self.feature_extractor = LSTMFeatureExtractor(**lstm_args)
+        self.ssl= ssl
         # self.attention = lstm_model.attention
         if freeze:
             for param in self.feature_extractor.parameters():
@@ -453,6 +454,7 @@ class LSTM_DUAL(nn.Module):
         self.num_features = num_lstm_features + encoder_dims
         self.output_dim = self.num_features
         self.dual_model = dual_model
+
         self.pred_layer = nn.Sequential(
         nn.Linear(self.num_features, predict_size),
         nn.GELU(),
@@ -480,7 +482,7 @@ class LSTM_DUAL(nn.Module):
 
         linear_combination = torch.bmm(energy, values).squeeze(1) #[Bx1xT]x[BxTxV] -> [BxV]
         return linear_combination
-
+    
     def forward(self, x, x_dual=None, acf_phr=None):
         if x_dual is None:
             x, x_dual = x[:,0,:], x[:,1,:]
@@ -491,9 +493,11 @@ class LSTM_DUAL(nn.Module):
         t_features = self.lstm_attention(c_f, x, x) # [B, 2*hidden_size]
         d_features, _ = self.dual_model(x_dual) # [B, encoder_dims]
         features = torch.cat([t_features, d_features], dim=1) # [B, 2*hidden_size + encoder_dims]
+        if self.ssl:
+            return features
         out = self.pred_layer(features)
         if acf_phr is not None:
-            phr = acf_phr.reshape(-1,1).float().to(features.device)
+            phr = acf_phr.reshape(-1,1).float()
         else:
             phr = torch.zeros(features.shape[0],1, device=features.device)
         mean_features = torch.nn.functional.adaptive_avg_pool1d(features.unsqueeze(1), 16).squeeze(1)

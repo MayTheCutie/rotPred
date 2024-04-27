@@ -10,8 +10,9 @@ from lightPred.util.stats import nanstd
 from matplotlib import pyplot as plt
 import os
 from scipy.signal import savgol_filter as savgol
-# from pytorch_forecasting.utils import autocorrelation
+from pytorch_forecasting.utils import autocorrelation
 from scipy.signal import find_peaks
+
 
 
 class Compose:
@@ -33,7 +34,6 @@ class Compose:
         t0 = time.time()
         for t in self.transforms:
             out, mask, info = t(out, mask=mask, info=info, step=step)
-            # print(f"{t} took {time.time()-t0} seconds")
         return out, mask, info
 
     def __repr__(self):
@@ -408,11 +408,11 @@ class ACF():
         return x, mask, info
     def __repr__(self):
         return f"ACF(max_lag={self.max_lag})"
+    
 class Wavelet():
-    def __init__(self, gsp=True, sample_rate=1/48, wave='cgau4', num_scales=50):
-        self.gsp = gsp
+    def __init__(self, gps=True, sample_rate=1/48, num_scales=50):
+        self.gps = gps
         self.sample_rate = sample_rate
-        self.wave=wave
         self.num_scales = num_scales
     def __call__(self, x, mask=None, info=None, step=None):
         if isinstance(x, np.ndarray):
@@ -420,7 +420,7 @@ class Wavelet():
             # time = np.linspace(0, dur, int(dur // self.sample_rate))
             # lc = np.concatenate((time[:, None], x[:,0][:, None]), axis=1)
             res, freqs = F_np.wavelet_from_np(x.squeeze(), num_scales=self.num_scales)
-            if self.gsp:
+            if self.gps:
                 res = np.gradient(res)
             res = np.pad(res, ((0, len(x) - len(res))))
             info['wavelet_freqs'] = freqs
@@ -457,6 +457,28 @@ class ToTensor():
     def __repr__(self):
         return "ToTensor"
 
+class Shuffle():
+    def __init__(self, segment_len=48*90, seed=1234):
+        self.segment_len = segment_len
+        self.seed = seed
+    def __call__(self, x, mask=None, info=None, step=None):
+        if isinstance(x, np.ndarray):
+            np.random.seed(self.seed)
+            x = x / np.nanmedian(x)
+            num_segments = int(np.ceil(len(x) / self.segment_len))
+            x_segments = np.array_split(x, num_segments)
+            np.random.shuffle(x_segments)
+            x = np.concatenate(x_segments)
+            if mask is not None:
+                mask_segments = np.array_split(mask, num_segments)
+                np.random.shuffle(mask_segments)
+                mask = np.concatenate(mask_segments)
+        else:
+            raise NotImplementedError
+        return x, mask, info
+    def __repr__(self):
+        return f"Shuffle(seg_len={self.segment_len})"
+
 class Identity():
     def __init__(self):
         pass
@@ -464,6 +486,7 @@ class Identity():
         return x, mask, info
     def __repr__(self):
         return "Identity"
+    
 class RandomTransform():
     def __init__(self, transforms, p=None):
         self.transforms = transforms

@@ -10,6 +10,8 @@ from collections import OrderedDict
 from tqdm import tqdm
 import torch.distributed as dist
 from lightPred.timeDetrLoss import cxcy_to_cxcywh
+from lightPred.period_analysis import analyze_lc
+from lightPred.dataloader import boundary_values_dict
 
 # import NamedTuple
 # import List
@@ -112,7 +114,7 @@ class Trainer(object):
         best_acc = 0
         train_loss, val_loss,  = [], []
         train_acc, val_acc = [], []
-        self.optim_params['lr_history'] = []
+        # self.optim_params['lr_history'] = []
         epochs_without_improvement = 0
         main_proccess = (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0) or self.device == 'cpu'
 
@@ -161,7 +163,7 @@ class Trainer(object):
                     print(os.system('nvidia-smi'))
 
         self.optim_params['lr'] = self.optimizer.param_groups[0]['lr']
-        self.optim_params['lr_history'].append(self.optim_params['lr'])
+        # self.optim_params['lr_history'].append(self.optim_params['lr'])
         with open(f'{self.log_path}/exp{self.exp_num}/optim_params.yml', 'w') as outfile:
             yaml.dump(self.optim_params, outfile, default_flow_style=False)
 
@@ -210,9 +212,9 @@ class Trainer(object):
             loss = self.criterion(y_pred, y) if not only_p else self.criterion(y_pred, y[:, 0])
             if conf:
                 loss += self.criterion(conf_pred, conf_y)
-            if self.logger is not None:
-                self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
-                self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
+            # if self.logger is not None:
+            #     self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
+            #     self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
             # print("loss: ", loss, "y_pred: ", y_pred, "y: ", y)
             loss.backward()
             self.optimizer.step()
@@ -254,8 +256,8 @@ class Trainer(object):
             loss = self.criterion(y_pred, y) if not only_p else self.criterion(y_pred, y[:, 0])
             if conf:
                 loss += self.criterion(conf_pred, conf_y)
-            if self.logger is not None:
-                self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
+            # if self.logger is not None:
+            #     self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
             val_loss.append(loss.item())
             diff = torch.abs(y_pred - y)
             # print("diff: ", diff.shape, "y: ", y.shape)
@@ -393,6 +395,7 @@ class DoubleInputTrainer(Trainer):
         val_acc = 0
         all_accs = torch.zeros(self.num_classes, device=device)
         pbar = tqdm(self.val_dl)
+        targets = np.zeros((0, self.num_classes))
         for i, (x,y, _,info) in enumerate(pbar):
             x1, x2 = x[:, 0, :], x[:, 1, :]
             x1 = x1.to(device)
@@ -425,6 +428,7 @@ class DoubleInputTrainer(Trainer):
             all_acc = (diff < (y/10)).sum(0)
             pbar.set_description(f"val_acc: {all_acc}, val_loss:  {loss.item()}")
             all_accs = all_accs + all_acc  
+            
         return val_loss, all_accs/len(self.val_dl.dataset)
 
     def predict(self, test_dataloader, device, conf=True, only_p=False, load_best=False):
@@ -472,8 +476,9 @@ class DoubleInputTrainer(Trainer):
     
 
 class KeplerTrainer(Trainer):
-    def __init__(self, **kwargs):
+    def __init__(self, eta=0.5, **kwargs):
         super().__init__(**kwargs)
+        self.eta = eta
     
     def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
         """
@@ -495,18 +500,20 @@ class KeplerTrainer(Trainer):
                 x = x.to(device)
                 y_pred = self.model(x.float())
             if conf:
-                y_pred, conf_pred = y_pred[:, :self.num_classes].squeeze(), y_pred[:, self.num_classes:].squeeze()
+                y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
                 conf_y = torch.abs(y - y_pred) 
-            loss = self.criterion(y_pred, y) 
+            loss_i = self.criterion(y_pred[:, 0], y[:, 0])  # Loss for first attribute
+            loss_p = self.criterion(y_pred[:, 1], y[:, 1])  # Loss for second attribute
+            loss = (self.eta * loss_i) + ((1-self.eta) * loss_p)
             if conf:
                 loss += self.criterion(conf_pred, conf_y)
             loss.backward()
             self.optimizer.step()
             train_loss.append(loss.item())
             diff = torch.abs(y_pred - y)
-            train_acc += (diff < (y/10)).sum().item() 
+            train_acc += (diff < (y/10)).sum(0)
             pbar.set_description(f"train_acc: {train_acc}, train_loss:  {loss.item()}")
-        print("number of train_accs: ", train_acc)
+        # print("number of train_accs: ", train_acc)
         return train_loss, train_acc/len(self.train_dl.dataset)
 
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
@@ -531,7 +538,7 @@ class KeplerTrainer(Trainer):
             # y_val = y['Period'] if only_p else y['i']
             # pred_idx = 1 if only_p else 0
             if conf:
-                y_pred, conf_pred = y_pred[:, :self.num_classes].squeeze(), y_pred[:, self.num_classes:].squeeze()
+                y_pred, conf_pred = y_pred[:, 0].squeeze(), y_pred[:, 2].squeeze()
                 conf_y = torch.abs(y - y_pred) 
             loss = self.criterion(y_pred, y) 
             if conf:
@@ -539,7 +546,6 @@ class KeplerTrainer(Trainer):
             val_loss.append(loss.item())
             diff = torch.abs(y_pred - y)
             val_acc += (diff < (y/10)).sum().item() 
-        print("number of val_acc: ", val_acc)
         return val_loss, val_acc/len(self.val_dl.dataset)
 
     def predict(self, test_dataloader, device, conf=True, only_p=False, load_best=False):
@@ -810,8 +816,8 @@ class ClassifierTrainer(Trainer):
                 loss2 = self.criterion(y_pred[:, self.num_classes:], y[:, self.num_classes:].argmax(dim=1))
                 loss = loss + loss2
             # print("y_pred: ", y_pred.argmax(1), "y: ", y.argmax(1))
-            self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
-            self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
+            # self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
+            # self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
 
             # if not only_p:            
             #     # loss1 = self.criterion(y_pred_i, y[:, self.num_classes:])
@@ -847,7 +853,7 @@ class ClassifierTrainer(Trainer):
             if not only_p:
                 loss2 = self.criterion(y_pred[:, self.num_classes:], y[:, self.num_classes:].argmax(dim=1))
                 loss = loss + loss2
-            self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
+            # self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
 
             # if not only_p:            
             #     # loss1 = self.criterion(y_pred_i, y[:, self.num_classes:])
@@ -985,3 +991,18 @@ class MaskedSSLTrainer(Trainer):
         t = target.masked_select(inverse_token_mask)
         s = (torch.abs(r - t) < epsilon).sum()
         return s
+
+# class ACFPredictorKepler():
+#     def __init__(self):
+#         pass
+
+#     def predict(self, test_dataset, prom=0.005):
+#         pbar = tqdm(enumerate(test_dataset), total=len(test_dataset))
+#         ps = []
+#         pred_ps = []
+#         for i, (x,target,_,_,info, info_y) in pbar:
+#             p = target[1] = target[1] * (boundary_values_dict['Period'][1]
+#             - boundary_values_dict['Period'][0]) + boundary_values_dict['Period'][0]
+#             x_np = x.numpy().squeeze()
+#             pred_p, lags, xcf, peaks = analyze_lc(x_np, prom=prom)
+
