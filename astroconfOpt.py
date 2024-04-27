@@ -117,7 +117,6 @@ lstm_params = {
     'kernel_size': 4,
     'num_classes': len(class_labels) * 2,
     'num_layers': 5,
-    'predict_size': 128,
     'seq_len': int(dur / cad * DAY2MIN),
     'stride': 4}
 
@@ -136,8 +135,6 @@ def objective(trial):
     # Sample one of the model architectures
     encoder_idx = trial.suggest_int('encoder_idx', 0, len(encoder_architectures) - 1)
     encoder = encoder_architectures[encoder_idx]
-    # decoder_idx = trial.suggest_int('decoder_idx', 0, len(decoder_architectures) - 1)
-    # decoder = decoder_architectures[decoder_idx]
     encoder_dim = trial.suggest_int("hidden_dim", 64, 128, step=64)
     num_layers = trial.suggest_int("num_layers", 1, 5)
     num_heads = trial.suggest_int("num_heads", 4, 8, step=4)
@@ -167,9 +164,12 @@ def objective(trial):
     norm = trial.suggest_categorical("norm", ["std", "minmax", "none"])
     detrend = trial.suggest_int("detrend", 0, 1)
 
+    predict_size = trial.suggest_int("predict_size", 64, 128, step=64)
+
     conf_model, _, scheduler, scaler = init_train(args, DEVICE)
     conf_model.pred_layer = nn.Identity()
-    model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, **lstm_params)
+    model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim,
+                      lstm_args=lstm_params, predict_size=predict_size, num_classes=4)
 
     kep_transform = RandomCrop(int(dur /cad *DAY2MIN))
     if detrend:
@@ -260,7 +260,7 @@ def objective(trial):
 if __name__ == "__main__":
 
     study = optuna.create_study(study_name='astroconf', storage='sqlite:///../optuna/astroconf.db', load_if_exists=True)
-    # study.optimize(lambda trial: objective(trial), n_trials=100)
+    study.optimize(lambda trial: objective(trial), n_trials=100)
     print('Device: ', DEVICE)
     print("Best trial:")
     trial = study.best_trial

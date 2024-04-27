@@ -380,67 +380,65 @@ def add_noise(lc, seed=None):
   # print(f'number of samples in kepler df : {len(kepler_df)}, number of noise samples : {len(no_p)}')
   return lc
 
+
 def find_period(data, lags, prom=None, method='first', name=''):
+    peaks, _ = find_peaks(data, distance=5, prominence=prom)
 
-  peaks, _ = find_peaks(data, distance=5, prominence=prom)
+    if len(peaks):
+        i = 0
+        max_peak = -np.inf
+        max_idx = i
+        if method == 'first':
+            while lags[peaks[i]] < MINIMAL_PERIOD:
+                i += 1
+                if i == len(peaks):
+                    return np.inf
+            p = lags[peaks[i]]
+        elif method == 'max':
+            while i < len(peaks):
+                # print(i, data_filtered[peaks[i]])
+                if data[peaks[i]] > max_peak:
+                    max_peak = data[peaks[i]]
+                    max_idx = i
+                i += 1
+            p = lags[peaks[max_idx]]
+        # print(max_idx, max_peak)
+        elif method == 'slope':
+            #   print("sloping")
+            first_peaks = []
+            #   print("num peaks: ", len(peaks))
+            while i < 4:
+                first_peaks.append(lags[peaks[i]])
+                i += 1
+                if i == len(peaks):
+                    break
+            #   print("peaks: " , first_peaks)
 
-  if len(peaks):
-    i = 0
-    max_peak = -np.inf
-    max_idx = i
-    if method == 'first':
-      while lags[peaks[i]] < MINIMAL_PERIOD:
-        i += 1
-        if i == len(peaks):
-          return np.inf
-      p = lags[peaks[i]]
-    elif method == 'max':
-      while i < len(peaks):
-        # print(i, data_filtered[peaks[i]])
-        if data[peaks[i]] > max_peak:
-          max_peak = data[peaks[i]]
-          max_idx = i
-        i += 1
-      p = lags[peaks[max_idx]]
-    # print(max_idx, max_peak)
-    elif method == 'slope':
-    #   print("sloping")
-      first_peaks = []
-    #   print("num peaks: ", len(peaks))
-      while i < 4:
-        first_peaks.append(lags[peaks[i]])
-        i += 1
-        if i ==len(peaks):
-          break
-    #   print("peaks: " , first_peaks)
-      
-      if i >= 2:
-        slope, intercept, r_value, p_value, std_err = linregress(np.arange(len(first_peaks)), first_peaks)
-        # first_peaks.append(intercept)
-        # print(first_peaks)
-        p = slope
-        # if r_value > 0.98:
-        #   p= intercept
-        # else:
-        #   p = first_peaks[0]
-        
-      else:
-        print("not enough peaks consider lower threshold")
-        slope, intercept = 0,0
-        p = first_peaks[0]
-    return p, peaks
-  return 0, peaks
+            if i >= 4:
+                slope, intercept, r_value, p_value, std_err = linregress(np.arange(len(first_peaks)), first_peaks)
+                # first_peaks.append(intercept)
+                # print(first_peaks)
+                p = slope
+                # if r_value > 0.98:
+                #   p= intercept
+                # else:
+                #   p = first_peaks[0]
 
-def analyze_lc(lc, day_cadence=0.020832):
-    try:
-        fits_result, process_result = ss.process_LightCurve(lc, bs=day_cadence*3600*24)
-        acf_s, acf_lags_s = fits_result['acf'], fits_result['acf_lags']
-        acf_s  = acf_s/np.median(acf_s)
-        acf_period, peaks, data = find_period(acf_s, acf_lags_s, prom=0.001, name='ACF', method='slope')
-        return acf_period, peaks, data
-    except Exception as e:
-        print(e)
-        return np.inf, None, None
+            else:
+                # print("not enough peaks consider lower threshold")
+                slope, intercept = 0, 0
+                p = first_peaks[0]
+        return p, peaks
+    return 0, peaks
+
+def analyze_lc(lc, day_cadence=1/48, prom=0.01, max_period=50):
+    lc = lc - np.median(lc)
+    lc = gaussian_filter1d(lc, 7.5)
+    xcf = A(lc, nlags=max_period/day_cadence - 1)
+    xcf = (xcf - xcf.min())/(xcf.max() - xcf.min())
+    xcf_lags = np.arange(0,50, day_cadence)
+    xcf_period, peaks = find_period(xcf, xcf_lags, prom=prom, name='XCF', method='max')
+    return np.abs(xcf_period), xcf_lags, xcf, peaks
 
 def analyze_lc_kepler(lc, day_cadence=1/48, prom=0.12):
     xcf = A(lc, nlags=len(lc))

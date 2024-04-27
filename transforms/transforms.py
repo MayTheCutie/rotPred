@@ -408,6 +408,26 @@ class ACF():
         return x, mask, info
     def __repr__(self):
         return f"ACF(max_lag={self.max_lag})"
+class Wavelet():
+    def __init__(self, gsp=True, sample_rate=1/48, wave='cgau4', num_scales=50):
+        self.gsp = gsp
+        self.sample_rate = sample_rate
+        self.wave=wave
+        self.num_scales = num_scales
+    def __call__(self, x, mask=None, info=None, step=None):
+        if isinstance(x, np.ndarray):
+            dur = x.shape[0]*self.sample_rate
+            # time = np.linspace(0, dur, int(dur // self.sample_rate))
+            # lc = np.concatenate((time[:, None], x[:,0][:, None]), axis=1)
+            res, freqs = F_np.wavelet_from_np(x.squeeze(), num_scales=self.num_scales)
+            if self.gsp:
+                res = np.gradient(res)
+            res = np.pad(res, ((0, len(x) - len(res))))
+            info['wavelet_freqs'] = freqs
+            x = np.hstack((res[:,None], x))
+        else:
+            raise NotImplementedError
+        return x, mask, info
 
 class Normalize():
     def __init__(self, norm='std'):

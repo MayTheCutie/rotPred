@@ -438,7 +438,7 @@ class TimeSeriesDataset(Dataset):
         x = x*x_noise.squeeze().numpy()
         return x
 
-  def wavelet_from_np(self, lc, wavelet=signal.morlet2,
+  def wavelet_from_np(self, lc, wavelet='cgau4',
                         w=6,
                         period=None,
                         minimum_period=None,
@@ -467,10 +467,10 @@ class TimeSeriesDataset(Dataset):
                     "from `period`.", RuntimeWarning)
 
         widths = w * nyquist * period / np.pi
-        cwtm = signal.cwt(flux, wavelet, widths, w=w)
+        cwtm, freqs = pywt.cwt(flux,widths, wavelet, sampling_period=sample_rate)
         power = np.abs(cwtm)**2 / widths[:, np.newaxis]
         phase = np.angle(cwtm)
-        return power, phase, period
+        return power, phase, freqs
 
   def read_spots(self, idx):
     spots = pd.read_parquet(os.path.join(self.spots_path, f"spots_{idx}.pqt")).values
@@ -569,48 +569,6 @@ class TimeSeriesDataset(Dataset):
       # print('inc: ', inc, 'weight: ', w, 'raw inc: ', y[inc_idx])
       # weights = torch.cat((weights, torch.tensor(w)), dim=0)
       return torch.tensor(w)
-  
-  def prepare_data(self):
-      print("loading dataset...")
-      all_inclinations = np.arange(0, 91)
-      counts = np.zeros_like(all_inclinations)
-      incl = (np.arccos(np.random.uniform(0, 1, self.length))*180/np.pi).astype(np.int16)
-      unique, unique_counts = np.unique(incl, return_counts=True)
-      counts[unique] = unique_counts
-      indices = np.argsort(counts)
-      # plt.hist(incl)
-      # plt.savefig("/data/tests/counts.png")
-      # plt.clf()
-      counts = replace_zeros_with_average(counts)
-      weights = []
-      stds = []  
-      for i in range(self.length):
-        info = {'idx': i}
-        starttime= time.time()
-        if i % 1000 == 0:
-          print(i, flush=True)
-        # try:
-        sample_idx = remove_leading_zeros(self.idx_list[i])
-        x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[i]}.pqt")).values
-        x = x[int(self.init_frac*len(x)):,:]
-        time1 = time.time()
-        if self.seq_len:
-          x = self.interpolate(x)
-        time2 = time.time()
-        if self.transforms is not None:
-          x, _, info = self.transforms(x, mask=None, info=info)
-        time3 = time.time()
-        x[:,1] = fill_nan_np(x[:,1], interpolate=True)
-        time4 = time.time()
-        x = self.create_data(x)
-        time5 = time.time()
-        y = self.get_labels(sample_idx)
-        time6 = time.time()
-        weights.append(self.get_weight(y, counts))
-        stds.append(x.std().item())
-        self.samples.append((x,y, info))
-      self.maxstds = np.max(stds)
-      return
 
       
   def __len__(self):
@@ -629,8 +587,8 @@ class TimeSeriesDataset(Dataset):
           x, _, info = self.transforms(x[:,1], mask=None,  info=info, step=self.step)
           if self.seq_len > x.shape[0]:
             print("padding: ", x.shape, self.seq_len)
-            x = np.pad(x, ((0, self.seq_len - x.shape[-1]), (0,0)), "constant", constant_values=0)
-          info['idx'] = idx
+            x = F.pad(x, (0, self.seq_len - x.shape[-1], 0,0), mode="constant", value=0)
+            info['idx'] = idx
         else:
           x = x[:,1]
         x = x.T[:, :self.seq_len]
@@ -641,7 +599,6 @@ class TimeSeriesDataset(Dataset):
             x = x.unsqueeze(0)
           spots_arr = self.create_spots_arr(idx, info, x)
           x = torch.cat((x, torch.tensor(spots_arr).float()), dim=0)
-        self.step += 1
       else:
         x, y, info = self.samples[idx]
         x = self.normalize(x)

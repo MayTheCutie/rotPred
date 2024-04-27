@@ -13,7 +13,7 @@ from scipy.signal import find_peaks, peak_prominences, peak_widths
 from matplotlib.lines import Line2D
 import butterpy as bp
 from scipy.signal import savgol_filter as savgol
-
+from wavelet import wavelet as wvl
 
 
 
@@ -71,7 +71,7 @@ DAY2MIN = 24 * 60
 time = np.arange(0, dur, cad / DAY2MIN)
 
 data_folder_local = r"C:\Users\ilaym\Desktop\kepler/data/butter/data_cos"
-data_folder = "/data/butter/data_cos"
+data_folder = "../butter/test_cos"
 table_path  = "/data/lightPred/Table_1_Periodic.txt"
 kois_table_path = "/data/lightPred/kois.csv"
 kepler_data_folder = "/data/lightPred/data"
@@ -83,6 +83,104 @@ kepler_data_folder = "/data/lightPred/data"
 idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
+
+
+def lph():
+
+
+def shuffle_lc(segment_len=90 * 48):
+    from matplotlib.pyplot import cm
+    np.random.seed(42)
+
+    x = np.load('data/samples/7831394.npy')
+    x = fill_nan_np(x, interpolate=True)
+    x = x / np.nanmedian(x)
+    num_segments = int(np.ceil(len(x) / segment_len))
+    original_indices = np.arange(num_segments)
+    x_segments = np.array_split(x, num_segments)
+    np.random.shuffle(original_indices)
+    np.random.shuffle(x_segments)
+    x_shuffled = np.concatenate(x_segments)
+    print(x_shuffled.shape)
+    print(x.shape)
+    fig, axes = plt.subplots(2, 1)
+    axes[0].plot(x)
+    color = cm.rainbow(np.linspace(0, 1, num_segments))
+    tot = 0
+    for i, (seg, c) in enumerate(zip(x_segments, color)):
+        axes[1].plot(np.arange(tot, tot + len(seg)), seg, c=c, label=original_indices[i])
+        tot += len(seg)
+    # axes[1].plot(x_shuffled)
+    axes[1].legend()
+    plt.show()
+
+
+def test_new_wavelet():
+    import matplotlib.pyplot as plt
+    from transforms.functional_array import wavelet_from_np
+    from lightPred.gps import complex_gradient
+
+    def period_to_freq_micro_sec(p_days):
+        p_sec = p_days * 24 * 60 * 60
+        f_micro_sec = 1e6/p_sec
+        return f_micro_sec
+    def freq_micro_sec_to_p(freq_micro_sec):
+        p_sec = 1 / (freq_micro_sec / 1e6)
+        p_days = p_sec / (24 * 60 * 60)
+        return p_days
+
+    avg = MovingAvg(49)
+    plt.close('all')
+    true_p = 21.94
+    lc = np.load('data/samples/7831394.npy') - 1
+    lc = fill_nan_np(lc, interpolate=True)
+    lc_avg, _, _ = avg(lc)
+    acf_p, lags,acf, peaks = analyze_lc(lc_avg)
+    acf_p_idx = np.where(lags == acf_p)
+    wvt, freqs = wavelet_from_np(lc_avg, num_scales=512)
+    period = 1/freqs
+    freq_sec = period_to_freq_micro_sec(period)
+
+    grad_w = complex_gradient(wvt)
+    pred_p = period[np.argmax(grad_w)]
+    print(pred_p, acf_p, pred_p / true_p)
+    time = np.arange(0, len(lc)* cad / DAY2MIN, cad / DAY2MIN) + 270
+    # periods = np.linspace(1/freqs[-1], 1/freqs[0], len(time))
+    fig, axs = plt.subplots(nrows=4, ncols=1, figsize=(14, 20))
+    axs[0].plot(time, lc, color='black')
+    axs[0].plot(time, lc_avg, color='r')
+    axs[0].set_ylabel('Flux')
+
+    axs[1].plot(lags, acf)
+    axs[1].scatter(lags[acf_p_idx], acf[acf_p_idx], color='r')
+    axs[1].set_xlabel(r'Time Lag (days)')
+    axs[1].set_ylabel('ACF')
+
+    axs[2].plot(freq_sec, wvt)
+    axs[2].set_xscale('log')
+    axs[2].set_yscale('log')
+    axs[2].set_xlabel(r'Frequency ($\mu Hz$)')
+    axs[2].set_ylabel('Power')
+    secax = axs[2].secondary_xaxis('top', functions=(freq_micro_sec_to_p, period_to_freq_micro_sec))
+    secax.set_xlabel('Period (Days)')
+
+    axs[3].plot(freq_sec, grad_w)
+    axs[3].scatter(freq_sec[np.argmax(grad_w)], grad_w[np.argmax(grad_w)], color='r')
+    axs[3].set_xscale('log')
+    axs[3].set_yscale('log')
+    axs[3].set_xlabel(r'Frequency ($\mu Hz$)')
+    axs[3].set_ylabel('Gradient')
+    secax = axs[3].secondary_xaxis('top', functions=(freq_micro_sec_to_p, period_to_freq_micro_sec))
+    secax.set_xlabel('Period (Days)')
+
+    # axs[1].set_xlim(0,100)
+    # axs[2].set_xlim(0,100)
+
+    fig.suptitle('KIC 7831394')
+    plt.tight_layout()
+    plt.savefig('../imgs/gps_example.png')
+    plt.show()
+
 
 def compare_butterpy(num_samples):
     from butterpy_local.deprecated import regions, spots
@@ -1857,8 +1955,11 @@ if __name__ == "__main__":
     # test_peak_height_ratio('/data/butter/test_cos_old', 1000, '/data/logs/astroconf/exp40')
     # test_peak_height_ratio('/data/butter/test_cos_old', 1000,)
     # test_time_augmentations()
-    compare_butterpy(10)
+    # compare_butterpy(10)
+    # test_new_wavelet()
     # test_timeDetr()
+    # shuffle_lc()
+    test_new_wavelet()
 
 
 
