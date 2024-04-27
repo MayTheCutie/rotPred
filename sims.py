@@ -33,7 +33,7 @@ log_path = '../logs/simsiam' if local else '/data/logs/simsiam'
 
 yaml_dir = f'{root_dir}/Astroconf/'
 
-exp_num = 14
+exp_num = 15
 
 num_epochs = 400
 
@@ -65,9 +65,8 @@ lstm_params = {
         'image': False,
         'in_channels': 1,
         'kernel_size': 4,
-        'num_classes': 2,
+        'num_classes': 4,
         'num_layers': 5,
-        'predict_size': 128,
         'seq_len': int(dur/cad*DAY2MIN),
         'stride': 4}
 
@@ -115,13 +114,13 @@ if __name__ == "__main__":
         local_rank = DEVICE
         world_size = 1
         rank = 0
-
+    print("logdir: ", log_path)
     args = Container(**yaml.safe_load(open(f'{yaml_dir}/default_config.yaml', 'r')))
     args.load_dict(yaml.safe_load(open(f'{yaml_dir}/model_config.yaml', 'r'))[args.model])
     print("args : ", vars(args))
 
-    transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)), MovingAvg(49),
-                         RandomTransform([Mask(0.1), AddGaussianNoise(sigma=0.0001), Identity()]),
+    transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)), MovingAvg(13),
+                         RandomTransform([Mask(0.2), AddGaussianNoise(sigma=0.0001), Shuffle(), Identity()]),
                         ACF(), ToTensor(), Normalize('std')])
     train_ds = KeplerDataset(data_folder, path_list=None, df=train_df, t_samples=int(dur/cad*DAY2MIN),
      transforms=transform, target_transforms=transform)
@@ -150,8 +149,10 @@ if __name__ == "__main__":
     print("train size: ", len(train_ds), "val size: ", len(val_ds))
     conf_model, _, scheduler, scaler = init_train(args, local_rank)
     conf_model.pred_layer = nn.Identity()
-    backbone = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, **lstm_params)
+    backbone = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, lstm_args=lstm_params,
+                         ssl=True)
     backbone.pred_layer = nn.Identity()
+    backbone.conf_layer = nn.Identity()
 
 
     model = SimSiam(backbone)
@@ -168,6 +169,15 @@ if __name__ == "__main__":
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=100, verbose=True, factor=0.1)
 
     # print("scheduler: ", scheduler)
+
+    data_dict = {'dataset': train_ds.__class__.__name__,
+                   'transforms': transform,  'batch_size': b_size,
+     'num_epochs':num_epochs, 'checkpoint_path': f'{log_path}/exp{exp_num}', 'loss_fn':'siamse loss',
+     'model': 'astroconf', 'optimizer': optimizer.__class__.__name__,
+     'data_folder': data_folder, }
+    
+    with open(f'{log_path}/exp{exp_num}/data_params.yml', 'w') as outfile:
+        yaml.dump(data_dict, outfile, default_flow_style=False)
 
 
     trainer = SiameseTrainer(model=model, optimizer=optimizer, criterion =None,

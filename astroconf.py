@@ -50,7 +50,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 47
+exp_num = 52
 
 log_path = '/data/logs/astroconf'
 
@@ -63,9 +63,9 @@ if not os.path.exists(f'{log_path}/exp{exp_num}'):
 
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
 # checkpoint_path = '/data/logs/astroconf/exp14'
-data_folder = "/data/butter/data_cos_old"
+data_folder = "/data/butter/data_aigrain2"
 
-test_folder = "/data/butter/test_cos_old"
+# test_folder = "/data/butter/test_cos_old"
 
 yaml_dir = '/data/lightPred/Astroconf/'
 
@@ -77,9 +77,6 @@ CUDA_LAUNCH_BLOCKING='1'
 
 
 idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc))+1) for idx in range(Nlc)]
-# samples = os.listdir(os.path.join(data_folder, 'simulations'))
-# idx_list = [sample.split('_')[1].split('.')[0] for sample in samples if sample.startswith('lc_')]
-
 train_list, test_list = train_test_split(idx_list, test_size=0.1, random_state=1234)
 train_list, val_list = train_test_split(train_list, test_size=0.1, random_state=1234)
 
@@ -187,11 +184,11 @@ if __name__ == '__main__':
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
                          KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform), 
-                         MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(), ])
+                         MovingAvg(13), Detrend(), ACF(), Normalize('std'), ToTensor(), ])
     test_transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
                               KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),
-                              MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(),])
+                              MovingAvg(13), Detrend(), ACF(), Normalize('std'), ToTensor(),])
 
     
 
@@ -243,10 +240,10 @@ if __name__ == '__main__':
     conf_model.pred_layer = nn.Identity()
     model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, lstm_args=lstm_params)
 
-    model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', model, distribute=True, device=local_rank, to_ddp=True)
+    # model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', model, distribute=True, device=local_rank, to_ddp=True)
 
     # load self supervised weights
-    # state_dict = torch.load(f'/data/logs/simsiam/exp14/simsiam_astroconf.pth')
+    # state_dict = torch.load(f'/data/logs/simsiam/exp15/simsiam_astroconf.pth')
     # initialized_layers=[]
     # new_state_dict = OrderedDict()
     # for key, value in state_dict.items():
@@ -282,7 +279,7 @@ if __name__ == '__main__':
      'num_epochs':num_epochs, 'checkpoint_path': f'{log_path}/exp{exp_num}', 'loss_fn':
       loss_fn.__class__.__name__,
      'model': model.module.__class__.__name__, 'optimizer': optimizer.__class__.__name__,
-     'data_folder': data_folder, 'test_folder': test_folder, 'class_labels': class_labels}
+     'data_folder': data_folder,  'class_labels': class_labels}
 
     with open(f'{log_path}/exp{exp_num}/data_params.yml', 'w') as outfile:
         yaml.dump(data_dict, outfile, default_flow_style=False)
@@ -297,14 +294,14 @@ if __name__ == '__main__':
                          optim_params=optim_params, net_params=lstm_params,
                            exp_num=exp_num, log_path=log_path,
                         exp_name="astroconf") 
-    # fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
-    #                        early_stopping=40, only_p=False, best='loss', conf=True) 
-    # output_filename = f'{log_path}/exp{exp_num}/astroconf.json'
-    # with open(output_filename, "w") as f:
-    #     json.dump(fit_res, f, indent=2)
-    # fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-    # plt.savefig(f"{log_path}/exp{exp_num}/fit.png")
-    # plt.clf()
+    fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
+                           early_stopping=40, only_p=False, best='loss', conf=True) 
+    output_filename = f'{log_path}/exp{exp_num}/astroconf.json'
+    with open(output_filename, "w") as f:
+        json.dump(fit_res, f, indent=2)
+    fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+    plt.savefig(f"{log_path}/exp{exp_num}/fit.png")
+    plt.clf()
 
     
     print("Evaluation on test set:")

@@ -408,6 +408,26 @@ class ACF():
         return x, mask, info
     def __repr__(self):
         return f"ACF(max_lag={self.max_lag})"
+    
+class Wavelet():
+    def __init__(self, gps=True, sample_rate=1/48, num_scales=50):
+        self.gps = gps
+        self.sample_rate = sample_rate
+        self.num_scales = num_scales
+    def __call__(self, x, mask=None, info=None, step=None):
+        if isinstance(x, np.ndarray):
+            dur = x.shape[0]*self.sample_rate
+            # time = np.linspace(0, dur, int(dur // self.sample_rate))
+            # lc = np.concatenate((time[:, None], x[:,0][:, None]), axis=1)
+            res, freqs = F_np.wavelet_from_np(x.squeeze(), num_scales=self.num_scales)
+            if self.gps:
+                res = np.gradient(res)
+            res = np.pad(res, ((0, len(x) - len(res))))
+            info['wavelet_freqs'] = freqs
+            x = np.hstack((res[:,None], x))
+        else:
+            raise NotImplementedError
+        return x, mask, info
 
 class Normalize():
     def __init__(self, norm='std'):
@@ -437,6 +457,28 @@ class ToTensor():
     def __repr__(self):
         return "ToTensor"
 
+class Shuffle():
+    def __init__(self, segment_len=48*90, seed=1234):
+        self.segment_len = segment_len
+        self.seed = seed
+    def __call__(self, x, mask=None, info=None, step=None):
+        if isinstance(x, np.ndarray):
+            np.random.seed(self.seed)
+            x = x / np.nanmedian(x)
+            num_segments = int(np.ceil(len(x) / self.segment_len))
+            x_segments = np.array_split(x, num_segments)
+            np.random.shuffle(x_segments)
+            x = np.concatenate(x_segments)
+            if mask is not None:
+                mask_segments = np.array_split(mask, num_segments)
+                np.random.shuffle(mask_segments)
+                mask = np.concatenate(mask_segments)
+        else:
+            raise NotImplementedError
+        return x, mask, info
+    def __repr__(self):
+        return f"Shuffle(seg_len={self.segment_len})"
+
 class Identity():
     def __init__(self):
         pass
@@ -444,6 +486,7 @@ class Identity():
         return x, mask, info
     def __repr__(self):
         return "Identity"
+    
 class RandomTransform():
     def __init__(self, transforms, p=None):
         self.transforms = transforms

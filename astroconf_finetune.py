@@ -38,9 +38,7 @@ print('device is ', DEVICE)
 
 if torch.cuda.is_available():
     print("gpu number: ", torch.cuda.current_device())
-exp_num = 45
-print("gpu number: ", torch.cuda.current_device())
-
+exp_num = 51
 
 local = False
 
@@ -162,19 +160,14 @@ if __name__ == '__main__':
     num_qs = dur//90
     kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
     refs = pd.read_csv('/data/lightPred/tables/all_refs.csv')
+    refs.dropna(subset=['i', 'prot'], inplace=True)
     # kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3,17))
-    try:
-        kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
-    except TypeError:
-        pass
-    kepler_df['qs'] = kepler_df['data_file_path'].apply(extract_qs)  # Extract 'qs' numbers
-    kepler_df['consecutive_qs'] = kepler_df['qs'].apply(consecutive_qs)  # Calculate length of longest consecutive sequence
-    kepler_df['longest_consecutive_qs_indices'] = kepler_df['longest_consecutive_qs_indices'].apply(
-        lambda x: [int(i) for i in x.strip('()').split(',')])
+    kepler_df = get_all_samples_df(num_qs)
     # kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
     kepler_df = kepler_df.merge(refs, on='KID', how='right')
+    kepler_df.to_csv('/data/lightPred/tables/ref_merged.csv', index=False)
     kepler_df.dropna(subset=['i', 'longest_consecutive_qs_indices'], inplace=True)
-    print(f"all samples with at least {num_qs} consecutive qs:  {len(kepler_df)}")
+    print(f"all samples:  {len(kepler_df)}")
     global_t_loss = []
     global_t_acc = []
     global_best_model = None
@@ -187,9 +180,9 @@ if __name__ == '__main__':
         tic = time.time()
         print("***********q: ", q, "number of samples: ", len(sample_df), "***********")
         step = int(q*int(90/cad*DAY2MIN))
-        transform = Compose([RandomCrop(int(dur / cad * DAY2MIN)), MovingAvg(49), Detrend(),
+        transform = Compose([RandomCrop(int(dur / cad * DAY2MIN)), MovingAvg(13), Detrend(),
                               ACF(), Normalize('std'), ToTensor()])
-        test_transform = Compose([Slice(0 + step, int(dur / cad * DAY2MIN) + step), MovingAvg(49), Detrend(),
+        test_transform = Compose([Slice(0 + step, int(dur / cad * DAY2MIN) + step), MovingAvg(13), Detrend(),
                                   ACF(), Normalize('std'), ToTensor()])
 
         full_dataset = KeplerLabeledDataset(root_data_folder, path_list=None,
@@ -232,7 +225,8 @@ if __name__ == '__main__':
         trainer = KeplerTrainer(model=model, optimizer=optimizer, criterion=loss_fn,
                         scheduler=None, train_dataloader=full_dataloader, val_dataloader=full_dataloader,
                             device=local_rank, optim_params=optim_params, net_params=net_params, exp_num=exp_num, log_path=log_path,
-                            exp_name="lstm_attn", num_classes=len(class_labels))
+                            exp_name="lstm_attn", num_classes=len(class_labels),
+                            eta=0.5)
         epoch_loss = []
         epoch_acc = []
         epoch_best_loss = np.inf
@@ -242,7 +236,7 @@ if __name__ == '__main__':
             loss, acc = trainer.train_epoch(device=local_rank, conf=True)
             print(f"epoch: {epoch} loss: {np.mean(loss)} acc: {acc}")
             epoch_loss.extend(loss)
-            epoch_acc.append(acc)
+            epoch_acc.append(acc.tolist())
             if  np.mean(loss) < epoch_best_loss:
                 epoch_best_loss = np.mean(loss)
                 epoch_best_acc = acc

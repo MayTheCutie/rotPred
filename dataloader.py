@@ -217,7 +217,7 @@ class TimeSsl(Dataset):
               effective_qs = []
               x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
           # meta['qs'] = row['qs']
-        except (FileNotFoundError)  as e:
+        except (TypeError, ValueError, FileNotFoundError)  as e:
             print("Error: ", e)
             effective_qs = []
             x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
@@ -384,12 +384,11 @@ class KeplerLabeledDataset(KeplerDataset):
     x, y, mask, mask_y, info, info_y = super().__getitem__(idx)
     if self.df is not None:
       row = self.df.iloc[idx]
-    # if 'Prot' in row:
-    #   val = (row['Prot'] - boundary_values_dict['Period'][0])\
-    #   /(boundary_values_dict['Period'][1]-boundary_values_dict['Period'][0])
-    if 'i' in row:
-      val = row['i']/90
-    y = torch.tensor(val)
+    p = (row['prot'] - boundary_values_dict['Period'][0])\
+      /(boundary_values_dict['Period'][1]-boundary_values_dict['Period'][0])
+    i = (row['i']*np.pi/180 - boundary_values_dict['Inclination'][0])\
+      /(boundary_values_dict['Inclination'][1]-boundary_values_dict['Inclination'][0])
+    y = torch.tensor([i, p]).float()
     return x.float(), y, mask, mask_y, info, info_y
 
 
@@ -634,7 +633,7 @@ class TimeSeriesDataset(Dataset):
           x, _, info = self.transforms(x[:,1], mask=None,  info=info, step=self.step)
           if self.seq_len > x.shape[0]:
             print("padding: ", x.shape, self.seq_len)
-            x = np.pad(x, ((0, self.seq_len - x.shape[-1]), (0,0)), "constant", constant_values=0)
+            x = F.pad(x, (0, self.seq_len - x.shape[-1], 0,0), mode="constant", value=0)
           info['idx'] = idx
         else:
           x = x[:,1]

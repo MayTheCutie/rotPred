@@ -414,7 +414,7 @@ def find_period(data, lags, prom=None, method='first', name=''):
           break
     #   print("peaks: " , first_peaks)
       
-      if i >= 2:
+      if i >= 4:
         slope, intercept, r_value, p_value, std_err = linregress(np.arange(len(first_peaks)), first_peaks)
         # first_peaks.append(intercept)
         # print(first_peaks)
@@ -425,36 +425,47 @@ def find_period(data, lags, prom=None, method='first', name=''):
         #   p = first_peaks[0]
         
       else:
-        print("not enough peaks consider lower threshold")
+        # print("not enough peaks consider lower threshold")
         slope, intercept = 0,0
         p = first_peaks[0]
     return p, peaks
   return 0, peaks
 
-# def analyze_lc(lc, day_cadence=0.020832):
-#     try:
-#         fits_result, process_result = ss.process_LightCurve(lc, bs=day_cadence*3600*24)
-#         acf_s, acf_lags_s = fits_result['acf'], fits_result['acf_lags']
-#         acf_s  = acf_s/np.median(acf_s)
-#         acf_period, peaks, data = find_period(acf_s, acf_lags_s, prom=0.001, name='ACF', method='slope')
-#         return acf_period, peaks, data
-#     except Exception as e:
-#         print(e)
-#         return np.inf, None, None
-
 def analyze_lc(lc, day_cadence=1/48, prom=0.01):
-    xcf = A(lc, nlags=len(lc))
-    xcf = xcf - np.median(xcf)
-    xcf = gaussian_filter1d(xcf, 7.5)
-
+    lc = lc - np.median(lc)
+    lc = gaussian_filter1d(lc, 7.5)
+    xcf = A(lc, nlags=50/day_cadence - 1)
     xcf_lags = np.arange(0,len(xcf)*day_cadence, day_cadence)
     xcf_period, peaks = find_period(xcf, xcf_lags, prom=prom, name='XCF', method='slope')
     return np.abs(xcf_period), xcf_lags, xcf, peaks
 
 
-def analyze_lc_torch(lc, acf=False):
-   acf = autocorrelation(lc, dim=1) if not acf else lc
+def analyze_lc_torch(lc, acf=False, prom=0.01):
+   lc  = lc - torch.median(lc, dim=1)[0].unsqueeze(1)
+   kernel = torch_1d_gussian_filter(15, 7.5)
+   lc =  kernel(lc.unsqueeze(1)).squeeze(1)
+   acf = autocorrelation(lc, dim=-1) if not acf else lc
    acf_lags = np.arange(acf.shape[-1])
-   ps = torch.tensor([find_period(acf.cpu().numpy()[i], acf_lags, prom=0.001, name='ACF', method='slope') for i in range(len(acf))])
+   ps = torch.tensor([find_period(acf.cpu().numpy()[i], acf_lags, prom=prom, name='ACF', method='slope') for i in range(len(acf))])
    return ps
+
+def gaussian(M, std, sym=True):
+    if M < 1:
+        return torch.tensor([])
+    if M == 1:
+        return torch.tensor(1, 'd')
+    odd = M % 2
+    if not sym and not odd:
+        M = M + 1
+    n = torch.arange(0, M) - (M - 1.0) / 2.0
+    sig2 = 2 * std * std
+    w = torch.exp(-n ** 2 / sig2)
+    if not sym and not odd:
+        w = w[:-1]
+    return w
    
+def torch_1d_gussian_filter(M, std, sym=True):
+    w = gaussian(M, std, sym=sym)
+    kernel = torch.nn.Conv1d(1, 1, M, padding=M//2, bias=False)
+    kernel.weight.data = w.view(1, 1, M)
+    return kernel

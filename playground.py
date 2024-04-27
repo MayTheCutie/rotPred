@@ -16,9 +16,6 @@ import butterpy as bp
 from scipy.signal import savgol_filter as savgol
 
 
-
-
-
 import torch.nn as nn
 from torch.utils.data import WeightedRandomSampler
 ROOT_DIR = path.dirname(path.dirname(path.abspath(__file__)))
@@ -37,7 +34,7 @@ from lightPred.models import *
 from lightPred.train import *
 from lightPred.sampler import DistributedSamplerWrapper
 from lightPred.transforms import *
-from lightPred.period_analysis import analyze_lc, analyze_lc_kepler
+from lightPred.period_analysis import analyze_lc
 from lightPred.timeDetr import TimeSeriesDetrModel
 from lightPred.timeDetrLoss import TimeSeriesDetrLoss, SetCriterion, HungarianMatcher
 from lightPred.analyze_results import read_csv_folder
@@ -84,6 +81,27 @@ kepler_data_folder = "/data/lightPred/data"
 idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nlc)]
 
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
+
+def one_kepler_sample(sample_kid):
+    data_folders = [f for f in os.listdir(kepler_data_folder) if 'Q' in f]
+    data_folders = sorted(data_folders, key=lambda x: int(x[1:]))
+    full_lc = np.zeros((0))
+    for folder in data_folders:
+        for file in tqdm(os.listdir(os.path.join(kepler_data_folder, folder))):
+            str_list =re.split('(\d+)',file.split('-')[0])
+            if len(str_list) > 1:
+                kid = remove_leading_zeros(str_list[1])
+            else:
+                print('no number in ', file)
+                continue
+            if kid == sample_kid:
+                
+                lc, time, meta = read_fits(os.path.join(kepler_data_folder, folder, file))
+                lc = lc/lc.median()
+                full_lc = np.concatenate((full_lc, lc))
+                print("found in ", folder, 'tot shape: ', full_lc.shape)
+    np.save(f'/data/tests/{sample_kid}.npy', full_lc)
+    return full_lc
 
 def test_time_augmentations():
     ssl_tf = DataTransform_TD_bank
@@ -1769,9 +1787,10 @@ if __name__ == "__main__":
     # create_period_normalized_samples('/data/butter/data_cos_old', 50000, num_ps=20)
     # create_period_normalized_samples('/data/butter/data_sun_like', 50000, num_ps=20)
     # sun_like_analysis()
-    test_peak_height_ratio('/data/butter/test_cos_old', 1000, '/data/logs/astroconf/exp40')
+    # test_peak_height_ratio('/data/butter/test_cos_old', 1000, '/data/logs/astroconf/exp40')
     # test_peak_height_ratio('/data/butter/test_cos_old', 1000,)
     # test_time_augmentations()
+    one_kepler_sample(7831394)
 
     # test_timeDetr()
 

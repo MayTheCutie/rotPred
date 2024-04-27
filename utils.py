@@ -647,6 +647,10 @@ def convert_to_tuple(string):
     # Convert strings to integers and create a tuple
     return tuple(int(value) for value in values)
 
+def convert_ints_to_list(string):
+    values = string.strip('()').split(',')
+    return [int(value) for value in values]
+
 # Function to extract 'qs' numbers from a path
 def extract_qs(path):
     qs_numbers = []
@@ -696,6 +700,7 @@ def get_all_samples_df(num_qs=8):
     kepler_df['qs'] = kepler_df['data_file_path'].apply(extract_qs)  # Extract 'qs' numbers
     kepler_df['consecutive_qs'] = kepler_df['qs'].apply(consecutive_qs)  # Calculate length of longest consecutive sequence
     kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
+    kepler_df['longest_consecutive_qs_indices'] = kepler_df['longest_consecutive_qs_indices'].apply(convert_ints_to_list)
     return kepler_df
     
 def kepler_collate_fn(batch):
