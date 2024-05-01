@@ -39,15 +39,14 @@ print('device is ', DEVICE)
 if torch.cuda.is_available():
     print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 51
+exp_num = 56
 
 
 local = False
 
 root_dir = '/data' if not local else '../'
 
-log_path = f'{root_dir}/logs/astroconf/exp{exp_num}'
-
+log_path = f'{root_dir}/logs/astroconf/exp{exp_num}/fine_tune'
 yaml_dir = '/data/lightPred/Astroconf'
 # yaml_dir = 'Astroconf/'
 
@@ -209,7 +208,8 @@ if __name__ == '__main__':
         conf_model.pred_layer = nn.Identity()
         model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, lstm_args=net_params)
 
-        state_dict = torch.load(f'{log_path}/astroconf.pth', map_location=torch.device('cpu'))
+        print(f"loading model from {log_path}/astroconf_finetune_last.pth...")
+        state_dict = torch.load(f'{log_path}/astroconf_finetune_last.pth', map_location=torch.device('cpu'))
         new_state_dict = OrderedDict()
         for key, value in state_dict.items():
             while key.startswith('module.'):

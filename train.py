@@ -320,9 +320,10 @@ class Trainer(object):
         return preds, targets, confs
     
 class DoubleInputTrainer(Trainer):
-    def __init__(self, num_classes=2, **kwargs):
+    def __init__(self, num_classes=2, eta=0.5, **kwargs):
         super().__init__(**kwargs)
         self.num_classes = num_classes
+        self.eta = eta
     def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
         """
         Trains the model for one epoch.
@@ -363,7 +364,9 @@ class DoubleInputTrainer(Trainer):
             if y.isnan().any():
                 print("y is nan")
                 print("y: ", y)
-            loss = self.criterion(y_pred, y)
+            loss_i = self.criterion(y_pred[:, 0], y[:, 0])  # Loss for inclination
+            loss_p = self.criterion(y_pred[:, 1], y[:, 1])  # Loss for period
+            loss = (self.eta * loss_i) + ((1-self.eta) * loss_p)
             if conf:
                 loss += self.criterion(conf_pred, conf_y)
                 
@@ -502,8 +505,8 @@ class KeplerTrainer(Trainer):
             if conf:
                 y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
                 conf_y = torch.abs(y - y_pred) 
-            loss_i = self.criterion(y_pred[:, 0], y[:, 0])  # Loss for first attribute
-            loss_p = self.criterion(y_pred[:, 1], y[:, 1])  # Loss for second attribute
+            loss_i = self.criterion(y_pred[:, 0], y[:, 0])  # Loss for inclination
+            loss_p = self.criterion(y_pred[:, 1], y[:, 1])  # Loss for period
             loss = (self.eta * loss_i) + ((1-self.eta) * loss_p)
             if conf:
                 loss += self.criterion(conf_pred, conf_y)

@@ -38,7 +38,7 @@ print('device is ', DEVICE)
 
 if torch.cuda.is_available():
     print("gpu number: ", torch.cuda.current_device())
-exp_num = 51
+exp_num = 56
 
 local = False
 
@@ -180,14 +180,15 @@ if __name__ == '__main__':
         tic = time.time()
         print("***********q: ", q, "number of samples: ", len(sample_df), "***********")
         step = int(q*int(90/cad*DAY2MIN))
-        transform = Compose([RandomCrop(int(dur / cad * DAY2MIN)), MovingAvg(13), Detrend(),
-                              ACF(), Normalize('std'), ToTensor()])
-        test_transform = Compose([Slice(0 + step, int(dur / cad * DAY2MIN) + step), MovingAvg(13), Detrend(),
+        # transform = Compose([RandomCrop(int(dur / cad * DAY2MIN)), MovingAvg(13), Shuffle(),
+        #                       Detrend(),
+        #                       ACF(), Normalize('std'), ToTensor()])
+        transform = Compose([Slice(0 + step, int(dur / cad * DAY2MIN) + step), MovingAvg(13), Detrend(),
                                   ACF(), Normalize('std'), ToTensor()])
 
         full_dataset = KeplerLabeledDataset(root_data_folder, path_list=None,
                                       df=sample_df, t_samples=int(dur/cad*DAY2MIN), skip_idx=q, num_qs=num_qs,
-            transforms=test_transform)
+            transforms=transform)
         sampler = torch.utils.data.distributed.DistributedSampler(full_dataset, num_replicas=world_size, rank=rank)
 
         full_dataloader = DataLoader(full_dataset, batch_size=b_size, \

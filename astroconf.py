@@ -41,6 +41,7 @@ from lightPred.optim import WeightedMSELoss, QuantileLoss
 print(f"python path {os.sys.path}")
 
 torch.manual_seed(1234)
+np.random.seed(1234)
 
 # warnings.filterwarnings("ignore")
 
@@ -50,7 +51,7 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 52
+exp_num = 56
 
 log_path = '/data/logs/astroconf'
 
@@ -63,7 +64,7 @@ if not os.path.exists(f'{log_path}/exp{exp_num}'):
 
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
 # checkpoint_path = '/data/logs/astroconf/exp14'
-data_folder = "/data/butter/data_aigrain2"
+data_folder = "/data/butter/data_low_spots"
 
 # test_folder = "/data/butter/test_cos_old"
 
@@ -233,34 +234,41 @@ if __name__ == '__main__':
 
    
 
-    # model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', LSTM_DUAL, distribute=True, device=local_rank, to_ddp=True)
     
 
     conf_model, _, scheduler, scaler = init_train(args, local_rank)
     conf_model.pred_layer = nn.Identity()
     model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, lstm_args=lstm_params)
 
-    # model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', model, distribute=True, device=local_rank, to_ddp=True)
-
-    # load self supervised weights
-    # state_dict = torch.load(f'/data/logs/simsiam/exp15/simsiam_astroconf.pth')
-    # initialized_layers=[]
+    # state_dict = torch.load(f'{log_path}/exp{exp_num}/astroconf.pth', map_location=torch.device('cpu'))
     # new_state_dict = OrderedDict()
     # for key, value in state_dict.items():
-    #     if key.startswith('module.'):
-    #         while key.startswith('module.'):
-    #             key = key.replace('module.', '')
-    #     if key.startswith('backbone.'):
-    #         print(key)
-    #         new_state_dict[key.replace('backbone.', '')] = value
-    #         initialized_layers.append(key.replace('backbone.', ''))
+    #     while key.startswith('module.'):
+    #         key = key[7:]
+    #     new_state_dict[key] = value
     # state_dict = new_state_dict
-    # print("loading state dict...")
-    # missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
-    # print("Missing keys:")
-    # print(missing)
-    # print("Unexpected keys:")
-    # print(unexpected)
+    # model.load_state_dict(state_dict)
+
+
+    # load self supervised weights
+    state_dict = torch.load(f'/data/logs/simsiam/exp15/simsiam_astroconf.pth')
+    initialized_layers=[]
+    new_state_dict = OrderedDict()
+    for key, value in state_dict.items():
+        if key.startswith('module.'):
+            while key.startswith('module.'):
+                key = key.replace('module.', '')
+        if key.startswith('backbone.'):
+            print(key)
+            new_state_dict[key.replace('backbone.', '')] = value
+            initialized_layers.append(key.replace('backbone.', ''))
+    state_dict = new_state_dict
+    print("loading state dict...")
+    missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
+    print("Missing keys:")
+    print(missing)
+    print("Unexpected keys:")
+    print(unexpected)
 
     model = model.to(local_rank)
     model = DDP(model, device_ids=[local_rank])
@@ -292,10 +300,10 @@ if __name__ == '__main__':
                        scheduler=None, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank,
                          optim_params=optim_params, net_params=lstm_params,
-                           exp_num=exp_num, log_path=log_path,
+                           exp_num=exp_num, log_path=log_path, eta=0.5,
                         exp_name="astroconf") 
     fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
-                           early_stopping=40, only_p=False, best='loss', conf=True) 
+                           early_stopping=40, only_p=False, best='acc', conf=True) 
     output_filename = f'{log_path}/exp{exp_num}/astroconf.json'
     with open(output_filename, "w") as f:
         json.dump(fit_res, f, indent=2)

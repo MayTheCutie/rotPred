@@ -405,6 +405,7 @@ def find_closest_minima(array, peaks):
     closest_right_min_index = right_minima[closest_right_min_index] if len(right_minima) > 0 else None
 
     return highest_peak_index, closest_left_min_index, closest_right_min_index
+
 def find_period(data, lags, prom=None, method='first', name=''):
     peaks, _ = find_peaks(data, distance=5, prominence=prom)
     highest_peak, closest_left, closest_right = find_closest_minima(data, peaks)
@@ -462,7 +463,7 @@ def find_period(data, lags, prom=None, method='first', name=''):
                 slope, intercept = 0, 0
                 p = first_peaks[0]
         return p, peaks, lph
-    return 0, peaks
+    return 0, peaks, lph
 
 def analyze_lc(lc, day_cadence=1/48, prom=0.01, max_period=50):
     lc = lc - np.median(lc)
