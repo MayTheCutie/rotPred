@@ -40,7 +40,7 @@ root_dir = 'lightPred' if local else '/data/lightPred'
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
 # checkpoint_path = '/data/logs/astroconf/exp14'
 
-data_folder = "/data/butter/test_aigrain2"
+data_folder = "/data/butter/test_cos_old"
 
 # dataset_name = 'kepler'
 dataset_name = data_folder.split('/')[-1]
@@ -100,7 +100,7 @@ def simulation_prediction():
     alpha = 0.72
     kep_transform = RandomCrop(int(dur/cad*DAY2MIN))
     transform = Compose([RandomCrop(int(dur / cad * DAY2MIN)),
-                         KeplerNoiseAddition(noise_dataset=None, noise_path=f'/data/lightPred/data/noise',
+                         KeplerNoiseAddition(noise_dataset=None, noise_path=f'data/noise',
                                              transforms=kep_transform),
                          MovingAvg(49), Wavelet(gps=True, num_scales=1024),
                          ToTensor()])
@@ -114,6 +114,10 @@ def simulation_prediction():
     for i, (x,y,mask,info) in enumerate(pbar):
         if i % 100 == 0:
             print(i)
+        p, lags, acf, peaks, lph = analyze_lc(x[1])
+        print(lph)
+        if i == 10:
+            exit()
         freqs = info['wavelet_freqs']
         grad_w = x[0][:len(freqs)]
         periods = 1/freqs

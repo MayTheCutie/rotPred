@@ -406,12 +406,14 @@ def prepare_df(df, scale=False, filter_giants=True, filter_eb=True, filter_non_p
     if err_model_p is not None:
         rounded_inc = np.clip(np.round(df['predicted inclination']).astype(int), a_min=None, a_max=89)
         print(np.max(rounded_inc))
+        rounded_inc = np.clip(rounded_inc, a_min=0, a_max=len(err_model_i) - 1)
         inc_errors = err_model_i.iloc[rounded_inc]
         inc_errors_lower, inc_errors_upper = create_errorbars(inc_errors)
         df.loc[:, 'inclination model error lower'] = inc_errors_lower.values
         df.loc[:, 'inclination model error upper'] = inc_errors_upper.values
 
         rounded_p = np.round(df['predicted period']).astype(int)
+        rounded_p = np.clip(rounded_p, a_min=0, a_max=len(err_model_p) - 1)
         p_errors = err_model_p.iloc[rounded_p]
         p_errors_lower, p_errors_upper = create_errorbars(p_errors)
         df.loc[:, 'period model error lower'] = p_errors_lower.values
@@ -465,25 +467,28 @@ def i_p_scatter(kepler_inference, kepler_inference2=None, conf=None, dir='../img
     plt.close('all')
 
 
-def hist(kepler_inference, save_name,att='predicted inclination', label="all data",
+def hist(kepler_inference, save_name,att='predicted inclination', label="",
          df_mazeh=None, df_kois=None, kois_name='kois', theoretical='', weights=None, dir='../imgs'):
     """
     inclination histogram
     """
+    label = label + f' ({len(kepler_inference)} points)'
+    if df_kois is not None:
+        kois_name = kois_name + f' ({len(df_kois)} points)'
     if weights is not None:
         w = np.zeros(len(kepler_inference))
         for i in range(len(kepler_inference[f'{att}'])):
             w[i] = weights[int(np.array(kepler_inference[f'{att}'])[i])]
-        plt.hist(kepler_inference[f'{att}'], bins=20, histtype='step', weights=w, label=label, density=True)
+        plt.hist(kepler_inference[f'{att}'], bins=40, histtype='step', weights=w, label=label, density=True)
     else:
-        plt.hist(kepler_inference[f'{att}'], bins=20, histtype='step', label=label, density=True)
+        plt.hist(kepler_inference[f'{att}'], bins=40, histtype='step', label=label, density=True)
     if df_mazeh is not None:
-        plt.hist(df_mazeh[f'{att}'], bins=20, histtype='step', label='Mazeh data', density=True)
+        plt.hist(df_mazeh[f'{att}'], bins=40, histtype='step', label='Mazeh data', density=True)
     if df_kois is not None:
-        plt.hist(df_kois[f'{att}'], bins=20, histtype='step', label=kois_name, density=True)
+        plt.hist(df_kois[f'{att}'], bins=40, histtype='step', label=kois_name, density=True)
     if theoretical == 'cos':
         incl = np.rad2deg(np.arccos(np.random.uniform(0,1, len(kepler_inference))))
-        plt.hist(incl, bins=20, histtype='step', label='uniform in cos(i)', density=True)
+        plt.hist(incl, bins=40, histtype='step', label='uniform in cos(i)', density=True)
     # plt.plot(np.arange(len(incl)), np.cos(np.arange(len(incl))))
     # plt.hist(merdf_no_kois['sin predicted inclination'], bins=60, histtype='step', label='data with no KOI',
     #          density=True)
@@ -519,14 +524,16 @@ def p_hist(kepler_inference, df_mazeh, df_kois, dir='../imgs'):
     plt.show()
 
 
-def threshold_hist(df, thresh_att, thresh, save_name, att='predicted inclination', sign='big', dir='../imgs'):
+def threshold_hist(df, thresh_att, thresh, save_name,
+                   att='predicted inclination', sign='big', dir='../imgs'):
     math_sign = '>' if sign == 'big' else '<'
     for t in thresh:
         df_reduced = df[df[f'{thresh_att}'] > t] if sign == 'big' else df[df[f'{thresh_att}'] < t]
         num_points = len(df_reduced)
         if num_points > 10:
             plt.hist(df_reduced[f'{att}'],
-                     histtype='step', bins=60, label=f'{thresh_att} {math_sign} {t}, {num_points} points', density=True)
+                     histtype='step', bins=60,
+                     label=f'{thresh_att} {math_sign} {t}, {num_points} points', density=True)
     plt.legend()
     plt.title(f"{save_name}")
     plt.ylabel('density')
@@ -966,6 +973,39 @@ def compare_period(df_inference, df_compare, p_att='Prot', ref_name='reinhold202
     plt.savefig(f"../imgs/compare_{ref_name}")
     plt.show()
 
+def compare_period_on_mock(model_df, ref_df, ref_name='acf'):
+    model_df.columns = model_df.columns.str.lower()
+
+    merged_df = pd.merge(model_df, ref_df, left_index=True, right_index=True, suffixes=(' model', ' ref'))
+    # print(np.sum(merged_df['period model'] - merged_df['period ref']))
+    model_acc = np.sum(np.abs(merged_df['predicted period model'] - merged_df['period model']) <
+                       merged_df['period model']/10) / len(merged_df)
+    model_acc20 = np.sum(np.abs(merged_df['predicted period model'] - merged_df['period model']) <
+                       merged_df['period model'] / 5) / len(merged_df)
+    ref_acc = np.sum(np.abs(merged_df['predicted period ref'] - merged_df['period ref']) <
+                       merged_df['period ref']/10) / len(merged_df)
+    ref_acc20 = np.sum(np.abs(merged_df['predicted period ref'] - merged_df['period ref']) <
+                       merged_df['period ref']/5) / len(merged_df)
+    # plt.scatter(merged_df['period model'], merged_df['predicted period model'], label='model')
+    plt.scatter(merged_df['period ref'], merged_df['predicted period ref'], label=ref_name)
+    plt.xlabel("true period")
+    plt.ylabel("prediction")
+    # plt.legend()
+    # plt.title(f'acc10p: {ref_acc:.2f}')
+    plt.savefig(f"../mock_imgs/{ref_name}.png")
+
+    plt.show()
+
+    fig, ax = plt.subplots()
+    im = ax.scatter(merged_df['predicted period ref'], merged_df['predicted period model'],
+                c=merged_df['period confidence'])
+    cbar = fig.colorbar(im)
+    cbar.ax.set_xlabel('confidence', fontdict={'fontsize': 14})
+    cbar.ax.tick_params(labelsize=14)
+    plt.savefig(f"../mock_imgs/{ref_name}_period_comparison.png")
+    plt.show()
+
+    return model_acc, model_acc20, ref_acc, ref_acc20
 
 def find_non_ps(kepler_inference):
     non_ps = pd.read_csv('Table_2_Non_Periodic.txt')
@@ -1002,6 +1042,7 @@ def read_csv_folder(dir_name, filter_thresh=5, att='period'):
             else:
                 if filter_thresh is not None:
                     filter_df = filter_df_by_threshold(dfs[0], df, filter_thresh, att=att)
+                    print('filtered df len: ', len(filter_df))
                 else:
                     filter_df = df
                 dfs.insert(0,filter_df)
@@ -1029,7 +1070,14 @@ def read_csv_folder(dir_name, filter_thresh=5, att='period'):
     #     return ast.literal_eval(row['qs'])
     merged_df['qs'] = merged_df['qs'].apply(lambda x: ast.literal_eval(x))
     merged_df.drop(labels=['qs'], axis=1, inplace=True)
-    result_df = merged_df.groupby('KID').agg( 'median')
+    result_df = merged_df.groupby('KID').agg('median')
+    std_df = merged_df.groupby('KID').agg('std')
+    plt.hist(std_df['predicted period'])
+    plt.xlabel("std predicted period")
+    plt.show()
+    plt.hist(result_df['predicted inclination'])
+    plt.xlabel("std predicted inclination")
+    plt.show()
     print(f"number of samples after filtering with {filter_thresh} days/degrees threshold : {len(result_df)}")
     return result_df
 
@@ -1266,6 +1314,13 @@ def plot_refrences_lc(kepler_inference, refs, samples_dir='samples'):
             save_path = os.path.join('../imgs', f'{ref_row["kepler_name"].values[0]}.png')
             if p.endswith('.fits'):
                 show_kepler_sample(os.path.join(samples_dir, p), title, save_path)
+
+def scatter_conf(kepler_inference, other_att, att='inclination'):
+    plt.scatter(kepler_inference[other_att], kepler_inference[f'{att} confidence'])
+    plt.xlabel(other_att)
+    plt.ylabel(f'{other_att} confidence')
+    plt.savefig(os.path.join('../imgs', f'{other_att}_conf_vs_{other_att}.png'))
+    plt.show()
 def clusters_inference(kepler_inference, cluster_df, refs, refs_names, ref_markers=['*', '+']):
     # Merge dataframes and rename columns
     merged_df = cluster_df.merge(kepler_inference, on='KID')
@@ -1390,6 +1445,7 @@ def B_V_from_T(T):
 
 def T_from_B_V(B_V):
     return 4600*(1/(0.92*B_V+1.7)+1/(0.92*B_V + 0.62))
+
 def real_inference():
     """
     inference on kepler data
@@ -1405,14 +1461,16 @@ def real_inference():
     sample_kois = prepare_kois_sample(['tables/albrecht2022_clean.csv', 'tables/morgan2023.csv', 'tables/win2017.csv'])
     sample_kois.to_csv('tables/all_refs.csv')
 
-    kepler_inference = read_csv_folder('../astroconf_exp45_ssl', filter_thresh=6)
-    kepler_inference = kepler_inference[kepler_inference['predicted period'] > 3]
-    # kepler_inference = kepler_inference[kepler_inference['period confidence'] > 0.85]
+    kepler_inference = read_csv_folder('../inference/astroconf_exp51_ssl_finetuned', filter_thresh=2)
+
+    # kepler_inference = kepler_inference[kepler_inference['predicted period'] > 2]
+    # kepler_inference = kepler_inference[kepler_inference['inclination confidence'] > 0.96]
 
 
 
     print("number of samples for period: ", len(kepler_inference))
-    # plot_subset(kepler_inference, mock_eval)
+    print("minimum period", kepler_inference['predicted period'].min())
+    plot_subset(kepler_inference, mock_eval)
     # get_optimal_confidence(mock_eval)
 
     # find_non_ps(kepler_inference)
@@ -1432,13 +1490,20 @@ def real_inference():
                  refs_names=['Mazeh', 'Reinholds'], age_vals=[0.5,0.6,0.7,0.8,0.9,1])
     Teff_analysis(kepler_inference, berger_cat, refs=[ref, ref2],
                  refs_names=['Mazeh', 'Reinholds'])
-
+    scatter_conf(kepler_inference, 'Teff')
+    scatter_conf(kepler_inference, 'predicted inclination')
     merged_df_mazeh, merged_df_kois, merged_df_no_kois = create_kois_mazeh(kepler_inference,
                                                                            kois_path='tables/kois.csv')
     merged_df_kois['a'] = (merged_df_kois['planet_Prot'] ** 2) ** (1 / 3)
     compare_kois(merged_df_kois, sample_kois)
 
     prad_plot(merged_df_kois, window_size=0.1)
+
+    plt.scatter(kepler_inference['Teff'], kepler_inference['predicted inclination'],)
+    plt.xlabel('Teff')
+    plt.ylabel('predicted inclination')
+    plt.show()
+    plt.close()
 
 
     merged_df_hj = merged_df_kois[(merged_df_kois['koi_prad'] > J_radius_factor)
@@ -1450,28 +1515,32 @@ def real_inference():
     print(len(kepler_inference))
     merged_df_kois_small = merged_df_kois[merged_df_kois['planet_Prot'] < prot_hj]
 
-    high_conf_inc = kepler_inference[kepler_inference['inclination confidence'] > 0.9]
+    high_p_inc = kepler_inference[kepler_inference['predicted period'] > 10]
 
-
-    hist(high_conf_inc, save_name='inc_conf_9', att='predicted inclination', theoretical='cos')
+    _, ks_test_kois = ks_2samp(kepler_inference['predicted inclination'],
+                               merged_df_kois['predicted inclination'])
+    print("ks test kois- ", ks_test_kois)
+    hist(kepler_inference, save_name='inc_clean', att='predicted inclination', theoretical='cos')
+    hist(high_p_inc, save_name='inc_high_p', att='predicted inclination', theoretical='cos', label='period > 10 days')
     hist(kepler_inference, save_name='inc_hj', att='predicted inclination',
          df_kois=merged_df_hj, kois_name='hj')
-    # hist(kepler_inference, save_name='cos_inc_weighted',
-    #      att='predicted inclination', weights=hist_weights, theoretical='cos', label=r'$T_{eff} > 6200 K, P > 10 \, Days, conf > 0.9$')
-
-    hist(kepler_inference, save_name='period',att='predicted period',
+    hist(kepler_inference, save_name='inc_kois', att='predicted inclination',
+         df_kois=merged_df_kois, kois_name='kois')
+    hist(kepler_inference, save_name='period_hj',att='predicted period',
         df_mazeh=None, df_kois=merged_df_hj, kois_name='hj')
+    hist(kepler_inference, save_name='period', att='predicted period',
+         )
 
     threshold_hist(kepler_inference, thresh_att='confidence',
                    thresh=[0.9,0.95, 0.96,0.97, 0.98], save_name='inc_pconf')
     threshold_hist(kepler_inference, thresh_att='inclination confidence',
-                   thresh=[0.8,0.85, 0.9], save_name='inc_conf')
+                   thresh=[0.9, 0.94, 0.96, 0.98], save_name='inc_conf')
     threshold_hist(kepler_inference, thresh_att='predicted period',
                    thresh=[10,5,3,2.5,2,0],  save_name='inc_p')
     threshold_hist(kepler_inference, thresh_att='predicted period',
                    thresh=[2,3,5,10,20],save_name='inc_p', sign='small')
     threshold_hist(kepler_inference, att='predicted inclination',
-                   thresh_att='Teff', thresh=[4500,5000] + list(np.arange(6000,7000,200)), save_name='inc_t')
+                   thresh_att='Teff', thresh=[4500,5000] + list(np.arange(6000,6800,200)), save_name='inc_t')
     threshold_hist(kepler_inference, att='predicted period',
                    thresh_att='Teff', thresh=[4500,5000,5500,6000,6500,6700], save_name='p_t')
 
@@ -1522,36 +1591,40 @@ def prad_plot(merged_df_kois, window_size, dir='../imgs'):
     plt.savefig(os.path.join(dir, 'prad_inc.png'))
     plt.show()
 
-
 def mock_inference():
-    """
-    inference on mock data
-    """
-    mock_eval = prepare_df(pd.read_csv(r"C:\Users\ilaym\Desktop\kepler\acf\analyze\mock\eval_astroconf_exp31.csv"), filter_giants=False, filter_eb=False, teff_thresh=False)
+    mock_eval = prepare_df(pd.read_csv('../mock_eval/eval_astroconf_exp47.csv'),
+               filter_giants=False, filter_eb=False, teff_thresh=False)
+    scatter_predictions(mock_eval['Period'], mock_eval['predicted period'], mock_eval['period confidence'],
+                        name='period_exp47', units='Days', )
+    scatter_predictions(mock_eval['Inclination'], mock_eval['predicted inclination'],
+                        mock_eval['inclination confidence'],
+                        name='inc_exp47', units='Deg', )
 
-    incs = np.arcsin(np.random.uniform(0, 1, len(mock_eval)))
-    ps = np.clip(np.abs(np.random.normal(loc=17.7, scale=10.7, size=len(mock_eval))), 1, None)
-    mazeh = pd.read_csv(r"C:\Users\ilaym\Desktop\kepler\acf\analyze/Table_1_Periodic.txt")
-    fig, axes = plt.subplots(1,2)
-    axes[0].hist(mock_eval['Inclination'],histtype='step', bins=40, label='True')
-    axes[0].hist(mock_eval['predicted inclination'],histtype='step', bins=40, label='Prediction')
-    axes[0].set_title('Inclination')
-    axes[0].set_xlabel('Deg')
-    axes[1].hist(mock_eval['Period'], histtype='step', bins=40, label='True')
-    axes[1].hist(mock_eval['predicted period'], histtype='step', bins=40, label='Prediction')
-    axes[1].set_title('Period')
-    axes[1].set_xlabel('Days')
+def aigrian_test():
 
-    plt.legend()
-    plt.savefig(r"C:\Users\ilaym\Desktop\kepler\acf\analyze\mock/hists.jpeg")
-    plt.show()
-    # create_hist_factor(mock_eval['Inclination'], mock_eval['predicted inclination'])
+    model_on_aigrain = prepare_df(pd.read_csv('../inference/aigrain_data/astroconf_exp52.csv'),
+                                  filter_giants=False, filter_eb=False, teff_thresh=False)
+    acf_on_aigrain = pd.read_csv('../inference/aigrain_data/acf_results_data_aigrain2_clean.csv')
+    gps_on_aigrain = pd.read_csv('../inference/aigrain_data/gps_results_data_aigrain2_dual.csv')
 
-    plt.hist(mock_eval['inclination confidence'], histtype='step', label='inclination')
-    plt.hist(mock_eval['period confidence'], histtype='step', label='period')
-    plt.title("confidence histogram - mock")
-    plt.legend()
-    plt.show()
+    scatter_predictions(model_on_aigrain['Period'], model_on_aigrain['predicted period'],
+                        model_on_aigrain['period confidence'],
+                        name='period_exp52_aigrain', units='Days', )
+    # scatter_predictions(acf_on_aigrain['Period'], acf_on_aigrain['predicted period'],
+    #                     acf_on_aigrain['period confidence'],
+    #                     name='period_acf_aigrain', units='Days', )
+    # scatter_predictions(gps_on_aigrain['Period'], gps_on_aigrain['predicted period'],
+    #                     gps_on_aigrain['period confidence'],
+    #                     name='period_acf_aigrain', units='Days', )
+    model_acc, model_acc20, acf_acc, acf_acc20 = compare_period_on_mock(model_on_aigrain, acf_on_aigrain)
+    model_acc, model_acc20, gps_acc, gps_acc20 = compare_period_on_mock(model_on_aigrain, gps_on_aigrain,
+                                                                        ref_name='gps')
+    res_df = pd.DataFrame({"acc10":[model_acc], "acc20":[model_acc20],
+                           "acf_acc10":[acf_acc], "acf_acc20":[acf_acc20],
+                           "gps_acc10":[gps_acc], "gps_acc20":[gps_acc20],})
+    res_df.to_csv("../mock_imgs/aigrain_test.csv")
+
+
 
 
 
@@ -1583,9 +1656,12 @@ if __name__ == "__main__":
     # print(meibom_df)
     # berger_df.to_csv('tables/berger_catalog.csv')
     # acf_inference(r"C:\\Users\ilaym\Desktop\kepler\acf\analyze\mock\acf_eval_data_aigrain_001_1000.csv")
+    aigrian_test()
     # mock_inference()
-    # aggregate_dfs_from_gpus('astroconf_exp45_ssl')
-    real_inference()
+    # aggregate_dfs_from_gpus('astroconf_exp51_ssl')
+    # aggregate_dfs_from_gpus('astroconf_exp58_ssl_finetuned_cos')
+
+    # real_inference()
 
     # compare_seismo()
     # models_comparison(['exp51', 'exp52', 'exp54', 'exp55', 'exp56', 'exp68', 'exp69', 'exp73', 'exp77', 'exp78', 'exp82',

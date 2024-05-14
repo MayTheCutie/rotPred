@@ -120,7 +120,7 @@ if __name__ == '__main__':
 
     if DEVICE == 'cuda':
         world_size    = int(os.environ["WORLD_SIZE"])
-        rank          = int(os.environ["SLURM_PROCID"])
+        rank  = int(os.environ["SLURM_PROCID"])
         #gpus_per_node = int(os.environ["SLURM_GPUS_ON_NODE"])
         # gpus_per_node = 4
         gpus_per_node = torch.cuda.device_count()

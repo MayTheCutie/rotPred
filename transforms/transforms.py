@@ -10,7 +10,7 @@ from lightPred.util.stats import nanstd
 from matplotlib import pyplot as plt
 import os
 from scipy.signal import savgol_filter as savgol
-from pytorch_forecasting.utils import autocorrelation
+# from pytorch_forecasting.utils import autocorrelation
 from scipy.signal import find_peaks
 
 

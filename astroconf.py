@@ -177,9 +177,6 @@ if __name__ == '__main__':
     # # kepler_df = pd.read_csv('/data/lightPred/tables/kepler_noise_4567.csv')
     # print(kepler_df.head())
     kep_transform = RandomCrop(int(dur/cad*DAY2MIN))
-    # merged_df = pd.merge(kepler_df, non_ps, on='KID', how='inner')
-    # noise_ds = KeplerDataset(kepler_data_folder, path_list=None, df=merged_df,
-    # transforms=kep_transform, acf=False, norm='none')
 
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
                          KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
@@ -194,11 +191,11 @@ if __name__ == '__main__':
 
    
     train_dataset = TimeSeriesDataset(data_folder, train_list, labels=class_labels, transforms=transform,
-    init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True)
+    init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True, cls=True)
     val_dataset = TimeSeriesDataset(data_folder, val_list, labels=class_labels,  transforms=transform,
-     init_frac=0.2, prepare=False, dur=dur, freq_rate=freq_rate, acf=True, return_raw=True, )
+     init_frac=0.2, prepare=False, dur=dur, freq_rate=freq_rate, acf=True, return_raw=True, cls=True)
     test_dataset = TimeSeriesDataset(data_folder, test_list, labels=class_labels, transforms=test_transform,
-    init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True)
+    init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True, cls=True)
   
 
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
@@ -217,11 +214,12 @@ if __name__ == '__main__':
     print("dataset length: ", len(train_dataset), len(val_dataset), len(test_dataset))
 
     profile = []
-    for i in range(100):
+    for i in range(10):
         idx = np.random.randint(0, len(train_dataset))
         x,y,_,info = train_dataset[idx]
         profile.append(info['time'])
         print(x.shape, y.shape)
+        print(y)
     print("average time: ", np.mean(profile))
     
 

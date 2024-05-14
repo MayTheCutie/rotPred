@@ -1,4 +1,5 @@
 import os
+import random
 import sys
 from os import path
 import math
@@ -85,13 +86,68 @@ idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nl
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
 
 
-def lph():
+def test_cls(num_samples):
+    dur=720
+    kep_transform = RandomCrop(int(dur/cad*DAY2MIN))
+    transform = Compose([RandomCrop(int(dur / cad * DAY2MIN)),
+                         KeplerNoiseAddition(noise_dataset=None, noise_path='data/noise',
+                                             transforms=kep_transform),
+                         MovingAvg(13), Detrend(), ACF(), Normalize('std'), ToTensor(), ])
+    train_list = [f'{idx:d}'.zfill(int(np.log10(Nlc))) for idx in range(5000)]
 
+    train_dataset = TimeSeriesDataset(data_folder, train_list, transforms=transform,
+                                      init_frac=0.2, prepare=False, dur=dur, acf=True,
+                                      return_raw=True, cls=True, num_classes=10,
+                                      cos_inc=True)
+    for i in range(num_samples):
+        x,y,_,info = train_dataset[i]
+        print(x.shape, y.shape, y, info['y_value'])
+        plt.bar(np.linspace(0,1,10), y, color='blue', width=0.1)
+        plt.title(info['y_value'])
+        plt.show()
+
+def sun_like_lc(num_samples):
+    # Initialize surface. You almost never need to supply arguments.
+    s = bp.Surface(nlon=16, nlat=16)
+    # theta_low = np.abs(np.random.normal(loc=7, scale=3, size=50000))
+    # theta_high = np.random.normal(loc=28, scale=4, size=50000)
+    theta_low = np.random.uniform(0, 10, size=50000)
+    theta_high = np.random.uniform(theta_low, 40, size=50000)
+    # plt.hist(theta_high, bins=20)
+    # plt.hist(theta_low, bins=20)
+    # plt.show()
+    plt.hist(theta_high - theta_low, bins=20)
+    plt.show()
+    # Emerge active regions
+    for i in range(num_samples):
+        regions = s.emerge_regions(
+            ndays=3000,
+            activity_level=1,
+            cycle_period=random.randint(2,11),
+            cycle_overlap=2,
+            max_lat=theta_high[i],
+            min_lat=theta_low[i]
+        )
+        incl = random.randint(0,90)
+        period = np.random.rand(1)*50 + 1e-3
+        # From active regions, compute spot evolution and light curve
+        lightcurve = s.evolve_spots(
+            inclination=incl,
+            period=period,
+            shear=0.2,
+        )
+
+        # Plot butterfly diagram and light curve
+        s.plot_butterfly()
+        plt.tight_layout()
+
+        s.plot_lightcurve()
+        plt.tight_layout()
+        plt.show()
 
 def shuffle_lc(segment_len=90 * 48):
     from matplotlib.pyplot import cm
     np.random.seed(42)
-
     x = np.load('data/samples/7831394.npy')
     x = fill_nan_np(x, interpolate=True)
     x = x / np.nanmedian(x)
@@ -135,7 +191,7 @@ def test_new_wavelet():
     lc = np.load('data/samples/7831394.npy') - 1
     lc = fill_nan_np(lc, interpolate=True)
     lc_avg, _, _ = avg(lc)
-    acf_p, lags,acf, peaks = analyze_lc(lc_avg)
+    acf_p, lags,acf, peaks, lph = analyze_lc(lc_avg)
     acf_p_idx = np.where(lags == acf_p)
     wvt, freqs = wavelet_from_np(lc_avg, num_scales=512)
     period = 1/freqs
@@ -1959,7 +2015,9 @@ if __name__ == "__main__":
     # test_new_wavelet()
     # test_timeDetr()
     # shuffle_lc()
-    test_new_wavelet()
+    # test_new_wavelet()
+    # sun_like_lc(10)
+    test_cls(10)
 
 
 

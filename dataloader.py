@@ -12,7 +12,7 @@ from astropy.io import fits
 from lightPred.utils import create_kepler_df
 from matplotlib import pyplot as plt
 from lightPred.utils import fill_nan_np, replace_zeros_with_average
-from pyts.image import GramianAngularField
+# from pyts.image import GramianAngularField
 from scipy.signal import stft, correlate2d
 from scipy import signal
 import time
@@ -118,8 +118,6 @@ def remove_leading_zeros(s):
 
 def quantize_tensor(tensor, num_classes):
     thresholds = torch.linspace(0,1,num_classes+1)
-    # print("thersh: ", thresholds)
-    # print("tensor: ", tensor)
     classification_matrix = torch.zeros((tensor.size(0), len(thresholds) - 1))  
     for i in range(len(thresholds) - 1):
         mask = torch.logical_and(thresholds[i + 1] >= tensor, thresholds[i] < tensor)  # Create a boolean mask for elements above or equal to the threshold
@@ -396,7 +394,7 @@ class TimeSeriesDataset(Dataset):
   def __init__(self, root_dir, idx_list, labels=['Inclination', 'Period'], t_samples=None, norm='std', transforms=None,
                 noise=False, spectrogram=False, n_fft=1000, acf=False, return_raw=False,cos_inc=False,
                  wavelet=False, freq_rate=1/48, init_frac=0.4, dur=360, kep_noise=None, prepare=True,
-                 spots=False, period_norm=False):
+                 spots=False, period_norm=False, cls=False, num_classes=None):
       self.idx_list = idx_list
       self.labels = labels
       self.length = len(idx_list)
@@ -407,7 +405,11 @@ class TimeSeriesDataset(Dataset):
       self.spots_path = os.path.join(root_dir, "spots")
       self.loaded_labels = pd.read_csv(self.targets_path)
       self.norm=norm
-      self.num_classes = len(labels)
+      if num_classes == None:
+        self.num_classes = len(labels)
+      else:
+        self.num_classes = num_classes
+      self.t_samples = t_samples
       self.transforms = transforms
       self.noise = noise
       self.n_fft = n_fft
@@ -431,6 +433,7 @@ class TimeSeriesDataset(Dataset):
       if prepare:
         self.prepare_data()
       self.prepare = prepare
+      self.cls = cls
 
   def add_kepler_noise(self, x, max_ratio=1, min_ratio=0.5):
         std = x.std()
@@ -556,7 +559,7 @@ class TimeSeriesDataset(Dataset):
       #    y[self.labels.index('Inclination')] = np.sin(y[self.labels.index('Inclination')])
       for i,label in enumerate(self.labels):
         if label == 'Inclination' and self.cos_inc:
-          y[i] = np.cos(np.pi/2 - y[i])
+          y[i] = np.cos(y[i])
         elif label == 'Period' and self.p_norm:
           y[i] = 1
         elif label in boundary_values_dict.keys():
@@ -565,6 +568,21 @@ class TimeSeriesDataset(Dataset):
         return y.float()
       return y.squeeze(0).squeeze(-1).float()
 
+  def get_cls_labels(self, sample_idx, sigma=5, att='Inclination'):
+      y = self.loaded_labels.iloc[sample_idx][att]
+      if att == 'Inclination':
+          if self.cos_inc:
+              y = np.cos(y)
+              cls = np.linspace(0,1, self.num_classes)
+              sigma = sigma/50
+          else:
+            y = y*180/np.pi
+            cls = np.linspace(0, 90, self.num_classes)
+      else:
+          cls = np.linspace(0, boundary_values_dict[att], self.num_classes)
+      probabilities = np.exp(-0.5 * ((y - cls) / sigma) ** 2)
+      probabilities /= np.sum(probabilities)
+      return probabilities, y
   def get_weight(self, y, counts):
       inc_idx = self.labels.index('Inclination')
       inc = y[int(inc_idx)]*(boundary_values_dict['Inclination'][1] - boundary_values_dict['Inclination'][0]) + boundary_values_dict['Inclination'][0]
@@ -639,7 +657,11 @@ class TimeSeriesDataset(Dataset):
           x = x[:,1]
         x = x.T[:, :self.seq_len]
         x = x.nan_to_num(0)
-        y = self.get_labels(sample_idx)
+        if self.cls:
+            y, val = self.get_cls_labels(sample_idx)
+            info['y_value'] = val
+        else:
+            y = self.get_labels(sample_idx)
         if self.spots:
           if len(x.shape) == 1:
             x = x.unsqueeze(0)
