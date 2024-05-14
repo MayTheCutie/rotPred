@@ -183,6 +183,10 @@ class TimeSsl(Dataset):
 
     def read_row(self, idx):
         row = self.df.iloc[idx]
+        if 'prot' in row.keys():
+          y_val = row['prot']
+        else:
+          y_val = row['predicted period']
         # print(row['KID'])
         try:
           q_sequence_idx = row['longest_consecutive_qs_indices']
@@ -219,13 +223,13 @@ class TimeSsl(Dataset):
             print("Error: ", e)
             effective_qs = []
             x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
-        return x_tot, meta, effective_qs
+        return x_tot, meta, effective_qs, y_val
     
     def __getitem__(self, idx):
         # if idx % 1000 == 0:
         #   print(idx)
         if self.df is not None:
-          x, meta, qs = self.read_row(idx)
+          x, meta, qs, p_val = self.read_row(idx)
         else:
           x, meta =  self.read_data(idx).float()
           x /= x.max()
@@ -250,18 +254,26 @@ class TimeSsl(Dataset):
           return x, torch.zeros((1,self.seq_len))
         
 class KeplerDataset(TimeSsl):
-  def __init__(self, root_dir, path_list, df=None, mask_prob=0, mask_val=-1, np=False,
+  def __init__(self, root_dir, path_list, df=None, mask_prob=0, mask_val=-1, np_array=False, prot_df=None,
                keep_ratio=0.8, random_ratio=0.2, uniform_bound=2, target_transforms=None, **kwargs):
     super().__init__(root_dir, path_list, df=df, **kwargs)
     # self.df = df
     # self.length = len(self.df) if self.df is not None else len(self.paths_list)
     self.mask_prob = mask_prob
     self.mask_val = mask_val
-    self.np = np
+    self.np = np_array
     self.keep_ratio = keep_ratio
     self.random_ratio = random_ratio
     self.uniform_bound = uniform_bound
     self.target_transforms = target_transforms
+    self.prot_df = prot_df
+    if df is not None:
+      if prot_df is not None:
+        self.df = pd.merge(df, prot_df[['KID', 'predicted period']], on='KID')
+      else:
+        self.df['predicted period'] = np.nan
+
+
 
   def mask_array(self, array, mask_percentage=0.15, mask_value=-1):
       # if len(array.shape) == 1:
@@ -311,16 +323,19 @@ class KeplerDataset(TimeSsl):
   def __getitem__(self, idx):
     tic = time.time()
     if self.df is not None:
-      x, meta, qs = self.read_row(idx)
+      x, meta, qs, p_val = self.read_row(idx)
     elif self.np:
       x, meta = self.read_np(idx)
       qs = [] # to be implemented
+      p_val = np.nan
     else:
       x, meta = self.read_data(idx).float()
       x /= x.max()
       qs = [] # to be implemented
+      p_val = np.nan
     info = {'idx': idx}
     info['qs'] = qs
+    info['period'] = p_val
     info_y = copy.deepcopy(info)
     x /= x.max()
     target = x.copy()
@@ -374,19 +389,47 @@ class KeplerNoiseDataset(KeplerDataset):
     return x.float(), masked_x.squeeze().float(), inv_mask, info 
 
 class KeplerLabeledDataset(KeplerDataset):
-  def __init__(self, root_dir, path_list, **kwargs):
+  def __init__(self, root_dir, path_list, cos_inc=False,
+               classification=False, num_classes=10, **kwargs):
       super().__init__(root_dir, path_list, **kwargs)
+      self.cos_inc = cos_inc
+      self.cls = classification
+      self.num_classes = num_classes
 
+  def get_labels(self, row):
+    p = (row['prot'] - boundary_values_dict['Period'][0])\
+      /(boundary_values_dict['Period'][1]-boundary_values_dict['Period'][0])
+    if self.cos_inc:
+      print("cos inc")
+      i = np.cos(row['i']*np.pi/180)
+    else:
+      i = (row['i']*np.pi/180 - boundary_values_dict['Inclination'][0])\
+        /(boundary_values_dict['Inclination'][1]-boundary_values_dict['Inclination'][0])
+    y = torch.tensor([i, p]).float()
+    return y
 
-  def __getitem__(self, idx): 
+  def get_cls_labels(self, row):
+    y = row['i']
+    sigma = np.mean([np.abs(y-row['err_i'][0]), np.abs(row['err_i'][1]-y)])
+    if self.cos_inc:
+      y = np.cos(y)
+      cls = np.linspace(0,1, self.num_classes)
+      sigma = sigma/50
+    else:
+      y = y*180/np.pi
+      cls = np.linspace(0, 90, self.num_classes)
+    probabilities = np.exp(-0.5 * ((y - cls) / sigma) ** 2)
+    return torch.tensor(probabilities), y
+
+  def __getitem__(self, idx):
     x, y, mask, mask_y, info, info_y = super().__getitem__(idx)
     if self.df is not None:
       row = self.df.iloc[idx]
-    p = (row['prot'] - boundary_values_dict['Period'][0])\
-      /(boundary_values_dict['Period'][1]-boundary_values_dict['Period'][0])
-    i = (row['i']*np.pi/180 - boundary_values_dict['Inclination'][0])\
-      /(boundary_values_dict['Inclination'][1]-boundary_values_dict['Inclination'][0])
-    y = torch.tensor([i, p]).float()
+    if self.cls:
+      y, y_val = self.get_cls_labels(row)
+      info_y['y_val'] = y_val
+    else:
+      y = self.get_labels(row)
     return x.float(), y, mask, mask_y, info, info_y
 
 
@@ -394,13 +437,13 @@ class TimeSeriesDataset(Dataset):
   def __init__(self, root_dir, idx_list, labels=['Inclination', 'Period'], t_samples=None, norm='std', transforms=None,
                 noise=False, spectrogram=False, n_fft=1000, acf=False, return_raw=False,cos_inc=False,
                  wavelet=False, freq_rate=1/48, init_frac=0.4, dur=360, kep_noise=None, prepare=True,
-                 spots=False, period_norm=False, cls=False, num_classes=None):
+                 spots=False, period_norm=False, classification=False, num_classes=None):
       self.idx_list = idx_list
       self.labels = labels
       self.length = len(idx_list)
       self.p_norm = period_norm
       self.targets_path = os.path.join(root_dir, "simulation_properties.csv")
-      lc_dir = 'simulations' if not period_norm else 'simulations_norm'
+      lc_dir = 'simulations'
       self.lc_path = os.path.join(root_dir, lc_dir)
       self.spots_path = os.path.join(root_dir, "spots")
       self.loaded_labels = pd.read_csv(self.targets_path)
@@ -409,7 +452,6 @@ class TimeSeriesDataset(Dataset):
         self.num_classes = len(labels)
       else:
         self.num_classes = num_classes
-      self.t_samples = t_samples
       self.transforms = transforms
       self.noise = noise
       self.n_fft = n_fft
@@ -430,10 +472,10 @@ class TimeSeriesDataset(Dataset):
       self.step = 0
       self.weights = torch.zeros(self.length)
       self.samples = []
+      self.cls = classification
       if prepare:
         self.prepare_data()
       self.prepare = prepare
-      self.cls = cls
 
   def add_kepler_noise(self, x, max_ratio=1, min_ratio=0.5):
         std = x.std()
@@ -572,9 +614,9 @@ class TimeSeriesDataset(Dataset):
       y = self.loaded_labels.iloc[sample_idx][att]
       if att == 'Inclination':
           if self.cos_inc:
-              y = np.cos(y)
-              cls = np.linspace(0,1, self.num_classes)
-              sigma = sigma/50
+            y = np.cos(y)
+            cls = np.linspace(0,1, self.num_classes)
+            sigma = sigma/50
           else:
             y = y*180/np.pi
             cls = np.linspace(0, 90, self.num_classes)
@@ -583,6 +625,7 @@ class TimeSeriesDataset(Dataset):
       probabilities = np.exp(-0.5 * ((y - cls) / sigma) ** 2)
       probabilities /= np.sum(probabilities)
       return probabilities, y
+
   def get_weight(self, y, counts):
       inc_idx = self.labels.index('Inclination')
       inc = y[int(inc_idx)]*(boundary_values_dict['Inclination'][1] - boundary_values_dict['Inclination'][0]) + boundary_values_dict['Inclination'][0]
@@ -591,87 +634,39 @@ class TimeSeriesDataset(Dataset):
       # print('inc: ', inc, 'weight: ', w, 'raw inc: ', y[inc_idx])
       # weights = torch.cat((weights, torch.tensor(w)), dim=0)
       return torch.tensor(w)
-  
-  def prepare_data(self):
-      print("loading dataset...")
-      all_inclinations = np.arange(0, 91)
-      counts = np.zeros_like(all_inclinations)
-      incl = (np.arccos(np.random.uniform(0, 1, self.length))*180/np.pi).astype(np.int16)
-      unique, unique_counts = np.unique(incl, return_counts=True)
-      counts[unique] = unique_counts
-      indices = np.argsort(counts)
-      # plt.hist(incl)
-      # plt.savefig("/data/tests/counts.png")
-      # plt.clf()
-      counts = replace_zeros_with_average(counts)
-      weights = []
-      stds = []  
-      for i in range(self.length):
-        info = {'idx': i}
-        starttime= time.time()
-        if i % 1000 == 0:
-          print(i, flush=True)
-        # try:
-        sample_idx = remove_leading_zeros(self.idx_list[i])
-        x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[i]}.pqt")).values
-        x = x[int(self.init_frac*len(x)):,:]
-        time1 = time.time()
-        if self.seq_len:
-          x = self.interpolate(x)
-        time2 = time.time()
-        if self.transforms is not None:
-          x, _, info = self.transforms(x, mask=None, info=info)
-        time3 = time.time()
-        x[:,1] = fill_nan_np(x[:,1], interpolate=True)
-        time4 = time.time()
-        x = self.create_data(x)
-        time5 = time.time()
-        y = self.get_labels(sample_idx)
-        time6 = time.time()
-        weights.append(self.get_weight(y, counts))
-        stds.append(x.std().item())
-        self.samples.append((x,y, info))
-      self.maxstds = np.max(stds)
-      return
-
       
   def __len__(self):
       return self.length
   
   def __getitem__(self, idx):
       s = time.time()
-      if not self.prepare:
-        sample_idx = remove_leading_zeros(self.idx_list[idx])
-        p = self.loaded_labels.iloc[sample_idx]['Period']
-        info = {'idx': idx, 'period': p}
-        x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values
-        x = x[int(self.init_frac*len(x)):,:]
-        x[:,1] = fill_nan_np(x[:,1], interpolate=True)
-        if self.transforms is not None:
-          x, _, info = self.transforms(x[:,1], mask=None,  info=info, step=self.step)
-          if self.seq_len > x.shape[0]:
-            print("padding: ", x.shape, self.seq_len)
-            x = F.pad(x, (0, self.seq_len - x.shape[-1], 0,0), mode="constant", value=0)
-          info['idx'] = idx
-        else:
-          x = x[:,1]
-        x = x.T[:, :self.seq_len]
-        x = x.nan_to_num(0)
-        if self.cls:
-            y, val = self.get_cls_labels(sample_idx)
-            info['y_value'] = val
-        else:
-            y = self.get_labels(sample_idx)
-        if self.spots:
-          if len(x.shape) == 1:
-            x = x.unsqueeze(0)
-          spots_arr = self.create_spots_arr(idx, info, x)
-          x = torch.cat((x, torch.tensor(spots_arr).float()), dim=0)
-        self.step += 1
+      sample_idx = remove_leading_zeros(self.idx_list[idx])
+      p = self.loaded_labels.iloc[sample_idx]['Period']
+      info = {'idx': idx, 'period': p}
+      x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values
+      x = x[int(self.init_frac*len(x)):,:]
+      x[:,1] = fill_nan_np(x[:,1], interpolate=True)
+      if self.transforms is not None:
+        x, _, info = self.transforms(x[:,1], mask=None,  info=info, step=self.step)
+        if self.seq_len > x.shape[0] and (not self.p_norm):
+          print("padding: ", x.shape, self.seq_len)
+          x = F.pad(x, (0, self.seq_len - x.shape[-1], 0,0), mode="constant", value=0)
+        info['idx'] = idx
       else:
-        x, y, info = self.samples[idx]
-        x = self.normalize(x)
-        x = x.nan_to_num(0)
+        x = x[:,1]
+      x = x.T[:, :self.seq_len]
+      x = x.nan_to_num(0)
+      if not self.cls:
+        y = self.get_labels(sample_idx)
+      else:
+        y, y_val = self.get_cls_labels(sample_idx)
+        info['y_val'] = y_val
+      if self.spots:
+        if len(x.shape) == 1:
+          x = x.unsqueeze(0)
+        spots_arr = self.create_spots_arr(idx, info, x)
+        x = torch.cat((x, torch.tensor(spots_arr).float()), dim=0)
+      self.step += 1
       if self.spec:
         spec = T.Spectrogram(n_fft=self.n_fft, win_length=4, hop_length=4)
         x_spec = spec(x)

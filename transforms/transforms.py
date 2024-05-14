@@ -110,7 +110,6 @@ class Mask(object):
         else:
             mask = mask | temp_mask
             out = temp_out
-
         return out, mask, info
 
     def __repr__(self):
@@ -261,7 +260,7 @@ class Detrend():
             out = x.clone()
         out[1:] = x[1:] - x[:-1]
         out[0] = out[1]
-        if mask is not None:
+        if mask is not None and (len(mask) > len(out)):
             mask = mask[1:]
         info['detrend'] = self.type
         return out*10**6, mask, info
@@ -373,6 +372,7 @@ class PeriodNorm():
         p = info['period']
         if isinstance(x, np.ndarray):
             t, x = F_np.period_norm(x, p, self.num_ps, orig_freq=self.orig_freq)
+            mask = np.zeros(x.shape).astype(np.bool)
         else:
             t, x = F_np.period_norm(x.cpu().detach().numpy(), p, self.num_ps, orig_freq=self.orig_freq)
         return x, mask, info
@@ -473,6 +473,8 @@ class Shuffle():
                 mask_segments = np.array_split(mask, num_segments)
                 np.random.shuffle(mask_segments)
                 mask = np.concatenate(mask_segments)
+            t = 1000 * time.time()
+            np.random.seed(int(t) % 2**32)
         else:
             raise NotImplementedError
         return x, mask, info

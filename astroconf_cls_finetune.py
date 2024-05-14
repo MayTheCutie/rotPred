@@ -39,13 +39,13 @@ print('device is ', DEVICE)
 if torch.cuda.is_available():
     print("gpu number: ", torch.cuda.current_device())
     
-exp_num = 59
+exp_num = 7
 
 local = False
 
 root_dir = '/data' if not local else '../'
 
-log_path = f'{root_dir}/logs/astroconf'
+log_path = f'{root_dir}/logs/astroconf_cls'
 
 yaml_dir = '/data/lightPred/Astroconf'
 # yaml_dir = 'Astroconf/'
@@ -162,8 +162,9 @@ if __name__ == '__main__':
     kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
     refs = pd.read_csv('/data/lightPred/tables/all_refs.csv')
     refs.dropna(subset=['i', 'prot'], inplace=True)
+    refs['err_i'] = refs['err_i'].apply(convert_floats_to_list)
     # kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3,17))
-    kepler_df = get_all_samples_df(num_qs)
+    kepler_df = get_all_samples_df(num_qs=2)
     # kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
     kepler_df = kepler_df.merge(refs, on='KID', how='right')
     kepler_df.to_csv('/data/lightPred/tables/ref_merged.csv', index=False)
@@ -184,16 +185,17 @@ if __name__ == '__main__':
         # transform = Compose([RandomCrop(int(dur / cad * DAY2MIN)), MovingAvg(13), Shuffle(),
         #                       Detrend(),
         #                       ACF(), Normalize('std'), ToTensor()])
-        transform = Compose([Slice(0 + step, int(dur / cad * DAY2MIN) + step), MovingAvg(13), Detrend(),
+        transform = Compose([Slice(0 + step, int(dur / cad * DAY2MIN) + step),
+                             MovingAvg(13),PeriodNorm(num_ps=10), Detrend(),
                                   ACF(), Normalize('std'), ToTensor()])
 
-        full_dataset = KeplerLabeledDataset(root_data_folder, path_list=None,
-                                      df=sample_df, t_samples=int(dur/cad*DAY2MIN),
-                                       skip_idx=q, num_qs=num_qs,cos_inc=True, transforms=transform)
+        full_dataset = KeplerLabeledDataset(root_data_folder, path_list=None, classification=True,
+                                      df=sample_df, t_samples=int(dur/cad*DAY2MIN), num_classes=10,
+                                       skip_idx=q, num_qs=num_qs,cos_inc=False, transforms=transform)
         sampler = torch.utils.data.distributed.DistributedSampler(full_dataset, num_replicas=world_size, rank=rank)
 
         full_dataloader = DataLoader(full_dataset, batch_size=b_size, \
-                                        num_workers=num_workers,
+                                        num_workers=num_workers, 
                                         collate_fn=kepler_collate_fn, pin_memory=True, sampler=sampler)
     
 
@@ -201,7 +203,7 @@ if __name__ == '__main__':
         args.load_dict(yaml.safe_load(open(f'{yaml_dir}/model_config.yaml', 'r'))[args.model])
         conf_model, _, scheduler, scaler = init_train(args, local_rank)
         conf_model.pred_layer = nn.Identity()
-        model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, lstm_args=net_params)
+        model = LSTM_DUAL_CLS(conf_model, encoder_dims=args.encoder_dim, lstm_args=net_params, num_classes=10)
 
         state_dict = torch.load(f'{log_path}/exp{exp_num}/astroconf.pth', map_location=torch.device('cpu'))
         new_state_dict = OrderedDict()
@@ -221,21 +223,21 @@ if __name__ == '__main__':
         # print("number of params:", count_params(model))
         
         # loss_fn = nn.MSELoss()
-        loss_fn = nn.L1Loss()
+        loss_fn = nn.KLDivLoss(reduction='batchmean')
         optimizer = optim.AdamW(model.parameters(), **optim_params)
     
         trainer = KeplerTrainer(model=model, optimizer=optimizer, criterion=loss_fn,
                         scheduler=None, train_dataloader=full_dataloader, val_dataloader=full_dataloader,
                             device=local_rank, optim_params=optim_params, net_params=net_params, exp_num=exp_num, log_path=log_path,
                             exp_name="lstm_attn", num_classes=len(class_labels),
-                            eta=0.8)
+                            eta=-1)
         epoch_loss = []
         epoch_acc = []
         epoch_best_loss = np.inf
         epoch_best_acc = 0
         epoch_best_model = None
         for epoch in range(num_epochs):
-            loss, acc = trainer.train_epoch(device=local_rank, conf=True)
+            loss, acc = trainer.train_epoch(device=local_rank, conf=False)
             print(f"epoch: {epoch} loss: {np.mean(loss)} acc: {acc}")
             epoch_loss.extend(loss)
             epoch_acc.append(acc.tolist())

@@ -294,7 +294,7 @@ def eval_results(output, target, conf, data_dir, model_name, cls=False, labels=[
             print("output before ", output[:,1].max(), output[:,1].min())
             for i in range(len(labels)):
                 if labels[i] == 'Inclination' and cos_inc:
-                    target[:,i] = np.pi/2 - np.arccos(target[:,i])
+                    target[:,i] = np.arccos(target[:,i])
                 else:
                     target[:,i] = target[:,i] * (boundary_values_dict[labels[i]][1] - boundary_values_dict[labels[i]][0]) + boundary_values_dict[labels[i]][0]
             
@@ -303,7 +303,7 @@ def eval_results(output, target, conf, data_dir, model_name, cls=False, labels=[
             for i in range(len(labels)):
                 print(labels[i], "before ", output[:,i].max(), output[:,i].min())
                 if labels[i] == 'Inclination' and cos_inc:
-                    output[:,i] = np.pi/2 - np.arccos(output[:,i])
+                    output[:,i] = np.arccos(np.clip(output[:,i], a_min=0, a_max=1))
                 else:
                     output[:,i] = output[:,i] * (boundary_values_dict[labels[i]][1] - boundary_values_dict[labels[i]][0]) + boundary_values_dict[labels[i]][0]
                 print(labels[i], "after ", output[:,i].max(), output[:,i].min())
@@ -465,6 +465,7 @@ def plot_results(data_dir, name, target, output, conf=''):
     mean_error = np.mean(diff/(target+1)*100)
 
     print("num correct: ", (diff < target/10).sum())
+    plt.figure(figsize=(12, 8))
 
     plt.scatter(target, output, label=f'confidence > {conf} ({len(target)} points)')
     plt.plot(target, 0.9*target, color='red')
