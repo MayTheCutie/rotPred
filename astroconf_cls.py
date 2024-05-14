@@ -28,7 +28,7 @@ print("running from ", ROOT_DIR)
 # from lightPred.datasets.simulations import TimeSeriesDataset
 # from lightPred.transforms import Compose, StandardScaler, Mask, RandomCrop, DownSample, AddGaussianNoise
 
-from lightPred.models import LSTM_ATTN, LSTM_DUAL
+from lightPred.models import LSTM_ATTN, LSTM_DUAL, LSTM_DUAL_CLS
 from lightPred.Astroconf.Train.utils import init_train
 from lightPred.Astroconf.utils import Container, same_seeds
 from lightPred.dataloader import *
@@ -51,9 +51,9 @@ print('device is ', DEVICE)
 
 print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 61
+exp_num = 7
 
-log_path = '/data/logs/astroconf'
+log_path = '/data/logs/astroconf_cls'
 
 if not os.path.exists(f'{log_path}/exp{exp_num}'):
     try:
@@ -64,7 +64,7 @@ if not os.path.exists(f'{log_path}/exp{exp_num}'):
 
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
 # checkpoint_path = '/data/logs/astroconf/exp14'
-data_folder = "/data/butter/data_aigrain2"
+data_folder = "/data/butter/data_cos_old"
 
 # test_folder = "/data/butter/test_cos_old"
 
@@ -98,12 +98,93 @@ dur = 720
 freq_rate = 1/48
 
 # class_labels = ['Period', 'Decay Time', 'Cycle Length']
-class_labels = ['Period']
+class_labels = ['Inclination', 'Period']
 
 if torch.cuda.current_device() == 0:
     if not os.path.exists(log_path):
         os.makedirs(log_path)
-    
+
+def evaluate(preds, targets):                                         
+        pred_cls = np.argmax(preds, axis=1)
+        target_cls = np.argmax(targets, axis=1)
+        print("preds: ", pred_cls[:20], target_cls[:20])
+        acc_cls = np.mean(pred_cls == target_cls)
+        acc20 = (np.abs(pred_cls - target_cls) < 2).sum()/len(target_cls)
+        # acc_val = (np.abs(preds_val - targets_val) < targets_val/10).sum()/len(targets_val)
+        probs = np.exp(preds)
+        bins = np.linspace(0,90,10)
+        pred_cls *= 10
+        target_cls *= 10
+        plt.figure(figsize=(12,8))
+        plt.hist(pred_cls, bins=bins, alpha=0.5, label='preds')
+        plt.hist(target_cls, bins=bins, alpha=0.5, label='targets')
+        plt.xlabel("cos(i)")
+        plt.legend()
+        plt.savefig(f"{log_path}/exp{exp_num}/hist.png")
+        plt.close()
+        plt.scatter(pred_cls, target_cls, c=np.max(probs, axis=1), cmap='viridis')
+        plt.colorbar()
+        plt.title(f"accuracy_cls: {acc_cls:.3f}, acc20: {acc20:.3f}")
+        plt.savefig(f"{log_path}/exp{exp_num}/scatter.png")
+        plt.close()
+
+        prev_indices = np.clip(pred_cls - 1, 0, 9)
+        next_indices = np.clip(pred_cls + 1, 0, 9)
+        next_cls = probs[np.arange(len(probs)), next_indices]
+        prev_cls = probs[np.arange(len(probs)), prev_indices]
+        high_cls = probs[np.arange(len(probs)), pred_cls]
+        peak_height = np.concatenate([(high_cls - prev_cls)[:,None], (high_cls - next_cls)[:,None]])
+        peak_height = np.concatenate([(high_cls - prev_cls)[:,None], (high_cls - next_cls)[:,None]], axis=1)
+        mean_peak_height = np.mean(peak_height, axis=-1)
+        accs_height = []
+        samples_height = []
+        accs_value = []
+        samples_value = []
+        thresholds = np.arange(0.1, 0.45, 0.05)
+        for thresh in thresholds:
+            thresh_indices = np.where(mean_peak_height > thresh)
+            thresh_acc_cls = np.mean(pred_cls[thresh_indices] == target_cls[thresh_indices])
+            thresh_acc_20 = (np.abs(pred_cls[thresh_indices] - target_cls[thresh_indices]) < 2)\
+                            .sum()/len(target_cls[thresh_indices])
+            accs_height.append((thresh_acc_cls, thresh_acc_20))
+            samples_height.append(len(pred_cls[thresh_indices])/len(pred_cls))
+
+            thresh_indices = np.where(np.max(probs, axis=1) > thresh)
+            thresh_acc_cls = np.mean(pred_cls[thresh_indices] == target_cls[thresh_indices])
+            thresh_acc_20 = (np.abs(pred_cls[thresh_indices] - target_cls[thresh_indices]) < 2)\
+                            .sum()/len(target_cls[thresh_indices])
+            accs_value.append((thresh_acc_cls, thresh_acc_20))
+            samples_value.append(len(pred_cls[thresh_indices])/len(pred_cls))
+
+            plt.hist(pred_cls[thresh_indices], bins=bins, alpha=0.5, label='preds')
+            plt.hist(target_cls[thresh_indices], bins=bins, alpha=0.5, label='targets')
+            plt.xlabel("cos(i)")
+            plt.legend()
+            plt.savefig(f"{log_path}/exp{exp_num}/hist_{thresh:.2f}.png")
+            plt.close()
+
+        accs_height = np.array(accs_height)
+        accs_value = np.array(accs_value)
+        plt.scatter(thresholds, accs_height[:,0], label='accuracy_cls')
+        plt.scatter(thresholds, accs_height[:,1], label='accuracy_20p')
+        plt.scatter(thresholds, samples_height, label='fraction of samples')
+        plt.legend()
+        plt.title("Accuracy vs Relative Peak Height")
+        plt.savefig(f"{log_path}/exp{exp_num}/peak_height.png")
+        plt.close()
+        accs_value = np.array(accs_value)
+        plt.scatter(thresholds, accs_value[:,0], label='accuracy_cls')
+        plt.scatter(thresholds, accs_value[:,1], label='accuracy_20p')
+        plt.scatter(thresholds, samples_value, label='fraction of samples')
+        plt.legend()
+        plt.title("Accuracy vs Peak Value")
+        plt.savefig(f"{log_path}/exp{exp_num}/peak_value.png")
+        plt.close()
+
+        df = pd.DataFrame({'preds': pred_cls, 'targets': target_cls})
+        df.to_csv(f"{log_path}/exp{exp_num}/preds_targets.csv", index=False)
+        np.save(f"{log_path}/exp{exp_num}/preds.npy", preds)
+        np.save(f"{log_path}/exp{exp_num}/targets.npy", targets)
 
 def setup(rank, world_size):
     # initialize the process group
@@ -118,7 +199,7 @@ if __name__ == '__main__':
     # "weight_decay": 3.411877716394279e-05}
     optim_params = {
     # "lr": 0.0096, "weight_decay": 0.0095
-    "lr": 5e-4
+    "lr": 5e-5
     }
 
     lstm_params = {
@@ -127,7 +208,7 @@ if __name__ == '__main__':
         'image': False,
         'in_channels': 1,
         'kernel_size': 4,
-        'num_classes': len(class_labels)*2,
+        'num_classes': 10,
         'num_layers': 5,
         'seq_len': int(dur/cad*DAY2MIN),
         'stride': 4}
@@ -185,21 +266,19 @@ if __name__ == '__main__':
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
                          KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform), 
-                         MovingAvg(13), Detrend(), ACF(), Normalize('std'), ToTensor(), ])
+                         MovingAvg(13), PeriodNorm(num_ps=10), Detrend(), ACF(), Normalize('std'), ToTensor(), ])
     test_transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
                               KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),
-                              MovingAvg(13), Detrend(), ACF(), Normalize('std'), ToTensor(),])
-
-    
+                              MovingAvg(13), PeriodNorm(num_ps=10), Detrend(), ACF(), Normalize('std'), ToTensor(),])
 
    
-    train_dataset = TimeSeriesDataset(data_folder, train_list, labels=class_labels, transforms=transform,
-    init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True, cos_inc=True)
-    val_dataset = TimeSeriesDataset(data_folder, val_list, labels=class_labels,  transforms=transform,
-     init_frac=0.2, prepare=False, dur=dur, freq_rate=freq_rate, acf=True, return_raw=True,cos_inc=True)
-    test_dataset = TimeSeriesDataset(data_folder, test_list, labels=class_labels, transforms=test_transform,
-    init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True, cos_inc=True)
+    train_dataset = TimeSeriesDataset(data_folder, train_list, num_classes=10, transforms=transform, cos_inc=False,
+    init_frac=0.2,period_norm=True, prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True, classification=True,)
+    val_dataset = TimeSeriesDataset(data_folder, val_list, num_classes=10,  transforms=transform, cos_inc=False,
+     init_frac=0.2, period_norm=True, prepare=False, dur=dur, freq_rate=freq_rate, acf=True, return_raw=True,classification=True)
+    test_dataset = TimeSeriesDataset(data_folder, test_list, num_classes=10, transforms=test_transform, cos_inc=False,
+    init_frac=0.2, period_norm=True,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True, classification=True)
   
 
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
@@ -244,7 +323,7 @@ if __name__ == '__main__':
 
     conf_model, _, scheduler, scaler = init_train(args, local_rank)
     conf_model.pred_layer = nn.Identity()
-    model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, lstm_args=lstm_params)
+    model = LSTM_DUAL_CLS(conf_model, encoder_dims=args.encoder_dim, lstm_args=lstm_params, num_classes=10)
 
     # state_dict = torch.load(f'{log_path}/exp{exp_num}/astroconf.pth', map_location=torch.device('cpu'))
     # new_state_dict = OrderedDict()
@@ -257,30 +336,31 @@ if __name__ == '__main__':
 
 
     # load self supervised weights
-    # state_dict = torch.load(f'/data/logs/simsiam/exp15/simsiam_astroconf.pth')
-    # initialized_layers=[]
-    # new_state_dict = OrderedDict()
-    # for key, value in state_dict.items():
-    #     if key.startswith('module.'):
-    #         while key.startswith('module.'):
-    #             key = key.replace('module.', '')
-    #     if key.startswith('backbone.'):
-    #         print(key)
-    #         new_state_dict[key.replace('backbone.', '')] = value
-    #         initialized_layers.append(key.replace('backbone.', ''))
-    # state_dict = new_state_dict
-    # print("loading state dict...")
-    # missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
-    # print("Missing keys:")
-    # print(missing)
-    # print("Unexpected keys:")
-    # print(unexpected)
+    state_dict = torch.load(f'/data/logs/simsiam/exp17/simsiam_astroconf.pth')
+    initialized_layers=[]
+    new_state_dict = OrderedDict()
+    for key, value in state_dict.items():
+        if key.startswith('module.'):
+            while key.startswith('module.'):
+                key = key.replace('module.', '')
+        if key.startswith('backbone.'):
+            print(key)
+            new_state_dict[key.replace('backbone.', '')] = value
+            initialized_layers.append(key.replace('backbone.', ''))
+    state_dict = new_state_dict
+    print("loading state dict...")
+    missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
+    print("Missing keys:")
+    print(missing)
+    print("Unexpected keys:")
+    print(unexpected)
 
     model = model.to(local_rank)
     model = DDP(model, device_ids=[local_rank])
     print("number of params:", count_params(model))
     
-    loss_fn = nn.L1Loss()
+    loss_fn = nn.KLDivLoss(reduction="batchmean")
+    mse_loss = nn.MSELoss()
     optimizer = optim.AdamW(model.parameters(), **optim_params)
 
     # loss_fn = nn.MSELoss()
@@ -301,15 +381,15 @@ if __name__ == '__main__':
     print("data params: ", data_dict)
     print("args: ", args)
 
-    trainer = DoubleInputTrainer(model=model, optimizer=optimizer,
-                        criterion=loss_fn, num_classes=len(class_labels),
+    trainer = ClassifierTrainer(model=model, optimizer=optimizer,
+                        criterion=loss_fn, regression_loss=mse_loss, num_classes=10,
                        scheduler=None, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank,
                          optim_params=optim_params, net_params=lstm_params,
-                           exp_num=exp_num, log_path=log_path, eta=0.5,
+                           exp_num=exp_num, log_path=log_path, eta=0.9,
                         exp_name="astroconf") 
     fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank,
-                           early_stopping=40, only_p=False, best='loss', conf=True) 
+                           early_stopping=40, only_p=False, best='loss', conf=False) 
     output_filename = f'{log_path}/exp{exp_num}/astroconf.json'
     with open(output_filename, "w") as f:
         json.dump(fit_res, f, indent=2)
@@ -320,12 +400,13 @@ if __name__ == '__main__':
     
     print("Evaluation on test set:")
    
-    preds, targets, confs = trainer.predict(test_dataloader, device=local_rank,
-                                             conf=True, load_best=False)
+    preds, targets, targets_val = trainer.predict(test_dataloader, device=local_rank,conf=False, load_best=False)
+    evaluate(preds, targets)
+    
 
-    eval_results(preds, targets, confs, labels=class_labels, data_dir=f'{log_path}/exp{exp_num}',
-                  model_name=model.module.__class__.__name__,  num_classes=len(class_labels), cos_inc=True)
+    # eval_results(preds, targets, confs, labels=class_labels, data_dir=f'{log_path}/exp{exp_num}',
+    #               model_name=model.module.__class__.__name__,  num_classes=len(class_labels), cos_inc=True)
 
 
-    eval_model(f'{log_path}/exp{exp_num}',model=LSTM_ATTN, test_dl=val_dataloader,
-                    data_folder=test_folder, conf=True, num_classes=net_params['num_classes']//2)  
+    # eval_model(f'{log_path}/exp{exp_num}',model=LSTM_ATTN, test_dl=val_dataloader,
+    #                 data_folder=test_folder, conf=True, num_classes=net_params['num_classes']//2)  

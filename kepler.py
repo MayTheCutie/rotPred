@@ -39,7 +39,7 @@ print('device is ', DEVICE)
 if torch.cuda.is_available():
     print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 56
+exp_num = 58
 
 
 local = False
@@ -208,8 +208,8 @@ if __name__ == '__main__':
         conf_model.pred_layer = nn.Identity()
         model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, lstm_args=net_params)
 
-        print(f"loading model from {log_path}/astroconf_finetune_last.pth...")
-        state_dict = torch.load(f'{log_path}/astroconf_finetune_last.pth', map_location=torch.device('cpu'))
+        print(f"loading model from {log_path}..")
+        state_dict = torch.load(f'{log_path}/astroconf_finetune_global.pth', map_location=torch.device('cpu'))
         new_state_dict = OrderedDict()
         for key, value in state_dict.items():
             while key.startswith('module.'):
@@ -256,57 +256,14 @@ if __name__ == '__main__':
             print("label: ", label)
             print("range: ", preds_f[:, i].max(), preds_f[:, i].min())
             print("boundary values: ", boundary_values_dict[label][0], boundary_values_dict[label][1])
-            new_pred = (preds_f[:, i]*(boundary_values_dict[label][1]-boundary_values_dict[label][0]) + boundary_values_dict[label][0])
+            if label == 'Inclination':
+                new_pred = np.arccos(np.clip(preds_f[:,i], a_min=0, a_max=1))
+            else:
+                new_pred = (preds_f[:, i]*(boundary_values_dict[label][1]-boundary_values_dict[label][0]) + boundary_values_dict[label][0])
             df_full[f'predicted {label}'] = new_pred
             df_full[f'{label} confidence'] = conf_f[:, i]
         print("df shape: ", df_full.shape)
         df_full.to_csv(f'{log_path}/kepler_inference_full_detrend_{q}_rank_{rank}.csv', index=False)
         toc = time.time()
         print("time: ", toc-tic)
-
-    # print("Evaluation on test set:")
-
-    # eval_model(f'{log_path}/exp{exp_num}',model=LSTM_ATTN, test_dl=test_dataloader, 
-    #   num_classes=2, conf=True, kepler=True, kepler_df=test_df)
-
-    # df = pd.read_csv(f'{log_path}/exp{exp_num}/kepler_eval.csv')
-    # df.to_csv(f'{log_path}/exp{exp_num}/kepler_eval_small.csv', index=False)
-
-    # print("Evaluation on full test set:")
-
-    # eval_model(f'{log_path}/exp{exp_num}',model=LSTM_ATTN, test_dl=full_mazeh_dataloader, 
-    #   num_classes=2, conf=True, kepler=True, kepler_df=mazeh_df)
-
-    # print("Evaluation on test set koi:")
-    # eval_model(f'{log_path}/exp{exp_num}_koi',model=LSTM_ATTN, test_dl=test_dataloader_koi,
-    #   num_classes=2, conf=True, kepler=True, kepler_df=kois_df)
-     
-
-
-    # print("loading best model...")
-
-    # model, net_params, _ = load_model(f'{log_path}/exp{exp_num}', LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
-    # model = DDP(model, device_ids=[local_rank])
-
-    # print("model loaded")
-
-    # print("Kepler inference on entire dataset:")
-
-
-    # output, conf, kids, teff = kepler_inference(model, full_dataloader, device=local_rank, conf=True)
-    # out_df = pd.DataFrame({'KID': kids, 'predicted period': output[:,1]*max_p, 'period confidence': conf[:, 1], 
-    #                         'predicted inclination': output[:,0]*max_i, 'inclination confidence': conf[:, 0],
-    #                         'Teff': teff,
-    #                         })
-    # out_df.to_csv(f'{log_path}/exp{exp_num}/kepler_inference_mazeh.csv', index=False)
-
-    # plt.hist(output[:,0]*max_i, bins=100)
-    # plt.title('inclination distribution')
-    # plt.savefig(f'{log_path}/exp{exp_num}/full_inc_dist_mazeh.png')
-    # plt.clf()
-
-    # plt.hist(output[:,1]*max_p, bins=100)
-    # plt.title('period distribution')
-    # plt.savefig(f'{log_path}/exp{exp_num}/full_p_dist_mazeh.png')
-    # plt.clf()
         

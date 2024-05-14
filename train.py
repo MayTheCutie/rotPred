@@ -120,6 +120,7 @@ class Trainer(object):
 
         print(f"Starting training for {num_epochs} epochs with parameters: {self.optim_params}, {self.net_params}")
         print("is main process: ", main_proccess, flush=True)
+        global_time = time.time()
         for epoch in range(num_epochs):
             start_time = time.time()
             plot = (self.plot_every is not None) and (epoch % self.plot_every == 0)
@@ -161,6 +162,10 @@ class Trainer(object):
                  f'Val Acc: {global_val_accuracy.round(decimals=4).tolist()}, Time: {time.time() - start_time:.2f}s', flush=True)
                 if epoch % 10 == 0:
                     print(os.system('nvidia-smi'))
+
+                if time.time() - global_time > (23.83 * 3600):
+                    print("time limit reached")
+                    break 
 
         self.optim_params['lr'] = self.optimizer.param_groups[0]['lr']
         # self.optim_params['lr_history'].append(self.optim_params['lr'])
@@ -504,10 +509,13 @@ class KeplerTrainer(Trainer):
                 y_pred = self.model(x.float())
             if conf:
                 y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
-                conf_y = torch.abs(y - y_pred) 
-            loss_i = self.criterion(y_pred[:, 0], y[:, 0])  # Loss for inclination
-            loss_p = self.criterion(y_pred[:, 1], y[:, 1])  # Loss for period
-            loss = (self.eta * loss_i) + ((1-self.eta) * loss_p)
+                conf_y = torch.abs(y - y_pred)
+            if self.eta >= 0:
+                loss_i = self.criterion(y_pred[:, 0], y[:, 0])  # Loss for inclination
+                loss_p = self.criterion(y_pred[:, 1], y[:, 1])  # Loss for period
+                loss = (self.eta * loss_i) + ((1-self.eta) * loss_p)
+            else:
+                loss = self.criterion(y_pred, y)
             if conf:
                 loss += self.criterion(conf_pred, conf_y)
             loss.backward()
@@ -798,9 +806,13 @@ class SpotsTrainer(Trainer):
         return preds, targets, confs, spots_bbox, spots_target_bbox, spots_labels
 
 class ClassifierTrainer(Trainer):
-    def __init__(self, num_classes=10, **kwargs):
+    def __init__(self, num_classes=10,
+                  regression_loss=torch.nn.MSELoss(),
+                   eta=0.5, **kwargs):
         super().__init__(**kwargs)
         self.num_classes = num_classes
+        self.regression_loss = regression_loss
+        self.eta = eta
     def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
         """
         Trains the model for one epoch.
@@ -808,35 +820,28 @@ class ClassifierTrainer(Trainer):
         self.model.train()
         train_loss = []
         train_acc = 0
-        for i,(x, y, _,_)  in enumerate(self.train_dl):
-            x, y = x.to(device), y.to(device)
+        pbar = tqdm(self.train_dl)
+        for i,(x, y, _,info)  in enumerate(pbar):
+            x1, x2 = x[:, 0, :], x[:, 1, :]
+            x1 = x1.to(device)
+            x2 = x2.to(device)
+            y = y.to(device)
+            y_gt = info['y_val'].float().to(device)
             self.optimizer.zero_grad()
-            y_pred = self.model(x)
-            # print("y_pred: ", y_pred.shape, "y: ", y.shape)
-            
-            loss = self.criterion(y_pred[:, :self.num_classes], y[:, :self.num_classes].argmax(dim=1))
-            if not only_p:
-                loss2 = self.criterion(y_pred[:, self.num_classes:], y[:, self.num_classes:].argmax(dim=1))
-                loss = loss + loss2
-            # print("y_pred: ", y_pred.argmax(1), "y: ", y.argmax(1))
-            # self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
-            # self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
-
-            # if not only_p:            
-            #     # loss1 = self.criterion(y_pred_i, y[:, self.num_classes:])
-            #     # loss += loss1
-            #     loss = self.criterion(y_pred, y)
+            y_cls = self.model(x1.float(), x2.float())            
+            loss = self.criterion(y_cls, y)
+            # loss_val = self.regression_loss(y_val, y_gt)
+            # loss = self.eta*loss_cls + (1-self.eta)*loss_val
             loss.backward()
             self.optimizer.step()
-            acc = (y_pred[:, :self.num_classes].argmax(dim=1) == y[:, :self.num_classes].argmax(dim=1)).sum().item()
-            # if plot:
-            #     print(y_pred.argmax(dim=1), y.argmax(dim=1))
-                # self.plot_pred_vs_true(y_pred.cpu().detach().numpy(), y.cpu().detach().numpy(), epoch=epoch)
-            # acc_i = (y_pred[:,self.num_classes:].argmax(dim=1) == y[:,self.num_classes:].argmax(dim=1)).sum().item()
-            # print(f"train - acc_p: {acc_p}, acc_i: {acc_i}")
-            # acc = (acc_p + acc_i) / 2
             train_loss.append(loss.item())
+            # print("y_val: ", y_val.shape, "y_gt: ", y_gt.shape, "y_cls: ", y_cls.shape, "y: ", y.shape)
+            acc = (y_cls.argmax(dim=1) == y.argmax(dim=1)).sum().item()   
+            # acc = (torch.abs(y_val - y_gt) < y_gt/10).sum().item()
             train_acc += acc
+            pbar.set_description(f"train_loss:  {loss.item()}, train_acc: {acc}")
+            if i > self.max_iter:
+                break
         print("number of train_acc: ", train_acc)
         return train_loss, train_acc/len(self.train_dl.dataset) 
     
@@ -847,28 +852,26 @@ class ClassifierTrainer(Trainer):
         self.model.eval()
         val_loss = []
         val_acc = 0
-        for i, (x, y, _, _) in enumerate(self.val_dl):
-            x, y = x.to(device), y.to(device)
+        pbar = tqdm(self.val_dl)
+        for i, (x, y, _, info) in enumerate(pbar):
+            x1, x2 = x[:, 0, :], x[:, 1, :]
+            x1 = x1.to(device)
+            x2 = x2.to(device)
+            y = y.to(device)
+            y_gt = info['y_val'].to(device)
             with torch.no_grad():
-                y_pred = self.model(x)
+                y_cls = self.model(x1.float(), x2.float())
             
-            loss = self.criterion(y_pred[:, :self.num_classes], y[:, :self.num_classes].argmax(dim=1))
-            if not only_p:
-                loss2 = self.criterion(y_pred[:, self.num_classes:], y[:, self.num_classes:].argmax(dim=1))
-                loss = loss + loss2
-            # self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
-
-            # if not only_p:            
-            #     # loss1 = self.criterion(y_pred_i, y[:, self.num_classes:])
-            #     # loss += loss1
-            #     loss = self.criterion(y_pred, y)
-            acc = (y_pred[:, :self.num_classes].argmax(dim=1) == y[:, :self.num_classes].argmax(dim=1)).sum().item()
-            # if plot:
-            #     print(y_pred.argmax(dim=1), y.argmax(dim=1))
-                # self.plot_pred_vs_true(y_pred.cpu().detach().numpy(), y.cpu().detach().numpy(), epoch=epoch)
-            # acc_i = (y_pred[:,self.num_classes:].argmax(dim=1) == y[:,self.num_classes:].argmax(dim=1)).sum().item()
+            loss= self.criterion(y_cls, y)
+            # loss_val = self.regression_loss(y_val, y_gt)
+            # loss = self.eta*loss_cls + (1-self.eta)*loss_val
+            acc = (y_cls.argmax(dim=1) == y.argmax(dim=1)).sum().item()
             val_loss.append(loss.item())
+            # acc = (torch.abs(y_val - y_gt) < y_gt/10).sum().item()
             val_acc += acc
+            pbar.set_description(f"val_loss:  {loss.item()}, val_acc: {acc}")
+            if i > self.max_iter:
+                break
         print("number of val_acc: ", val_acc)
         return val_loss, val_acc/len(self.val_dl.dataset)
     
@@ -881,22 +884,31 @@ class ClassifierTrainer(Trainer):
         if load_best:
             self.load_best_model()
         self.model.eval()
-        preds = np.zeros((0, self.num_classes))
-        targets = np.zeros((0, self.num_classes))
-        for x, y, _, _ in test_dataloader:
-            x = x.to(device)
+        preds_cls = np.zeros((0, self.num_classes))
+        preds_val = np.zeros((0))
+        targets_cls = np.zeros((0, self.num_classes))
+        targets_val = np.zeros((0))
+        pbar = tqdm(test_dataloader)
+        for i, (x, y, _, info) in enumerate(pbar):
+            x1, x2 = x[:, 0, :], x[:, 1, :]
+            x1 = x1.to(device)
+            x2 = x2.to(device)
+            y = y.to(device)
+            y_gt = info['y_val'].to(device)
             with torch.no_grad():
-                y_pred = self.model(x)
-                # y_pred = torch.cat((y_pred_p, y_pred_i), dim=1)
-            preds = np.concatenate((preds, y_pred.cpu().numpy()))
-            targets = np.concatenate((targets, y.cpu().numpy()))
-        print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
-        return preds, targets, np.zeros((0, self.num_classes))
+                y_cls = self.model(x1.float(), x2.float())
+            preds_cls = np.concatenate((preds_cls, y_cls.cpu().numpy()))
+            # preds_val = np.concatenate((preds_val, y_val.cpu().numpy()))
+            targets_cls = np.concatenate((targets_cls, y.cpu().numpy()))
+            targets_val = np.concatenate((targets_val, y_gt.cpu().numpy()))
+        return preds_cls, targets_cls, targets_val
 
 
-class SiameseTrainer(Trainer):
-    def __init__(self, **kwargs):
+class ContrastiveTrainer(Trainer):
+    def __init__(self, temperature=1, stack_pairs=False, **kwargs):
         super().__init__(**kwargs)
+        self.stack_pairs = stack_pairs
+        self.temperature = temperature
         
     def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=None):
         """
@@ -906,9 +918,12 @@ class SiameseTrainer(Trainer):
         train_loss = []
         pbar = tqdm(self.train_dl)
         for i, (x1, x2, _, _, info1, info2) in enumerate(pbar):
-            # print(i)
             x1, x2 = x1.to(device), x2.to(device)
-            out = self.model(x1, x2)
+            if self.stack_pairs:
+                x = torch.cat((x1, x2), dim=0)
+                out = self.model(x, temperature=self.temperature)
+            else:
+                out = self.model(x1, x2)
             self.optimizer.zero_grad()
             loss = out['loss']
             loss.backward()
@@ -929,7 +944,11 @@ class SiameseTrainer(Trainer):
         for i, (x1, x2, _, _, info1, info2) in enumerate(pbar):
             x1, x2 = x1.to(device), x2.to(device)
             with torch.no_grad():
-                out = self.model(x1, x2)
+                if self.stack_pairs:
+                    x = torch.cat((x1, x2), dim=0)
+                    out = self.model(x, temperature=self.temperature)
+                else:
+                    out = self.model(x1, x2)
             loss = out['loss']
             val_loss.append(loss.item())  
             if i > (self.max_iter//self.world_size/5):

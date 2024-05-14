@@ -140,19 +140,18 @@ def moving_avg(x, window_size):
         return avg
 
 def period_norm(lc, period, num_ps, orig_freq=1/48):
-    if len(lc.shape) == 1:
-        flux = lc
+    if len(lc.shape) == 1 or lc.shape[1] == 1:
+        flux = lc.squeeze(-1)
         time = np.arange(0, len(flux)*orig_freq, orig_freq)
     else:
         time, flux = lc[:, 0], lc[:, 1]
     time = time - time[0]
-
     # Define the new time points and the desired sampling rate
     new_sampling_rate = period / 1000  
     new_time = np.arange(0, period * num_ps, new_sampling_rate)
     new_flux = np.interp(new_time, time, flux)
     t_norm = np.linspace(0, num_ps, num=len(new_flux))
-    return t_norm, new_flux
+    return t_norm[:num_ps*1000,None], new_flux[:num_ps*1000,None]
 
 def autocorrelation(x, max_lag=None):
     """Compute the autocorrelation of x."""

@@ -651,6 +651,14 @@ def convert_ints_to_list(string):
     values = string.strip('()').split(',')
     return [int(value) for value in values]
 
+def convert_floats_to_list(string):
+    string = string.replace(' ', ',')
+    string = string.replace('[', '')
+    string = string.replace(']', '')
+    numbers = string.split(',')    
+    return [float(num) for num in numbers if len(num)]
+
+
 # Function to extract 'qs' numbers from a path
 def extract_qs(path):
     qs_numbers = []

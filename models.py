@@ -91,6 +91,36 @@ class prediction_MLP(nn.Module):
         x = self.layer2(x)
         return x 
 
+def info_nce_loss(features, t):
+    # Calculate cosine similarity
+    cos_sim = F.cosine_similarity(features[:, None, :], features[None, :, :], dim=-1)
+    # Mask out cosine similarity to itself
+    self_mask = torch.eye(cos_sim.shape[0], dtype=torch.bool, device=cos_sim.device)
+    cos_sim.masked_fill_(self_mask, -9e15)
+    # Find positive example -> batch_size//2 away from the original example
+    pos_mask = self_mask.roll(shifts=cos_sim.shape[0] // 2, dims=0)
+    # InfoNCE loss
+    cos_sim = cos_sim / t
+    nll = -cos_sim[pos_mask] + torch.logsumexp(cos_sim, dim=-1)
+    nll = nll.mean()
+    return nll
+
+class SimCLR(nn.Module):
+    def __init__(self, backbone, hidden_dim=64):
+        super(SimCLR, self).__init__()
+        self.backbone = backbone
+        self.projector = projection_MLP(backbone.num_features,
+                                        hidden_dim=hidden_dim, out_dim=hidden_dim)
+        self.predictor = prediction_MLP(in_dim=hidden_dim,
+                                        hidden_dim=hidden_dim//2, out_dim=hidden_dim)
+    def forward(self, x, temperature=1.0):
+        z = self.backbone(x)
+        p = self.projector(z)
+        p = self.predictor(p)
+        # print("p: ", p.shape, "z: ", z.shape)
+        L = info_nce_loss(p, t=temperature)
+        return {'loss': L, 'features': z, 'predictions': p}
+
 class SimSiam(nn.Module):
     def __init__(self, backbone):
         super().__init__()
@@ -504,6 +534,65 @@ class LSTM_DUAL(nn.Module):
         mean_features += phr
         conf = self.conf_layer(mean_features)
         return torch.cat([out, conf], dim=1)
+    
+class LSTM_DUAL_CLS(nn.Module):
+    def __init__(self, dual_model, encoder_dims, lstm_args, predict_size=128,
+                 num_classes=4, freeze=False, ssl=False, **kwargs):
+        super(LSTM_DUAL_CLS, self).__init__(**kwargs)
+        # print("intializing dual model")
+        self.feature_extractor = LSTMFeatureExtractor(**lstm_args)
+        self.ssl= ssl
+        if freeze:
+            for param in self.feature_extractor.parameters():
+                param.requires_grad = False
+        num_lstm_features = self.feature_extractor.hidden_size*2
+        self.num_features = num_lstm_features + encoder_dims
+        self.output_dim = self.num_features
+        self.dual_model = dual_model
+
+        self.pred_layer = nn.Sequential(
+        nn.Linear(self.num_features, predict_size),
+        nn.GELU(),
+        nn.Dropout(p=0.3),
+        nn.Linear(predict_size,num_classes),)
+
+        # self.regression_layer = nn.Sequential(
+        # nn.Linear(self.num_features, predict_size),
+        # nn.GELU(),
+        # nn.Dropout(p=0.3),
+        # nn.Linear(predict_size,1),)
+
+    def lstm_attention(self, query, keys, values):
+        # Query = [BxQ]
+        # Keys = [BxTxK]
+        # Values = [BxTxV]
+        # Outputs = a:[TxB], lin_comb:[BxV]
+
+        # Here we assume q_dim == k_dim (dot product attention)
+        scale = 1/(keys.size(-1) ** -0.5)
+        query = query.unsqueeze(1) # [BxQ] -> [Bx1xQ]
+        keys = keys.transpose(1,2) # [BxTxK] -> [BxKxT]
+        energy = torch.bmm(query, keys) # [Bx1xQ]x[BxKxT] -> [Bx1xT]
+        energy = F.softmax(energy.mul_(scale), dim=2) # scale, normalize
+
+        linear_combination = torch.bmm(energy, values).squeeze(1) #[Bx1xT]x[BxTxV] -> [BxV]
+        return linear_combination
+    
+    def forward(self, x, x_dual=None, acf_phr=None):
+        if x_dual is None:
+            x, x_dual = x[:,0,:], x[:,1,:]
+        if len(x.shape) == 2:
+            x = x.unsqueeze(1)
+        x, h_f, c_f = self.feature_extractor(x, return_cell=True) # [B, L//stride, 2*hidden_size], [B, 2*nlayers, hidden_szie], [B, 2*nlayers, hidden_Size]
+        c_f = torch.cat([c_f[-1], c_f[-2]], dim=1) # [B, 2*hidden_szie]
+        t_features = self.lstm_attention(c_f, x, x) # [B, 2*hidden_size]
+        d_features, _ = self.dual_model(x_dual) # [B, encoder_dims]
+        features = torch.cat([t_features, d_features], dim=1) # [B, 2*hidden_size + encoder_dims]
+        if self.ssl:
+            return features
+        out = self.pred_layer(features)
+        # val = self.regression_layer(features)
+        return F.log_softmax(out, dim=1)
 
 class EncoderDecoder(torch.nn.Module):
     def __init__(self, encoder, decoder):

@@ -30,15 +30,15 @@ root_dir = '.' if local else '/data/lightPred'
 
 data_folder = f"{root_dir}/data"
 
-log_path = '../logs/simsiam' if local else '/data/logs/simsiam'
+log_path = '../logs/simsiam' if local else '/data/logs/simclr'
 
 yaml_dir = f'{root_dir}/Astroconf/'
 
-exp_num = 18
+exp_num = 0
 
 num_epochs = 400
 
-b_size = 128
+b_size = 64
 
 dur = 720
 
@@ -74,7 +74,7 @@ lstm_params = {
         'seq_len': int(dur/cad*DAY2MIN),
         'stride': 4}
 
-optim_params = {"lr": 5e-5, 'weight_decay': 1e-4}
+optim_params = {"lr": 2e-5, 'weight_decay': 1e-4}
 
 
 kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
@@ -98,16 +98,19 @@ def setup(rank, world_size):
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 if __name__ == "__main__":
-    print(DEVICE)
     world_size    = int(os.environ["WORLD_SIZE"])
     rank          = int(os.environ["SLURM_PROCID"])
+    jobid         = int(os.environ["SLURM_JOBID"])
     #gpus_per_node = int(os.environ["SLURM_GPUS_ON_NODE"])
+    # gpus_per_node = 4
     gpus_per_node = torch.cuda.device_count()
+    print('jobid ', jobid)
+    print('gpus per node ', gpus_per_node)
     print(f"Hello from rank {rank} of {world_size} where there are" \
-            f" {gpus_per_node} allocated GPUs per node.", flush=True)
+          f" {gpus_per_node} allocated GPUs per node. ", flush=True)
 
     setup(rank, world_size)
-
+    
     if rank == 0: print(f"Group initialized? {dist.is_initialized()}", flush=True)
     local_rank = rank - gpus_per_node * (rank // gpus_per_node)
     torch.cuda.set_device(local_rank)
@@ -118,7 +121,7 @@ if __name__ == "__main__":
     args.load_dict(yaml.safe_load(open(f'{yaml_dir}/model_config.yaml', 'r'))[args.model])
     print("args : ", vars(args))
 
-    transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)), MovingAvg(13), Shuffle(), PeriodNorm(num_ps=10), 
+    transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)), MovingAvg(13),  PeriodNorm(num_ps=10), 
                         RandomTransform([AddGaussianNoise(sigma=0.0001),Mask(0.2), Identity()]),
                              Detrend(), ACF(), Normalize('std'), ToTensor(), ])
     train_ds = KeplerDataset(data_folder, path_list=None, df=train_df, prot_df=prot_df, t_samples=10000,
@@ -156,7 +159,7 @@ if __name__ == "__main__":
     # backbone.conf_layer = nn.Identity()
 
 
-    model = SimSiam(backbone)
+    model = SimCLR(backbone)
     # state_dict = torch.load(f'{log_path}/exp{exp_num}/simsiam_astroconf.pth', map_location=torch.device('cpu'))
     # new_state_dict = OrderedDict()
     # for key, value in state_dict.items():
@@ -169,7 +172,7 @@ if __name__ == "__main__":
     model = model.to(local_rank)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     # print(model)
-    print("number of params:", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    # print("number of params:", sum(p.numel() for p in model.parameters() if p.requires_grad))
 
 
 
@@ -191,10 +194,11 @@ if __name__ == "__main__":
         yaml.dump(data_dict, outfile, default_flow_style=False)
 
 
-    trainer = SiameseTrainer(model=model, optimizer=optimizer, criterion =None,
+    trainer = ContrastiveTrainer(model=model, optimizer=optimizer, criterion =None, stack_pairs=True,
                         scheduler=None, train_dataloader=train_dl, val_dataloader=val_dl,
-                            device=local_rank, optim_params=optim_params, net_params=args, exp_num=exp_num, log_path=log_path,
-                            exp_name="simsiam_astroconf", max_iter=150)
+                            device=local_rank, optim_params=optim_params, net_params=args,
+                              exp_num=exp_num, log_path=log_path,
+                            exp_name="simclr", temperature=0.1)
     print("trainer: ", trainer)
     fit_res = trainer.fit(num_epochs=num_epochs, device=local_rank, early_stopping=15)
 
