@@ -44,7 +44,7 @@ from lightPred.analyze_results import read_csv_folder
 
 
 import sys
-from butterpy import Surface
+# from butterpy import Surface
 
 
 # from lightPred.autoformer.layers import series_decomp
@@ -85,7 +85,55 @@ idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nl
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
 
 
-def lph():
+def break_samples_to_segments(num_qs):
+    kois_df = pd.read_csv('tables/ref_merged.csv')
+    kois_df.dropna(subset=['longest_consecutive_qs_indices'], inplace=True)
+    kois_df['longest_consecutive_qs_indices'] = kois_df['longest_consecutive_qs_indices'].apply(
+        lambda x: tuple(map(int, x.strip('[]').split(','))))
+    kois_df['data_file_path'] = kois_df['data_file_path'].apply(convert_to_list)
+    res_df = pd.DataFrame(columns=kois_df.columns)
+    for idx, row in kois_df.iterrows():
+        if len(row['data_file_path']) < num_qs:
+            continue
+        # print(len(row['data_file_path']), num_qs)
+        for j in range(len(row['data_file_path']) - num_qs):
+            sub_row = row.copy()
+            sub_samples = row['data_file_path'][j:j + num_qs]
+            sub_row['data_file_path'] = sub_samples
+            sub_row['qs'] = sub_row['qs'][j:j + num_qs]
+            sub_row['consecutive_qs'] = num_qs
+            sub_row['longest_consecutive_qs_indices'] = (0, num_qs)
+            sub_row['number_of_quarters'] = num_qs
+            sub_row['KID'] = f"{row['KID']}_{j}"
+            sub_row['kepler_name'] = f"{row['kepler_name']}_{j}"
+            sub_df = pd.DataFrame(sub_row).transpose()
+            res_df = pd.concat([res_df, sub_df], ignore_index=True)
+    print(res_df.shape)
+    print(res_df.head())
+
+def create_stitched_koi_reference_samples():
+    kois_df = pd.read_csv('/data/lightPred/tables/ref_merged.csv')
+    kois_df.dropna(subset=['longest_consecutive_qs_indices'], inplace=True)
+    kois_df['longest_consecutive_qs_indices'] = kois_df['longest_consecutive_qs_indices'].apply(
+        lambda x: tuple(map(int, x.strip('[]').split(','))))
+    kois_df['data_file_path'] = kois_df['data_file_path'].apply(convert_to_list)
+    for idx, row in kois_df.iterrows():
+    # print(row['KID'])
+        q_sequence_idx = row['longest_consecutive_qs_indices']
+        # print(q_sequence_idx, type(q_sequence_idx), row['data_file_path'], type(row['data_file_path']))
+        for i in range(q_sequence_idx[0], q_sequence_idx[1]):
+            x,time,meta = read_fits(row['data_file_path'][i])
+
+            x /= x.max()
+            x = fill_nan_np(np.array(x), interpolate=True)
+            if i == q_sequence_idx[0]:
+                x_tot = x.copy()
+            else:
+                border_val = np.mean(x) - np.mean(x_tot)
+                x -= border_val
+                x_tot = np.concatenate((x_tot, np.array(x)))
+        np.save(f'/data/tests/refs/{row["kepler_name"]}.npy', x_tot)
+        print(x_tot.shape)
 
 
 def shuffle_lc(segment_len=90 * 48):
@@ -1959,7 +2007,9 @@ if __name__ == "__main__":
     # test_new_wavelet()
     # test_timeDetr()
     # shuffle_lc()
-    test_new_wavelet()
+    # test_new_wavelet()
+    # create_stitched_koi_reference_samples()
+    break_samples_to_segments(8)
 
 
 

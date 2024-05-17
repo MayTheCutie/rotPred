@@ -5,7 +5,7 @@ import torch
 import time
 from . import functional_array as F_np
 from . import functional_tensor as F_t
-from lightPred.util.stats import nanstd
+from util.stats import nanstd
 
 from matplotlib import pyplot as plt
 import os

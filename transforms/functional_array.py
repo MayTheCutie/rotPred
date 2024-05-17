@@ -1,7 +1,7 @@
 import math
 from typing import Optional
 from statsmodels.tsa.stattools import acf as A
-from lightPred.wavelet import wavelet as wvt
+from util.wavelet import wavelet as wvt
 
 
 import numpy as np
@@ -160,10 +160,11 @@ def autocorrelation(x, max_lag=None):
     return A(x, nlags=max_lag)
 
 def wavelet_from_np(lc,num_scales=-1, sample_rate =1/48):
-        wave, period, scale, coi = wvt(lc, dt=sample_rate, J1=num_scales)
+        wave, period, scale, coi = wvt(lc, dt=sample_rate, dj=1/32, J1=num_scales, s0=-1, pad=1)
+        print("wave \ period shape ", wave.shape, period.shape)
         freqs = 1/period
         power = (np.abs(wave)) ** 2
-        power = power.mean(axis=1)
+        power = power.sum(axis=1)
         return power, freqs
 
 def normalize(x, mask = None, norm_type: str = 'std', params=None):
