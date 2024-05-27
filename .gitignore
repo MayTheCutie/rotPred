@@ -35,13 +35,11 @@ transformer_models.py
 data/*
 Autoformer/*
 conformer/*
-datasets/8
 LightCurves/*
 Denoising/*
 mast/*
 tables/*
 samples/*
-*.txt
 *.csv
 Astroconformer/*
 depreceated/*
