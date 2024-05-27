@@ -83,7 +83,7 @@ def make_pdf(dist, params, size=10000):
 
 
 # Load data from statsmodels datasets
-data = pd.read_csv('tables/reinhold2023.csv')['Prot']
+data = pd.read_csv('../tables/reinhold2023.csv')['Prot']
 data = data[~np.isnan(data)]
 
 # Plot for comparison
