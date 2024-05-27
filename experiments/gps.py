@@ -33,7 +33,7 @@ print("gpu number: ", torch.cuda.current_device())
 
 local = False
 
-exp_num = 3
+exp_num = 4
 
 log_path = '/data/logs/gps' if not local else './logs/gps'
 
@@ -48,7 +48,7 @@ root_dir = 'lightPred' if local else '/data/lightPred'
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
 # checkpoint_path = '/data/logs/astroconf/exp14'
 
-data_folder = "/data/butter/data_aigrain2"
+data_folder = "/data/butter/data_reinhold_period"
 root_kepler_folder =  f"{root_dir}/lightPred/data"
 
 # dataset_name = 'kepler'
@@ -205,9 +205,9 @@ def simulation_prediction(alpha = 0.72):
             pred_ps.append(p)
             acf_ps += 1
         else:
-            pred_ps.append(p/alpha)
+            pred_ps.append(p)
             gps_ps += 1
-        ps.append(y[1].item()*50)
+        ps.append(y[1].item())
         lphs.append(lph)
         methods.append(chosen)
         #
@@ -216,7 +216,7 @@ def simulation_prediction(alpha = 0.72):
             ax[0].plot(t, x[1])
             ax[1].plot(periods, grad_w)
             ax[1].scatter(p, val, c='r')
-            fig.suptitle(f'period={y[1].item() * 50:2f}, gps={(p):.2f}')
+            fig.suptitle(f'period={y[1].item():2f}, gps={(p):.2f}')
             plt.savefig(f'{log_path}/exp{exp_num}/gps_{i}.png')
             plt.close()
         # if i == 100:
@@ -272,9 +272,9 @@ def kepler_prediction_chunk(chunk, alpha=0.231, bar=False):
         p, chosen = choose_p(acf_p, gps_p, lph)
         points = assign_points(acf_p, local_acf_p, lph, gps_h, snr)
         
-        gps_reinhold.append(chunk.iloc[i]['ProtGPS'])
-        acf_reinhold.append(chunk.iloc[i]['ProtACF'])
-        method_r = chunk.iloc[i]['Method']
+        gps_reinhold.append(row['ProtGPS'])
+        acf_reinhold.append(row['ProtACF'])
+        method_r = row['Method']
         method_reinhold.append(method_r.lower() == 'gps')
         gps_arr.append(gps_p / alpha)
         acf_arr.append(acf_p)
@@ -364,4 +364,5 @@ def kepler_prediction(alpha=0.231, num_workers=4, parallel=True):
 
 
 if __name__ == '__main__':
-    kepler_prediction(alpha=0.231, num_workers=16, parallel=True)
+    # kepler_prediction(alpha=0.231, num_workers=16, parallel=True)
+    simulation_prediction(alpha=0.72)

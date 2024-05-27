@@ -15,7 +15,7 @@ import lightkurve as lk
 # from butterpy_local import Spots
 from sklearn.model_selection import train_test_split
 from astropy.io import fits
-from typing import Callable, Dict, Optional, Tuple, Type, Union
+from typing import Callable, Dict, Optional, Tuple, Type, Union, List
 import collections
 import contextlib
 import re
@@ -28,58 +28,61 @@ print("running from ", ROOT_DIR)
 from util.period_analysis import analyze_lc
 
 
-def read_fits(filename):
-    # print("reading fits file: ", filename)
+def read_fits(filename: str) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Reads a FITS file and returns the PDCSAP_FLUX and TIME columns as numpy arrays.
+
+    Args:
+        filename (str): The path to the FITS file.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray]: The PDCSAP_FLUX and TIME columns as numpy arrays.
+    """
+    
     with fits.open(filename) as hdulist:
           binaryext = hdulist[1].data
           meta = hdulist[0].header
-          # print(header)
     df = pd.DataFrame(data=binaryext)
     x = df['PDCSAP_FLUX']
     time = df['TIME'].values
-    # teff = meta['TEFF']
     return x,time, meta
 
-def fill_nan_np(x, interpolate=True):
-    # if np.isnan(x).any():
-    #     print(f"x has nans - ", len(np.where(np.isnan(x))[0]))
-    # Find indices of non-NaN values
+def fill_nan_np(x:np.ndarray, interpolate:bool=True):
+    """
+    fill nan values in a numpy array
+
+    Args:
+         x (np.ndarray): array to fill
+         interpolate (bool): whether to interpolate or not
+
+    Returns:
+        np.ndarray: filled array
+    """
     non_nan_indices = np.where(~np.isnan(x))[0]
-    # print("is nan?: ", np.isnan(x).any())
-    # Find indices of NaN values
     nan_indices = np.where(np.isnan(x))[0]
     if len(nan_indices) and len(non_nan_indices):
         if interpolate:
             # Interpolate NaN values using linear interpolation
             interpolated_values = np.interp(nan_indices, non_nan_indices, x[non_nan_indices])
-
             # Replace NaNs with interpolated values
             x[nan_indices] = interpolated_values
         else:
             x[nan_indices] = 0
     return x
 
-def filter_p(csv_path, max_p):
-    y = pd.read_csv(csv_path)
-    y = y[y['Period'] < max_p]
-    return y.index.to_numpy() 
-
-def filter_i(csv_path, min_i):
-    y = pd.read_csv(csv_path)
-    y = y[y['Inclination'] > min_i]
-    return y.index.to_numpy() 
-
-
-def residual_by_period(lc, period):
-    # print("lc shape ", lc.shape, "period shape ", period.shape)
-    lc_rolled = torch.stack([torch.roll(lc[i], int(period[i].item()), 0) for i in range(len(lc))])
-    residual = lc - lc_rolled
-    return residual
-
 def count_params(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-def replace_zeros_with_average(arr):
+def replace_zeros_with_average(arr: np.ndarray) -> np.ndarray:
+    """
+    Replace zero values in an array with the average of neighboring values.
+
+    Args:
+        arr (np.ndarray): The input array.
+
+    Returns:
+        np.ndarray: The array with zero values replaced by the average of neighboring values.
+    """
     # Find the indices of zero values
     zero_indices = np.where(arr == 0)[0]
     # print(len(arr))
@@ -100,7 +103,17 @@ def replace_zeros_with_average(arr):
 
     return arr
 
-def dataset_weights(dl, Nlc):
+def dataset_weights(dl:torch.utils.data.DataLoader, Nlc:int):
+    """
+    Calculate weights for each sample in the dataset
+    based on the number of light curves with the same inclination.
+
+    Args:
+        dl (torch.utils.data.Dataloader): The dataloader.
+        Nlc (int): The number of light curves.
+    Returns:
+        torch.Tensor: The weights for each sample in the dataset.
+    """
     incl = (np.arcsin(np.random.uniform(0, 1, Nlc))*180/np.pi).astype(np.int16)
     unique, counts = np.unique(incl, return_counts=True)
     weights = torch.zeros(0)
@@ -111,7 +124,23 @@ def dataset_weights(dl, Nlc):
 
 
 
-def load_model(data_dir, model, distribute, device, to_ddp=False, load_params=False):
+def load_model(data_dir:str, model:torch.nn.Module,
+                distribute:bool, device:torch.device,
+                  to_ddp:bool=False, load_params:bool=False):
+    """
+    Load a model from a directory.
+
+    Args:
+        data_dir (str): The directory containing the model files.
+        model (torch.nn.Module): The model class.
+        distribute (bool): Whether the model was distributed.
+        device (torch.device): The device to load the model on.
+        to_ddp (bool, optional): distribute the model
+        load_params (bool, optional): Load the model parameters.
+
+    Returns:
+        Tuple[torch.nn.Module, Dict, str]: The model, network parameters, and model name.
+    """
     print("data dir ", data_dir)
     if load_params:
         try:
@@ -144,9 +173,17 @@ def load_model(data_dir, model, distribute, device, to_ddp=False, load_params=Fa
     model = model.to(device)
     return model,net_params,model_name
 
+def load_results(log_path:str, exp_num:int):
+    """
+    load results from a log path
 
+    Args:
+        log_path (str): The path to the log directory.
+        exp_num (int): The experiment number.
 
-def load_results(log_path, exp_num):
+    Returns:
+        List[Dict]: The results from the log directory.
+    """
     fit_res = []
     folder_path=f"{log_path}/{exp_num}" #folderpath
     print("folder path ", folder_path, "files: ", os.listdir(folder_path))
@@ -163,21 +200,23 @@ def load_results(log_path, exp_num):
 
 def plot_fit(
     fit_res: dict,
-    fig=None,
-    log_loss=False,
-    legend=None,
+    fig: plt.figure = None,
+    log_loss: bool = False,
+    legend: bool = None,
     train_test_overlay: bool = False,
 ):
     """
-    Plots a FitResult object.
-    Creates four plots: train loss, test loss, train acc, test acc.
-    :param fit_res: The fit result to plot.
-    :param fig: A figure previously returned from this function. If not None,
-        plots will the added to this figure.
-    :param log_loss: Whether to plot the losses in log scale.
-    :param legend: What to call this FitResult in the legend.
-    :param train_test_overlay: Whether to overlay train/test plots on the same axis.
-    :return: The figure.
+    Plot fit results.
+
+    Args:
+        fit_res (dict): The fit results.
+        fig (plt.figure, optional): The figure to plot on. Defaults to None.
+        log_loss (bool, optional): Whether to plot the loss on a log scale. Defaults to False.
+        legend (bool, optional): The legend to use. Defaults to None.
+        train_test_overlay (bool, optional): Whether to overlay the train and test results. Defaults to False.
+
+    Returns:
+        Tuple[plt.figure, plt.axes]: The figure and axes.
     """
     if fig is None:
         nrows = 1 if train_test_overlay else 2
@@ -228,7 +267,13 @@ def plot_fit(
     return fig, axes
 
 
-def plot_all(root_dir):
+def plot_all(root_dir:str):
+    """
+    Plot all fits in a directory.
+
+    Args:
+        root_dir (str): The root directory.
+    """
     for d in os.listdir(root_dir):
         print(d)
         if os.path.isdir(os.path.join(root_dir, d)):
@@ -238,7 +283,7 @@ def plot_all(root_dir):
                 fig, axes = plot_fit(fit_res[0], legend=d, train_test_overlay=True, only_loss=True)
                 plt.savefig(f"{root_dir}/{d}/fit.png")
 
-def remove_leading_zeros(s):
+def remove_leading_zeros(s:str):
     """
     Remove leading zeros from a string of numbers and return as integer
     """
@@ -251,7 +296,16 @@ def remove_leading_zeros(s):
     return int(s)
 
 
-def create_train_test(data_dir):
+def create_train_test(data_dir:str):
+    """
+    Create a train and test set from a directory of data.
+
+    Args:
+        data_dir (str): The directory containing the data.
+
+    Returns:
+        Tuple[List[str], List[str]]: The train and test sets.
+    """
     test = []
     train = []
     df_test = pd.read_csv("/kepler/lightPred/Table_1_Periodic.txt", sep=",")
@@ -266,325 +320,32 @@ def create_train_test(data_dir):
             train.append(d)
     return train, test
 
-def show_statistics(data_folder, idx_list, save_path=None, df=None):
-    if df is None:
-        target_path = os.path.join(data_folder, "simulation_properties.csv")
-        df = pd.read_csv(target_path)
-        df = df.loc[idx_list]
-    plt.figure(figsize=(12, 7))
-    plt.subplot2grid((2, 4), (0, 0))
-    plt.hist(df['Period'], 20, color="C0")
-    plt.xlabel("Rotation Period (days")
-    plt.ylabel("N")
-    if "Predicted Period" in df.columns:
-        plt.figure(figsize=(12, 7))
-        plt.subplot2grid((2, 4), (0, 1))
-        plt.hist(df['Predicted Period'], 20, color="C0")
-        plt.xlabel("Predicted Period (days")
-        plt.ylabel("N")
-    plt.subplot2grid((2, 4), (0, 2))
-    plt.hist(df['Decay Time'], 20, color="C1")
-    plt.xlabel("Spot lifetime (Prot)")
-    plt.ylabel("N")
-    plt.subplot2grid((2, 4), (0, 3))
-    plt.hist(df['Inclination'] * 180/np.pi, 20, color="C3")
-    plt.xlabel("Stellar inclincation (deg)")
-    plt.ylabel("N")
-    if "Predicted Inclination" in df.columns:
-        plt.figure(figsize=(12, 7))
-        plt.subplot2grid((2, 4), (1, 3))
-        plt.hist(df['Predicted Inclination'] * 180/np.pi, 20, color="C3")
-        plt.xlabel("Predicted Inclination (deg)")
-        plt.ylabel("N")
-    plt.subplot2grid((2, 4), (1, 0))
-    plt.hist(df['Activity Rate'], 20, color="C4")
-    plt.xlabel("Stellar activity rate (x Solar)")
-    plt.ylabel("N")
-    plt.subplot2grid((2, 4), (1, 1))
-    plt.hist(df['Shear'], 20, color="C5")
-    plt.xlabel(r"Differential Rotation Shear $\Delta \Omega / \Omega$")
-    plt.ylabel("N")
-    plt.subplot2grid((2, 4), (1, 2))
-    plt.hist(df['Spot Max'] - df['Spot Min'], 20, color="C6")
-    plt.xlabel("Spot latitude range")
-    plt.ylabel("N")
-    plt.tight_layout()
-    if save_path is not None:
-        plt.savefig(f"{save_path:s}_distributions.png", dpi=150)
-    # plt.figure(figsize=(12, 7))
-    # plt.subplot2grid((2, 1), (0, 0))
-    # plt.hist(df['Period'], 20, color="C0")
-    # plt.xlabel("Rotation Period (days")
-    # plt.ylabel("N")
-    # plt.subplot2grid((2, 1), (1, 0))
-    # plt.hist(df['Inclination'], 20, color="C1")
-    # plt.xlabel("Inclination")
-    # plt.ylabel("N")
-    # if save_path is not None:
-    #     plt.savefig(save_path)
-    #     plt.show()
 
+def extract_object_id(file_name:str):
+    """
+    Extract the object ID from a file name.
 
-def kepler_inference(model, dataloader, device, conf=None):
-    tot_output = torch.zeros((0,2), device=device)
-    tot_conf = torch.zeros((0,2), device=device)
-    tot_kic = []
-    tot_teff = []
-    model = model.to(device)
-    model.eval()
-    with torch.no_grad():
-        for batch_idx, (inputs, _,_ ,info) in enumerate(dataloader):
-            print("batch idx ", batch_idx)
-            inputs = inputs.to(device)
-            # info = {k: v.to(device) for k, v in info.items()}
-            output = model(inputs)
-            if conf is not None:
-                output, conf = output[:, :2], output[:, 2:] 
-                tot_conf = torch.cat((tot_conf, conf), dim=0)
-            tot_output = torch.cat((tot_output, output), dim=0)
-            tot_kic += info['KID']
-            tot_teff += info['Teff']
-    return tot_output.cpu().numpy(), tot_conf.cpu().numpy(), np.array(tot_kic), np.array(tot_teff)
+    Args:
+        file_name (str): The file name.
 
-def evaluate_kepler(model, dataloader, criterion, device, cls=False, only_one=False, num_classes=2, conf=None):
-    total_loss  = 0
-    tot_diff = torch.zeros((0,num_classes), device=device)
-    tot_target = torch.zeros((0,num_classes), device=device) 
-    tot_output = torch.zeros((0,num_classes), device=device)
-    tot_conf = torch.zeros((0,num_classes), device=device)
-
-    model = model.to(device)
-    model.eval()
-    print("evaluating model with only one ", only_one, " cls ", cls, "num_classes", num_classes)
-    with torch.no_grad():
-        for batch_idx, (inputs, target) in enumerate(dataloader):
-            inputs = inputs.to(device)
-            target = {k: v.to(device) for k, v in target.items()} 
-            # print("test shapes ", inputs.shape, target.shape)
-            output = model(inputs)
-            if conf is not None:
-                output, conf = output[:, :2], output[:, 2:]
-                conf_y = torch.abs(target['Period'] - output[:,1]) 
-            loss = criterion(output[:,1].float(), target['Period'].float()) 
-            if conf is not None:
-                loss += criterion(conf[:,1].float(), conf_y.float())
-            total_loss += loss.item() 
-            
-            # if only_one:
-            #     output = torch.cat([output, target[:,1].unsqueeze(1)], dim=1)
-            target = torch.cat([target['Period'].unsqueeze(1), target['Period'].unsqueeze(1)], dim=1)
-            diff = torch.abs(target - output)
-            tot_diff = torch.cat((tot_diff, diff), dim=0)
-            tot_target = torch.cat((tot_target, target), dim=0) 
-            tot_output = torch.cat((tot_output, output), dim=0)  
-            if conf is not None:
-                tot_conf = torch.cat((tot_conf, conf), dim=0)
- 
-    return total_loss / len(dataloader), tot_diff, tot_target, tot_output, tot_conf
-
-def evaluate_model(model, dataloader, criterion, device, cls=False, only_one=False, num_classes=2, conf=None):
-    total_loss  = 0
-    tot_diff = torch.zeros((0,num_classes), device=device)
-    tot_target = torch.zeros((0,num_classes), device=device) 
-    tot_output = torch.zeros((0,num_classes), device=device)
-    tot_conf = torch.zeros((0,num_classes), device=device)
-
-    model = model.to(device)
-    model.eval()
-    print("evaluating model with only one ", only_one, " cls ", cls)
-    with torch.no_grad():
-        for batch_idx, (inputs, target,_,_) in enumerate(dataloader):
-            inputs, target= inputs.to(device), target.to(device)
-            # print("test shapes ", inputs.shape, target.shape)
-            output = model(inputs)
-            print("samples: ", output[0,:10], target[0,:10])
-            if conf is not None:
-                output, conf = output[:, :2], output[:, 2:]
-            if not cls:
-              loss = criterion(output, torch.squeeze(target, dim=-1)) if not only_one else criterion(output,
-                                                                                                      torch.squeeze(target, dim=-1)[:,0])
-              total_loss += loss.item() 
-            else:
-                if only_one:
-                    target = target[:, :num_classes]
-                loss = criterion(output, target.float())
-            # if only_one:
-            #     output = torch.cat([output, target[:,1].unsqueeze(1)], dim=1)
-            diff = torch.abs(target - output)
-            tot_diff = torch.cat((tot_diff, diff))
-            tot_target = torch.cat((tot_target, target), dim=0) 
-            tot_output = torch.cat((tot_output, output), dim=0)  
-            if conf is not None:
-                tot_conf = torch.cat((tot_conf, conf), dim=0)
-        # tot_conf = tot_conf if conf is not None else None
- 
-    return total_loss / len(dataloader), tot_diff, tot_target, tot_output, tot_conf
-
-def evaluate_acf_kepler(kepler_path, kepler_df, max_p=60):
-    print("evaluating acf")
-    total_loss  = 0
-    tot_diff = torch.zeros((0,1))
-    target = []
-    output = []
-    samples = []
-    for i, row in kepler_df.iterrows():
-        s = time.time()
-        # print(row)
-        x, t = read_fits(os.path.join(kepler_path, row['data_file_path']))
-        x = x.values.astype(np.float32)
-        x = fill_nan_np(x, interpolate=True)
-        # print("is nans? ", np.isnan(x).any())
-        # print("is inf? ", np.isinf(x).any())
-        # print("is zeros? ", np.all(x==0))
-        meta = {'TARGETID':row['KID'], 'OBJECT':'kepler'}
-        y = row['Prot']
-        # print("analyzing...")
-        p, lags, xcf = analyze_lc_kepler(x, i)
-        
-        if i in [1000, 2000, 3000, 4000, 5000]:
-            samples.append((x,xcf, lags, p, y))
-        output.append(p)
-        target.append(y)
-        if i % 1000 == 0:
-            print("iteration ", i)
-            print(p, y)
-        if p is not None:
-            total_loss += np.sqrt((p-y)**2)
-        # print(f"time - {s- time.time()}")
-    fig, axes = plt.subplots(2,len(samples), figsize=(30,15))
-    for i, (x,xcf, lags, p, y) in enumerate(samples):
-        axes[0, i].plot(lags, x)
-        axes[0, i].set_title(f"period: {p:.2f}, Mazeh period: {y:.2f}", fontsize=20)
-        axes[1, i].plot(lags, xcf)
-        axes[1, i].set_xticks(range(0, 101, 10))
-        axes[1, i].tick_params(axis='both', which='major', labelsize=20)
-    plt.tight_layout()
-    plt.savefig(f'/data/logs/acf/xcf_compare_kois.png')
-    plt.close()
-    print("saved plots")
-
-    return total_loss/len(kepler_df), np.array(target), np.array(output) 
-
-
-def evaluate_acf(root_dir, idx_list, max_p=60):
-    print("evaluating acf")
-    total_loss  = 0
-    tot_diff = torch.zeros((0,1))
-    target = []
-    output = []
-
-    window_size = 2501
-    boxcar_window = boxcar(window_size) / window_size
-    
-
-    targets_path = os.path.join(root_dir, "simulation_properties.csv")
-    lc_path = os.path.join(root_dir, "simulations")
-    y_df = pd.read_csv(targets_path)
-    # print(idx_list)
-    for i,idx in enumerate(idx_list):
-        s = time.time()
-        # idx = remove_leading_zeros(idx)
-        lc = pd.read_parquet(os.path.join(lc_path, f"lc_{idx}.pqt"))
-        lc = lc.values.astype(np.float32)
-        meta = {'TARGETID':idx, 'OBJECT':'butterpy_local'}
-        x_smoothed = convolve(medfilt(lc[:,1], kernel_size=51), boxcar_window, mode='same')
-        x = lc[:,1] - x_smoothed + 1
-        x = x[window_size//2:-window_size//2]
-        lc = lk.LightCurve(time=lc[window_size//2:-window_size//2,0], flux=x, meta=meta)
-        y = y_df.iloc[i]
-        y = torch.tensor(y['Period'])
-        # print("analyzing...")
-        p = analyze_lc(lc)
-        print(idx, p, y.item())
-        output.append(p)
-        target.append(y)
-        if p is not None:
-            total_loss += (p-y)**2
-        # tot_diff = torch.cat((tot_diff, torch.tensor(np.abs(p-y))))
-        # tot_target = torch.cat((tot_target, y))
-        print(f"time - {s- time.time()}")
-    return total_loss/len(idx_list), np.array(target), np.array(output) 
-
-def init_wandb(group=None, name=None, project="lightPred"):
-    api_key = None
-    try:
-        with open('/data/src/apikey', 'r') as f:
-            # It's assumed our file contains a single line,
-            # with our API key
-            api_key = f.read().strip()
-            print("api key found")
-    except FileNotFoundError as e:
-        print(e)
-        print("'%s' file not found" % 'apikey')
-    wandb.login(key=api_key)
-    if group is not None:
-        if name is not None:
-            run = wandb.init(project=project, group=group, name=name)
-        else:
-            run = wandb.init(project=project, group=group)
-    else:
-        if name is not None:
-            run = wandb.init(project=project, name=name)
-        else:
-            run = wandb.init(project=project)
-
-
-def show_statistics(data_folder, idx_list, save_path=None):
-  target_path = os.path.join(data_folder, "simulation_properties.csv")
-  df = pd.read_csv(target_path)
-  df = df.loc[idx_list]
-  plt.figure(figsize=(12, 7))
-  plt.subplot2grid((2, 1), (0, 0))
-  plt.hist(df['Period'], 20, color="C0")
-  plt.xlabel("Rotation Period (days")
-  plt.ylabel("N")
-  plt.subplot2grid((2, 1), (1, 0))
-  plt.hist(df['Inclination'], 20, color="C1")
-  plt.xlabel("Inclination")
-  plt.ylabel("N")
-  plt.subplot2grid((2, 1), (1, 0))
-  plt.hist(df['Spot Min'], 20, color="C1")
-  plt.xlabel("spot min")
-  plt.ylabel("N")
-  plt.hist(df['Spot Max'], 20, color="C1")
-  plt.xlabel("spot max")
-  plt.ylabel("N")
-  if save_path is not None:
-    plt.savefig(save_path)
-  plt.show()
-
-def plot_spots(data_dir, samples_list, dur=1000, t_s=0, t_e=1000):
-    spots_dir = os.path.join(data_dir, "spots")
-    df = pd.read_csv(os.path.join(data_dir, "simulation_properties.csv"))
-    for i in samples_list:
-        print(i)
-        idx = remove_leading_zeros(i)
-        spot_props = pd.read_parquet(os.path.join(spots_dir, f"spots_{i}.pqt"))
-        star_props = df.iloc[idx]
-        lc = Spots(
-            spot_props,
-            incl=star_props["Inclination"],
-            period=star_props["Period"],
-            diffrot_shear=star_props["Shear"],
-            alpha_med=np.sqrt(star_props["Activity Rate"])*3e-4,
-            decay_timescale=star_props["Decay Time"],
-            dur=dur
-        )
-        time = np.arange(t_s, t_e, 1)
-        flux = 1 + lc.calc(time)
-        fig,axes = plt.subplots(2,1,figsize=(10,10))
-        axes[1].plot(time,flux)
-        lc.plot_butterfly(fig, axes[0])
-        axes[0].set_title(f"Period: {star_props['Period']}, Inclination: {star_props['Inclination']}, decay time: {star_props['Decay Time']}, activity rate: {star_props['Activity Rate']}")
-        plt.savefig(f"{data_dir}/plots/{idx}.png")
-
-
-def extract_object_id(file_name):
+    Returns:
+        str: The object ID.
+    """
     match = re.search(r'kplr(\d{9})-\d{13}_llc.fits', file_name)
     return match.group(1) if match else None
 
 
-def create_kepler_df(kepler_path, table_path=None):
+def create_kepler_df(kepler_path:str, table_path:str=None):
+    """
+    Create a DataFrame of Kepler data files.
+
+    Args:
+        kepler_path (str): The path to the Kepler data files.
+        table_path (str, optional): The path to the table of Kepler data. Defaults to None.
+    Returns:
+        pd.DataFrame: The DataFrame of Kepler data files.
+    """
+
     data_files_info = []
     for file in os.listdir(kepler_path):
         obj_id = extract_object_id(file)
@@ -603,7 +364,18 @@ def create_kepler_df(kepler_path, table_path=None):
     final_df = table_df.merge(kepler_df, on='KID', how='inner', sort=False)
     return final_df
 
-def multi_quarter_kepler_df(root_kepler_path, Qs, table_path=None):
+def multi_quarter_kepler_df(root_kepler_path:str, Qs:List, table_path:str=None):
+    """
+    Create a DataFrame of multi-quarter Kepler data files.
+
+    Args:
+        root_kepler_path (str): The root path to the Kepler data files.
+        Qs (List): The list of quarters to include.
+        table_path (str, optional): The path to the table of Kepler data. Defaults to None.
+    Returns:
+        pd.DataFrame: The DataFrame of multi-quarter Kepler data files.
+    """
+    
     print("creating multi quarter kepler df with Qs ", Qs, "table path " , table_path)
     dfs = []
     for q in Qs:
@@ -623,10 +395,19 @@ def multi_quarter_kepler_df(root_kepler_path, Qs, table_path=None):
     else:
         merged_df = pd.concat(dfs).groupby('KID')['data_file_path'].apply(list).reset_index()
     merged_df['number_of_quarters'] = merged_df['data_file_path'].apply(lambda x: len(x))
-    # print(merged_df.head())
     return merged_df
-# Function to convert string representation of list to real list
-def convert_to_list(string_list):
+
+
+def convert_to_list(string_list:str):
+    """
+    Convert a string representation of a list to a list.
+
+    Args:
+        string_list (str): The string representation of the list.
+
+    Returns:
+        List: The list.
+    """
     # Extract content within square brackets
     matches = re.findall(r'\[(.*?)\]', string_list)
     if matches:
@@ -636,27 +417,57 @@ def convert_to_list(string_list):
     else:
         return []
 
-# Function to convert string representation to tuple of integers
-def convert_to_tuple(string):
-    # Remove parentheses and split by comma
+def convert_to_tuple(string:str):
+    """
+    Convert a string representation of a tuple to a tuple.
+
+    Args:
+        string (str): The string representation of the tuple.
+
+    Returns:
+        Tuple: The tuple.
+    """
     values = string.strip('()').split(',')
-    # Convert strings to integers and create a tuple
     return tuple(int(value) for value in values)
 
-def convert_ints_to_list(string):
+def convert_ints_to_list(string:str):
+    """
+    Convert a string representation of a list of integers to a list of integers.
+
+    Args:
+        string (str): The string representation of the list of integers.
+
+    Returns:
+        List: The list of integers.
+    """
     values = string.strip('()').split(',')
     return [int(value) for value in values]
 
-def convert_floats_to_list(string):
+def convert_floats_to_list(string:str):
+    """
+    Convert a string representation of a list of floats to a list of floats.
+
+    Args:
+        string (str): The string representation of the list of floats.
+    Returns:
+        List: The list of floats.
+    """
     string = string.replace(' ', ',')
     string = string.replace('[', '')
     string = string.replace(']', '')
     numbers = string.split(',')    
     return [float(num) for num in numbers if len(num)]
 
+def extract_qs(path:str):
+    """
+    Extract the quarters numbers from a string.
 
-# Function to extract 'qs' numbers from a path
-def extract_qs(path):
+    Args:
+        path (str): The string containing the quarter numbers.
+
+    Returns:
+        List: The list of quarter numbers.
+    """
     qs_numbers = []
     for p in path:
         match = re.search(r'[\\/]Q(\d+)[\\/]', p)
@@ -664,8 +475,15 @@ def extract_qs(path):
             qs_numbers.append(int(match.group(1)))
     return qs_numbers
 
-# Function to calculate the length of the longest consecutive sequence of 'qs'
-def consecutive_qs(qs_list):
+def consecutive_qs(qs_list:List[int]):
+    """
+    calculate the length of the longest consecutive sequence of 'qs'
+    Args:
+        qs_list (List[int]): The list of quarter numbers.
+    Returns:
+        int: The length of the longest consecutive sequence of 'qs'.
+    """
+
     max_length = 0
     current_length = 1
     for i in range(1, len(qs_list)):
@@ -676,7 +494,14 @@ def consecutive_qs(qs_list):
             current_length = 1
     return max(max_length, current_length)
 
-def find_longest_consecutive_indices(nums):
+def find_longest_consecutive_indices(nums:List[int]):
+    """
+    Find the indices of the longest consecutive sequence of numbers.
+    Args:
+        nums (List[int]): The list of numbers.
+    Returns:
+        Tuple[int, int]: The start and end indices of the longest consecutive sequence.
+    """
     start, end = 0, 0
     longest_start, longest_end = 0, 0
     max_length = 0
@@ -694,9 +519,18 @@ def find_longest_consecutive_indices(nums):
 
     return longest_start, longest_end
 
-def get_all_samples_df(num_qs=8):
-    kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
-    # kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3,17))
+def get_all_samples_df(num_qs:int=8, read_from_csv:bool=True):
+    """
+    Get all samples DataFrame.
+    Args:
+        num_qs (int, optional): The minimum number of quarters. Defaults to 8.
+    Returns:
+        pd.DataFrame: The DataFrame of all samples.
+    """
+    if read_from_csv:
+        kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
+    else:
+        kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3,17))
     try:
         kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
     except TypeError:
@@ -708,7 +542,16 @@ def get_all_samples_df(num_qs=8):
     kepler_df['longest_consecutive_qs_indices'] = kepler_df['longest_consecutive_qs_indices'].apply(convert_ints_to_list)
     return kepler_df
 
-def break_samples_to_segments(num_qs):
+def break_samples_to_segments(num_qs:int):
+    """
+    Break samples to segments.
+
+    Args:
+        num_qs (int): The number of quarters.
+
+    Returns:
+        pd.DataFrame: The DataFrame of samples.
+    """
     kois_df = pd.read_csv('tables/ref_merged.csv')
     kois_df.dropna(subset=['longest_consecutive_qs_indices'], inplace=True)
     kois_df['longest_consecutive_qs_indices'] = kois_df['longest_consecutive_qs_indices'].apply(
@@ -733,45 +576,58 @@ def break_samples_to_segments(num_qs):
             res_df = pd.concat([res_df, sub_df], ignore_index=True)
     return res_df
 
-def read_kepler_row(row, skip_idx=0, num_qs=17):
-        try:
-          q_sequence_idx = row['longest_consecutive_qs_indices']
-          info = dict()
-          if q_sequence_idx is np.nan:
-              q_sequence_idx = (0, 0)
-              # x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
-              # effective_qs = []
-          if isinstance(q_sequence_idx, str):
-              q_sequence_idx = q_sequence_idx.strip('()').split(',')
-              q_sequence_idx = [int(i) for i in q_sequence_idx]
-          if q_sequence_idx[1] > q_sequence_idx[0] and skip_idx < (q_sequence_idx[1] - q_sequence_idx[0]):
-              for i in range(q_sequence_idx[0] + skip_idx, q_sequence_idx[1]):
-                # print(row['data_file_path'])
+def read_kepler_row(row:pd.Series, skip_idx:int=0, num_qs:int=17):
+    """
+    Read a row from the Kepler DataFrame.
+
+    Args:
+        row (pd.Series): The row from the DataFrame.
+        skip_idx (int, optional): The index to skip. Defaults to 0.
+        num_qs (int, optional): The number of quarters. Defaults to 17.
+    Returns:
+        Tuple[np.ndarray, Dict, List]: The light curve, information, and effective quarters.
+    """
+    try:
+        q_sequence_idx = row['longest_consecutive_qs_indices']
+        info = dict()
+        if q_sequence_idx is np.nan:
+            q_sequence_idx = (0, 0)
+            # x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
+            # effective_qs = []
+        if isinstance(q_sequence_idx, str):
+            q_sequence_idx = q_sequence_idx.strip('()').split(',')
+            q_sequence_idx = [int(i) for i in q_sequence_idx]
+        if q_sequence_idx[1] > q_sequence_idx[0] and skip_idx < (q_sequence_idx[1] - q_sequence_idx[0]):
+            for i in range(q_sequence_idx[0] + skip_idx, q_sequence_idx[1]):
+            # print(row['data_file_path'])
                 x,time,meta = read_fits(row['data_file_path'][i])
                 x /= x.max()
                 x = fill_nan_np(np.array(x), interpolate=True)
                 if i == q_sequence_idx[0] + skip_idx:
-                  x_tot = x.copy()
+                    x_tot = x.copy()
                 else:
-                  border_val = np.mean(x) - np.mean(x_tot)
-                  x -= border_val
-                  x_tot = np.concatenate((x_tot, np.array(x)))
+                    border_val = np.mean(x) - np.mean(x_tot)
+                    x -= border_val
+                    x_tot = np.concatenate((x_tot, np.array(x)))
                 if i == num_qs:
-                  break
-              effective_qs = row['qs'][q_sequence_idx[0]: q_sequence_idx[1]]
-              info['Teff'] = meta['TEFF'] if meta['TEFF'] is not None else 0
-              info['R'] = meta['RADIUS'] if meta['RADIUS'] is not None else 0
-              info['logg'] = meta['LOGG'] if meta['LOGG'] is not None else 0
-          else:
-              effective_qs = []
-              x_tot, info = None, {'TEFF': None, 'RADIUS': None, 'LOGG': None}
-        except (TypeError, ValueError, FileNotFoundError)  as e:
-            print("Error: ", e)
+                    break
+            effective_qs = row['qs'][q_sequence_idx[0]: q_sequence_idx[1]]
+            info['Teff'] = meta['TEFF'] if meta['TEFF'] is not None else 0
+            info['R'] = meta['RADIUS'] if meta['RADIUS'] is not None else 0
+            info['logg'] = meta['LOGG'] if meta['LOGG'] is not None else 0
+        else:
             effective_qs = []
             x_tot, info = None, {'TEFF': None, 'RADIUS': None, 'LOGG': None}
-        return x_tot, info, effective_qs
+    except (TypeError, ValueError, FileNotFoundError)  as e:
+        print("Error: ", e)
+        effective_qs = []
+        x_tot, info = None, {'TEFF': None, 'RADIUS': None, 'LOGG': None}
+    return x_tot, info, effective_qs
 
-def kepler_collate_fn(batch):
+def kepler_collate_fn(batch:List):
+    """
+    Collate function for the Kepler dataset.        
+    """
     # Separate the elements of each sample tuple (x, y, mask, info) into separate lists
     xs, ys, masks, masks_y, infos, infos_y = zip(*batch)
 
@@ -782,102 +638,4 @@ def kepler_collate_fn(batch):
     masks_y_tensor = torch.stack(masks_y, dim=0)
     return xs_tensor, ys_tensor, masks_tensor, masks_y_tensor, infos, infos_y
 
-def calc_luminosity(Teff, R):
-    return 4*np.pi*(R)**2 * (Teff)**4 * 5.670373e-8
 
-
-def list_files_in_directory(directory_path):
-    files = []
-    with os.scandir(directory_path) as entries:
-        for entry in entries:
-            if entry.is_file():
-                files.append(entry.name)
-    return files
-
-default_collate_err_msg_format = (
-    "default_collate: batch must contain tensors, numpy arrays, numbers, "
-    "dicts or lists; found {}")
-def collate(batch, *, collate_fn_map: Optional[Dict[Union[Type, Tuple[Type, ...]], Callable]] = None):
-    r"""
-        General collate function that handles collection type of element within each batch
-        and opens function registry to deal with specific element types. `default_collate_fn_map`
-        provides default collate functions for tensors, numpy arrays, numbers and strings.
-
-        Args:
-            batch: a single batch to be collated
-            collate_fn_map: Optional dictionary mapping from element type to the corresponding collate function.
-              If the element type isn't present in this dictionary,
-              this function will go through each key of the dictionary in the insertion order to
-              invoke the corresponding collate function if the element type is a subclass of the key.
-
-        Examples:
-            >>> # Extend this function to handle batch of tensors
-            >>> def collate_tensor_fn(batch, *, collate_fn_map):
-            ...     return torch.stack(batch, 0)
-            >>> def custom_collate(batch):
-            ...     collate_map = {torch.Tensor: collate_tensor_fn}
-            ...     return collate(batch, collate_fn_map=collate_map)
-            >>> # Extend `default_collate` by in-place modifying `default_collate_fn_map`
-            >>> default_collate_fn_map.update({torch.Tensor: collate_tensor_fn})
-
-        Note:
-            Each collate function requires a positional argument for batch and a keyword argument
-            for the dictionary of collate functions as `collate_fn_map`.
-    """
-    elem = batch[0]
-    elem_type = type(elem)
-
-    print("elem type ", elem_type)
-    print("batch ", len(batch))
-
-    if collate_fn_map is not None:
-        if elem_type in collate_fn_map:
-            return collate_fn_map[elem_type](batch, collate_fn_map=collate_fn_map)
-
-        for collate_type in collate_fn_map:
-            if isinstance(elem, collate_type):
-                return collate_fn_map[collate_type](batch, collate_fn_map=collate_fn_map)
-
-    if isinstance(elem, collections.abc.Mapping):
-        try:
-            return elem_type({key: collate([d[key] for d in batch], collate_fn_map=collate_fn_map) for key in elem})
-        except TypeError:
-            # The mapping type may not support `__init__(iterable)`.
-            return {key: collate([d[key] for d in batch], collate_fn_map=collate_fn_map) for key in elem}
-    elif isinstance(elem, tuple) and hasattr(elem, '_fields'):  # namedtuple
-        return elem_type(*(collate(samples, collate_fn_map=collate_fn_map) for samples in zip(*batch)))
-    elif isinstance(elem, collections.abc.Sequence):
-        # check to make sure that the elements in batch have consistent size
-        it = iter(batch)
-        elem_size = len(next(it))
-        if not all(len(elem) == elem_size for elem in it):
-            print(len(elem[0]), elem_size)
-            raise RuntimeError('each element in list of batch should be of equal size')
-        transposed = list(zip(*batch))  # It may be accessed twice, so we use a list.
-
-        if isinstance(elem, tuple):
-            return [collate(samples, collate_fn_map=collate_fn_map) for samples in transposed]  # Backwards compatibility.
-        else:
-            try:
-                return elem_type([collate(samples, collate_fn_map=collate_fn_map) for samples in transposed])
-            except TypeError:
-                # The sequence type may not support `__init__(iterable)` (e.g., `range`).
-                return [collate(samples, collate_fn_map=collate_fn_map) for samples in transposed]
-
-    raise TypeError(default_collate_err_msg_format.format(elem_type))
-
-
-
-
-    
-
-# if __name__ == '__main__':
-    # plot_all("/data/logs/masked_ssl")
-    # train, test = create_train_test("/kepler/lightPred/data")
-    # print("len train: ", len(train), "len test: ", len(test))
-    # show_statistics('/kepler/butter/data', np.arange(0, 10000), '/kepler/butter/data/dist.png')
-    # train_df, test_df = create_kepler_train_test_list("/data/lightPred/data", "/data/lightPred/Table_1_Periodic.txt")
-    # print(train_df.head())
-    # print(test_df.head())
-    # print(len(train_df), len(test_df))
-    

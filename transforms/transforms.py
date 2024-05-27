@@ -12,6 +12,8 @@ import os
 from scipy.signal import savgol_filter as savgol
 from pytorch_forecasting.utils import autocorrelation
 from scipy.signal import find_peaks
+from scipy.stats import linregress
+
 
 
 
@@ -380,10 +382,32 @@ class PeriodNorm():
         return f"PeriodNorm(num_ps={self.num_ps}, orig_freq={self.orig_freq})"
 
 class ACF():
-    def __init__(self, max_lag=None, prom=0.001, calc_phr=False):
+    def __init__(self, max_lag=None, prom=0.001, day_cadence=1/48,
+                  calc_p=False, only_acf=False, distance=5):
         self.max_lag = max_lag
         self.prom = prom
-        self.calc_phr = calc_phr
+        self.day_cadence = day_cadence
+        self.calc_p = calc_p
+        self.only_acf = only_acf
+        self.distance = distance
+
+    def _find_period(self, acf, lags):
+        peaks, _ = find_peaks(acf, distance=self.distance, prominence=self.prom)
+        if len(peaks):
+            if len(peaks) >= 2:
+                phr = (acf[peaks[0]] / acf[peaks[1]])
+            else:
+                phr = 0
+            first_indices = 4 if len(peaks) >= 4 else len(peaks)
+            if first_indices == 4:
+                slope, intercept, r_value, p_value, std_err = linregress(np.arange(first_indices), lags[peaks[:first_indices]])             
+                p = slope
+            else:
+                p = lags[peaks[0]]
+        else:
+            p = 0
+            phr = 0
+        return p, phr
     def __call__(self, x, mask=None, info=None, step=None):
         if isinstance(x, np.ndarray):
             # x_no_nans = x.copy()
@@ -392,14 +416,19 @@ class ACF():
             acf = F_np.autocorrelation(x, max_lag=self.max_lag)[:,None]
             if mask is not None:
                 acf[mask] = np.nan
-            x = np.hstack((acf, x))
-            if self.calc_phr:
-                peaks, _ = find_peaks(x[:,0], distance=5, prominence=self.prom)
-                if len(peaks) >= 2:
-                    phr = (acf[peaks[0]] / acf[peaks[1]])[0]
-                else:
-                    phr = 0
+            if len(acf) < len(x) and not self.only_acf:
+                acf = np.pad(acf, ((0, len(x) - len(acf)), (0,0)))
+            if self.calc_p:
+                acf_norm = (acf - acf.min())/(acf.max() - acf.min())
+                max_lag = self.max_lag if self.max_lag is not None else len(acf)*self.day_cadence
+                acf_lags = np.arange(0,max_lag, self.day_cadence)
+                p, phr = self._find_period(acf_norm.squeeze(), acf_lags)
                 info['acf_phr'] = np.abs(phr)
+                info['acf_p'] = p
+            if self.only_acf:
+                x = acf
+            else:
+                x = np.hstack((acf, x))
         else:
             acf = autocorrelation(x, dim=0)
             if mask is not None:

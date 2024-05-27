@@ -21,9 +21,8 @@ print("running from ", ROOT_DIR)
 from dataset.dataloader import *
 from nn.models import *
 from nn.train import *
-from nn.optim import QuantileLoss
 from util.utils import *
-from util.eval import eval_model, eval_results
+from util.eval import eval_results
 from transforms import *
 from Astroconf.Train.utils import init_train
 from Astroconf.utils import Container
@@ -38,7 +37,7 @@ print('device is ', DEVICE)
 if torch.cuda.is_available():
     print("gpu number: ", torch.cuda.current_device())
     
-exp_num = 51
+exp_num = 45
 
 local = False
 
@@ -152,29 +151,48 @@ if __name__ == '__main__':
 
     num_qs = dur//90
     kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
-    refs = pd.read_csv('/data/lightPred/tables/all_refs.csv')
-    refs.dropna(subset=['i', 'prot'], inplace=True)
+    refs = pd.read_csv('/data/lightPred/tables/reinhold2023.csv').iloc[:10000]
+    # refs = pd.read_csv('/data/lightPred/tables/all_refs.csv')
+    # refs.dropna(subset=['i', 'prot'], inplace=True)
     # kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3,17))
     kepler_df = get_all_samples_df(num_qs)
     # kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
     kepler_df = kepler_df.merge(refs, on='KID', how='right')
     kepler_df.to_csv('/data/lightPred/tables/ref_merged.csv', index=False)
-    kepler_df.dropna(subset=['i', 'longest_consecutive_qs_indices'], inplace=True)
-    segments_df = break_samples_to_segments(num_qs=8)
-    print(f"all samples:  {len(segments_df)}")
-    
-    data_params = yaml.safe_load(open(f'{log_path}/{exp_num}/data_params.yaml', 'r'))
+    kepler_df.dropna(subset=['longest_consecutive_qs_indices'], inplace=True)
+    # segments_df = break_samples_to_segments(num_qs=8)
+    # print(f"all samples:  {len(segments_df)}")
+    with open(f'{log_path}/exp{exp_num}/data_params.yml', 'r') as file:
+            data_params = yaml.safe_load(file)
     transform = Compose([RandomCrop(int(dur / cad * DAY2MIN)), MovingAvg(13), Detrend(),
                                 ACF(), Normalize('std'), ToTensor()])
 
-    full_dataset = KeplerLabeledDataset(root_data_folder, path_list=None, boundaries_dict=data_params['boundaries']
-                                    df=kepler_df, t_samples=int(dur/cad*DAY2MIN),
+    full_dataset = KeplerLabeledDataset(root_data_folder, path_list=None, boundaries_dict=data_params['boundaries'],
+                                    df=kepler_df, t_samples=int(dur/cad*DAY2MIN), 
                                     skip_idx=0, num_qs=num_qs,cos_inc=False, transforms=transform)
     sampler = torch.utils.data.distributed.DistributedSampler(full_dataset, num_replicas=world_size, rank=rank)
 
     full_dataloader = DataLoader(full_dataset, batch_size=b_size, \
                                     num_workers=num_workers,
                                     collate_fn=kepler_collate_fn, pin_memory=True, sampler=sampler)
+    
+    train_df, val_df = train_test_split(kepler_df, test_size=0.1, random_state=1234)
+    train_dataset = KeplerLabeledDataset(root_data_folder, path_list=None, boundaries_dict=data_params['boundaries'],
+                                    df=train_df, t_samples=int(dur/cad*DAY2MIN), 
+                                    skip_idx=0, num_qs=num_qs,cos_inc=False, transforms=transform)
+    val_dataset = KeplerLabeledDataset(root_data_folder, path_list=None, boundaries_dict=data_params['boundaries'],
+                                    df=val_df, t_samples=int(dur/cad*DAY2MIN), 
+                                    skip_idx=0, num_qs=num_qs,cos_inc=False, transforms=transform)
+
+    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+    train_dataloader = DataLoader(train_dataset, batch_size=b_size, sampler=train_sampler, \
+                                               num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True)
+
+
+    val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
+    val_dataloader = DataLoader(val_dataset, batch_size=b_size, sampler=val_sampler, \
+                                 num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
+    
 
 
     args = Container(**yaml.safe_load(open(f'{yaml_dir}/default_config.yaml', 'r')))
@@ -187,55 +205,91 @@ if __name__ == '__main__':
     # loss_fn = nn.MSELoss()
     loss_fn = nn.L1Loss()
 
-    folds_accs_val = []
-    folds_losses_val = []
-    folds_accs_train = []
-    folds_losses_train = []
-    folds_models = []
+    # folds_accs_val = []
+    # folds_losses_val = []
+    # folds_accs_train = []
+    # folds_losses_train = []
+    # folds_models = []
+    # num_folds = 3
+    # num_val_samples = 1000
     
 
-    for i in range(num_folds):
-        print('Processing fold: ', i + 1)
-        """%%%% Initiate new model %%%%""" #in every fold
-        valid_idx = np.arange(len(full_dataset))[i * num_val_samples:(i + 1) * num_val_samples]
-        train_idx = np.concatenate([np.arange(len(full_dataset))[:i * num_val_samples], np.arange(len(full_dataset))[(i + 1) * num_val_samples:]], axis=0)
-        train_dataset = Subset(full_dataset, train_idx)
-        valid_dataset = Subset(full_dataset, valid_idx)
-        train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=1)
-        valid_loader = DataLoader(valid_dataset, batch_size=2, shuffle=False, num_workers=1)
-        model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, lstm_args=net_params)
-        state_dict = torch.load(f'{log_path}/exp{exp_num}/astroconf.pth', map_location=torch.device('cpu'))
-        new_state_dict = OrderedDict()
-        for key, value in state_dict.items():
-            if key.startswith('module.'):
-                while key.startswith('module.'):
-                    key = key[7:]
-            new_state_dict[key] = value
-        state_dict = new_state_dict
-        model.load_state_dict(state_dict)
-        model = model.to(local_rank)
-        model = DDP(model, device_ids=[local_rank])
-        optimizer = optim.AdamW(model.parameters(), **optim_params)
+    # for i in range(num_folds):
+    # print('Processing fold: ', i + 1)
+    # """%%%% Initiate new model %%%%""" #in every fold
+    # valid_idx = np.arange(len(full_dataset))[num_val_samples:num_val_samples]
+    # train_idx = np.concatenate([np.arange(len(full_dataset))[:i * num_val_samples], np.arange(len(full_dataset))[(i + 1) * num_val_samples:]], axis=0)
+    
+    model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, lstm_args=net_params)
+    state_dict = torch.load(f'{log_path}/exp{exp_num}/astroconf.pth', map_location=torch.device('cpu'))
+    new_state_dict = OrderedDict()
+    for key, value in state_dict.items():
+        if key.startswith('module.'):
+            while key.startswith('module.'):
+                key = key[7:]
+        new_state_dict[key] = value
+    state_dict = new_state_dict
+    model.load_state_dict(state_dict)
+    model = model.to(local_rank)
+    model = DDP(model, device_ids=[local_rank])
+    optimizer = optim.AdamW(model.parameters(), **optim_params)
 
-        trainer = KeplerTrainer(model=model, optimizer=optimizer, criterion=loss_fn,
-                    scheduler=None, train_dataloader=train_loader, val_dataloader=valid_loader,
-                        device=local_rank, optim_params=optim_params, net_params=net_params,
-                          exp_num=f'exp{exp_num}/fine_tune2',
-                          log_path=log_path,
-                        exp_name="lstm_attn", num_classes=len(class_labels),
-                        eta=0.8)
-        fit_res = trainer.fit(100, device=local_rank, early_stopping=10, conf=True, best='loss')
-        folds_accs_val.extend(fit_res['val_acc'])
-        folds_losses_val.extend(fit_res['val_loss'])
-        folds_accs_train.extend(fit_res['train_acc'])
-        folds_losses_train.extend(fit_res['train_loss'])
-        folds_models.append(trainer.best_state_dict)
-    global_fit = {'val_acc': folds_accs_val, 'val_loss': folds_losses_val, 'train_acc': folds_accs_train, 'train_loss': folds_losses_train}
-    fig, axes = plot_fit(global_fit, train_test_overlay=True)
-    plt.savefig(f"{log_path}/exp{exp_num}/fine_tune2/fit.png")
+    boundaries_dict = train_dataset.boundary_values_dict
+    print("boundaries: ", boundaries_dict)
+
+    data_dict = {
+    'dataset': repr(train_dataset),  # Use repr to get a detailed string representation
+    # 'transforms': repr(transform),  # Use repr to get a detailed string representation
+    'batch_size': b_size,
+    'num_classes': len(class_labels),
+    'num_epochs': num_epochs,
+    'checkpoint_path': f'{log_path}/exp{exp_num}',
+    'loss_fn': repr(loss_fn),  # Use repr to get a detailed string representation
+    'model': repr(model.module),  # Use repr to get a detailed string representation
+    'optimizer': repr(optimizer),  # Use repr to get a detailed string representation
+    'data_folder': root_data_folder,
+    'class_labels': class_labels,
+    'boundaries': boundaries_dict,
+    'cadence': cad,
+    'duration': dur,
+    }
+
+    # Save the dictionary to a YAML file
+    with open(f'{log_path}/exp{exp_num}/data_params.yml', 'w') as file:
+        yaml.dump(data_dict, file, default_flow_style=False)
+
+    print(f"yaml saved in {log_path}/exp{exp_num}/data_params.yml")
+
+    trainer = KeplerTrainer(model=model, optimizer=optimizer, criterion=loss_fn,
+                scheduler=None, train_dataloader=train_dataloader, val_dataloader=val_dataloader,
+                    device=local_rank, optim_params=optim_params, net_params=net_params,
+                        exp_num=f'exp{exp_num}/fine_tune2',
+                        log_path=log_path,
+                    exp_name="lstm_attn", num_classes=len(class_labels),
+                    eta=0, max_iter=300)
+    fit_res = trainer.fit(20, device=local_rank, early_stopping=10, conf=True, best='loss')
+    torch.save(trainer.model.state_dict(), f'{log_path}/exp{exp_num}/fine_tune2/astroconf_finetune_best.pth')
+
+    output_filename = f'{log_path}/exp{exp_num}/fine_tune2/astroconf.json'
+    with open(output_filename, "w") as f:
+        json.dump(fit_res, f, indent=2)
+    fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+    plt.savefig(f"{log_path}/exp{exp_num}/fit.png")
     plt.clf()
-    best_model = folds_models[-1]
-    torch.save(best_model, f'{log_path}/exp{exp_num}/fine_tune2/astroconf_finetune_best.pth')
+
+    
+
+
+    # folds_accs_val.extend(fit_res['val_acc'])
+    # folds_losses_val.extend(fit_res['val_loss'])
+    # folds_accs_train.extend(fit_res['train_acc'])
+    # folds_losses_train.extend(fit_res['train_loss'])
+    # folds_models.append(trainer.best_state_dict)
+    # global_fit = {'val_acc': folds_accs_val, 'val_loss': folds_losses_val, 'train_acc': folds_accs_train, 'train_loss': folds_losses_train}
+    # fig, axes = plot_fit(global_fit, train_test_overlay=True)
+    # plt.savefig(f"{log_path}/exp{exp_num}/fine_tune2/fit.png")
+    # plt.clf()
+    # best_model = folds_models[-1]
 
     
     

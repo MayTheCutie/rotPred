@@ -6,6 +6,7 @@ import os
 import numpy as np
 import torch.optim as optim
 from sklearn.model_selection import train_test_split
+import yaml
 from torch.utils.tensorboard import SummaryWriter
 import time
 import torch.distributed as dist
@@ -18,16 +19,13 @@ ROOT_DIR = path.dirname(path.dirname(path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 print("running from ", ROOT_DIR)    
 
-from lightPred.dataloader import *
-from lightPred.models import *
-from lightPred.utils import *
-from lightPred.train import *
-from lightPred.eval import eval_model, eval_results
-from lightPred.optim import QuantileLoss
-from lightPred.transforms import *
-from lightPred.utils import collate as my_collate, convert_to_list, extract_qs, consecutive_qs, kepler_collate_fn
-from lightPred.Astroconf.Train.utils import init_train
-from lightPred.Astroconf.utils import Container
+from dataset.dataloader import *
+from nn.train import *
+from nn.models import *
+from util.utils import *
+from transforms import *
+from Astroconf.Train.utils import init_train
+from Astroconf.utils import Container
 
 
 warnings.filterwarnings("ignore")
@@ -39,7 +37,7 @@ print('device is ', DEVICE)
 if torch.cuda.is_available():
     print("gpu number: ", torch.cuda.current_device())
 
-exp_num = 51
+exp_num = 45
 
 
 local = False
@@ -156,26 +154,20 @@ if __name__ == '__main__':
         num_workers = int(os.environ["SLURM_CPUS_PER_TASK"])
         print(f"rank: {rank}, local_rank: {local_rank}")
 
-        print("logdir ", f'{log_path}/exp{exp_num}')
+        print("logdir ", f'{log_path}')
         # print("checkpoint path ", chekpoint_path)
-    except:
+    except Exception as e:
+        print(e)
         world_size = 1
         rank = 0
         local_rank = 0
         num_workers = 1
         print("running locally")
-        print("logdir ", f'{log_path}/exp{exp_num}')
-        # print("checkpoint path ", chekpoint_path)
 
-    # q_list = [[3,4,5,6,7,8,9,10],
-    # [4,5,6,7,8,9,10,11], [5,6,7,8,9,10,11,12], [6,7,8,9,10,11,12,13],
-    #     [7,8,9,10,11,12,13,14],[8,9,10,11,12,13,14,15], [9,10,11,12,13,14,15,16]]
-    # for Q in q_list:
-    # kepler_df = create_kepler_df(data_folder, table_path)
-    # kepler_df = multi_quarter_kepler_df(root_data_folder, ta
-    # ble_path=None, Qs=np.arange(3,17))
-    # kepler_df = kepler_df.sample(frac=1)
-    # kepler_df = kepler_df[kepler_df['number_of_quarters'] == len(Q)]
+    with open(f'{log_path}/data_params.yml', 'r') as file:
+            data_cgf = yaml.safe_load(file)
+    boundary_values_dict = data_cgf['boundaries']
+    print("boundary values: ", boundary_values_dict)
     num_qs = dur//90
     kepler_df = get_all_samples_df(num_qs)
     print(f"all samples with at least {num_qs} consecutive qs:  {len(kepler_df)}")
@@ -183,9 +175,9 @@ if __name__ == '__main__':
         tic = time.time()
         print("i: ", q)
         step = int(q*int(90/cad*DAY2MIN))
-        transform = Compose([RandomCrop(int(dur / cad * DAY2MIN)), MovingAvg(49), Detrend(),
+        transform = Compose([RandomCrop(int(dur / cad * DAY2MIN)), MovingAvg(13), Detrend(),
                               ACF(), Normalize('std'), ToTensor()])
-        test_transform = Compose([Slice(0 + step, int(dur / cad * DAY2MIN) + step), MovingAvg(49), Detrend(),
+        test_transform = Compose([Slice(0 + step, int(dur / cad * DAY2MIN) + step), MovingAvg(13), Detrend(),
                                   ACF(), Normalize('std'), ToTensor()])
 
         full_dataset = KeplerDataset(root_data_folder, path_list=None,
@@ -196,11 +188,6 @@ if __name__ == '__main__':
         full_dataloader = DataLoader(full_dataset, batch_size=b_size, \
                                         num_workers=num_workers,
                                         collate_fn=kepler_collate_fn, pin_memory=True, sampler=sampler)
-        data_dict = {'dataset': full_dataset.__class__.__name__, 'batch_size': b_size,
-         'num_epochs':num_epochs}
-
-        with open(f'{log_path}/data_kepler.json', 'w') as fp:
-            json.dump(data_dict, fp)
 
         args = Container(**yaml.safe_load(open(f'{yaml_dir}/default_config.yaml', 'r')))
         args.load_dict(yaml.safe_load(open(f'{yaml_dir}/model_config.yaml', 'r'))[args.model])
@@ -210,17 +197,21 @@ if __name__ == '__main__':
                            num_classes=len(class_labels)*2)
 
         print(f"loading model from {log_path}")
-        state_dict = torch.load(f'{log_path}/astroconf_finetune_best.pth', map_location=torch.device('cpu'))
-        new_state_dict = OrderedDict()
-        for key, value in state_dict.items():
-            while key.startswith('module.'):
-                key = key[7:]
-            new_state_dict[key] = value
-        model.load_state_dict(new_state_dict)
+        # state_dict = torch.load(f'{log_path}/astroconf_finetune_best.pth', map_location=torch.device('cpu'))
+        # print(state_dict)
+        # new_state_dict = OrderedDict()
+        # for key, value in state_dict.items():
+        #     while key.startswith('module.'):
+        #         key = key[7:]
+        #     new_state_dict[key] = value
+        # model.load_state_dict(new_state_dict)
         model = model.to(local_rank)
 
-        # model, net_params, _ = load_model(chekpoint_path, LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+        model.load_state_dict(
+        torch.load(f'{log_path}/astroconf_finetune_best.pth', map_location=torch.device('cpu')))
+
 
 
         # print("number of params:", count_params(model))
@@ -261,11 +252,13 @@ if __name__ == '__main__':
         for i,label in enumerate(class_labels):               # regression
             print("label: ", label)
             print("range: ", preds_f[:, i].max(), preds_f[:, i].min())
-            print("boundary values: ", boundary_values_dict[label][0], boundary_values_dict[label][1])
-            if label == 'Inclination':
-                new_pred = np.arccos(np.clip(preds_f[:,i], a_min=0, a_max=1))
-            else:
-                new_pred = (preds_f[:, i]*(boundary_values_dict[label][1]-boundary_values_dict[label][0]) + boundary_values_dict[label][0])
+            max_val = boundary_values_dict[f'max {label}']
+            min_val = boundary_values_dict[f'min {label}']
+            print("boundary values: ", max_val, min_val)
+            # if label == 'Inclination':
+            #     new_pred = np.arccos(np.clip(preds_f[:,i], a_min=0, a_max=1))
+            # else:
+            new_pred = (preds_f[:, i]*(max_val - min_val) + min_val)
             df_full[f'predicted {label}'] = new_pred
             df_full[f'{label} confidence'] = conf_f[:, i]
 

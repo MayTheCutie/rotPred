@@ -153,11 +153,12 @@ def period_norm(lc, period, num_ps, orig_freq=1/48):
     t_norm = np.linspace(0, num_ps, num=len(new_flux))
     return t_norm[:num_ps*1000,None], new_flux[:num_ps*1000,None]
 
-def autocorrelation(x, max_lag=None):
+def autocorrelation(x, max_lag=None, day_cadence=1/48):
     """Compute the autocorrelation of x."""
     if max_lag is None:
         max_lag = len(x)
-    return A(x, nlags=max_lag)
+        return A(x, nlags=max_lag)
+    return A(x, nlags=max_lag/day_cadence - 1)
 
 def wavelet_from_np(lc,num_scales=-1, sample_rate =1/48):
         wave, period, scale, coi = wvt(lc, dt=sample_rate, dj=1/32, J1=num_scales, s0=-1, pad=1)

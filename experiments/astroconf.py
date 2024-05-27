@@ -64,7 +64,7 @@ if not os.path.exists(f'{log_path}/exp{exp_num}'):
 
 # chekpoint_path = '/data/logs/simsiam/exp13/simsiam_lstm.pth'
 # checkpoint_path = '/data/logs/astroconf/exp14'
-data_folder = "/data/butter/data_reinhold_period_sun_like"
+data_folder = "/data/butter/data_cos_old"
 
 # test_folder = "/data/butter/test_cos_old"
 
@@ -108,7 +108,6 @@ if torch.cuda.current_device() == 0:
 def setup(rank, world_size):
     # initialize the process group
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
-
 
 if __name__ == '__main__':
 
@@ -185,21 +184,21 @@ if __name__ == '__main__':
     transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
                          KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform), 
-                         MovingAvg(13), Detrend(), ACF(), Normalize('std'), ToTensor(), ])
+                         MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(), ])
     test_transform = Compose([RandomCrop(int(dur/cad*DAY2MIN)),
                               KeplerNoiseAddition(noise_dataset=None, noise_path='/data/lightPred/data/noise',
                           transforms=kep_transform),
-                              MovingAvg(13), Detrend(), ACF(), Normalize('std'), ToTensor(),])
+                              MovingAvg(49), Detrend(), ACF(), Normalize('std'), ToTensor(),])
 
     
 
    
     train_dataset = TimeSeriesDataset(data_folder, train_list, labels=class_labels, transforms=transform,
-    init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True, cos_inc=False)
+    init_frac=0.2,  dur=dur, freq_rate=freq_rate,acf=True, return_raw=True, cos_inc=False)
     val_dataset = TimeSeriesDataset(data_folder, val_list, labels=class_labels,  transforms=transform,
-     init_frac=0.2, prepare=False, dur=dur, freq_rate=freq_rate, acf=True, return_raw=True,cos_inc=False)
+     init_frac=0.2, dur=dur, freq_rate=freq_rate, acf=True, return_raw=True,cos_inc=False)
     test_dataset = TimeSeriesDataset(data_folder, test_list, labels=class_labels, transforms=test_transform,
-    init_frac=0.2,  prepare=False, dur=dur, freq_rate=freq_rate,acf=True, return_raw=True, cos_inc=False)
+    init_frac=0.2,  dur=dur, freq_rate=freq_rate,acf=True, return_raw=True, cos_inc=False)
   
 
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
@@ -219,16 +218,22 @@ if __name__ == '__main__':
 
     profile = []
     incs = []
+    ps = []
     for i in range(100):
         idx = np.random.randint(0, len(train_dataset))
         x,y,_,info = train_dataset[idx]
         profile.append(info['time'])
         incs.append(y[0])
+        ps.append(y[1])
         print(x.shape, y.shape)
     print("average time: ", np.mean(profile))
     plt.hist(incs)
-    plt.xlabel("cos(i)")
+    plt.xlabel("inclination (degrees)")
     plt.savefig(f"{log_path}/exp{exp_num}/incs_sample.png")
+    plt.close('all')
+    plt.hist(ps)
+    plt.xlabel("period (days)")
+    plt.savefig(f"{log_path}/exp{exp_num}/period_sample.png")
     plt.close('all')
     
 
@@ -246,35 +251,35 @@ if __name__ == '__main__':
     conf_model.pred_layer = nn.Identity()
     model = LSTM_DUAL(conf_model, encoder_dims=args.encoder_dim, lstm_args=lstm_params)
 
-    state_dict = torch.load(f'{log_path}/exp{exp_num}/astroconf.pth', map_location=torch.device('cpu'))
-    new_state_dict = OrderedDict()
-    for key, value in state_dict.items():
-        while key.startswith('module.'):
-            key = key[7:]
-        new_state_dict[key] = value
-    state_dict = new_state_dict
-    model.load_state_dict(state_dict)
+    # state_dict = torch.load(f'{log_path}/exp{exp_num}/astroconf.pth', map_location=torch.device('cpu'))
+    # new_state_dict = OrderedDict()
+    # for key, value in state_dict.items():
+    #     while key.startswith('module.'):
+    #         key = key[7:]
+    #     new_state_dict[key] = value
+    # state_dict = new_state_dict
+    # model.load_state_dict(state_dict)
 
 
     # load self supervised weights
-    # state_dict = torch.load(f'/data/logs/simsiam/exp15/simsiam_astroconf.pth')
-    # initialized_layers=[]
-    # new_state_dict = OrderedDict()
-    # for key, value in state_dict.items():
-    #     if key.startswith('module.'):
-    #         while key.startswith('module.'):
-    #             key = key.replace('module.', '')
-    #     if key.startswith('backbone.'):
-    #         print(key)
-    #         new_state_dict[key.replace('backbone.', '')] = value
-    #         initialized_layers.append(key.replace('backbone.', ''))
-    # state_dict = new_state_dict
-    # print("loading state dict...")
-    # missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
-    # print("Missing keys:")
-    # print(missing)
-    # print("Unexpected keys:")
-    # print(unexpected)
+    state_dict = torch.load(f'/data/logs/simsiam/exp15/simsiam_astroconf.pth')
+    initialized_layers=[]
+    new_state_dict = OrderedDict()
+    for key, value in state_dict.items():
+        if key.startswith('module.'):
+            while key.startswith('module.'):
+                key = key.replace('module.', '')
+        if key.startswith('backbone.'):
+            print(key)
+            new_state_dict[key.replace('backbone.', '')] = value
+            initialized_layers.append(key.replace('backbone.', ''))
+    state_dict = new_state_dict
+    print("loading state dict...")
+    missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
+    print("Missing keys:")
+    print(missing)
+    print("Unexpected keys:")
+    print(unexpected)
 
     model = model.to(local_rank)
     model = DDP(model, device_ids=[local_rank])
@@ -289,17 +294,32 @@ if __name__ == '__main__':
     # loss_fn = nn.GaussianNLLLoss()
 
     boundaries_dict = train_dataset.boundary_values_dict
+    print("boundaries: ", boundaries_dict)
 
-    data_dict = {'dataset': train_dataset.__class__.__name__,
-                   'transforms': transform,  'batch_size': b_size, 'num_classes': len(class_labels),
-     'num_epochs':num_epochs, 'checkpoint_path': f'{log_path}/exp{exp_num}', 'loss_fn':
-      loss_fn.__class__.__name__,
-     'model': model.module.__class__.__name__, 'optimizer': optimizer.__class__.__name__,
-     'data_folder': data_folder,  'class_labels': class_labels, 'boundaries': boundaries_dict,
-     'dataset_path': data_folder, 'cadence': cad, 'duration': dur, 'freq_rate': freq_rate,}
+    data_dict = {
+    'dataset': repr(train_dataset),  # Use repr to get a detailed string representation
+    # 'transforms': repr(transform),  # Use repr to get a detailed string representation
+    'batch_size': b_size,
+    'num_classes': len(class_labels),
+    'num_epochs': num_epochs,
+    'checkpoint_path': f'{log_path}/exp{exp_num}',
+    'loss_fn': repr(loss_fn),  # Use repr to get a detailed string representation
+    'model': repr(model.module),  # Use repr to get a detailed string representation
+    'optimizer': repr(optimizer),  # Use repr to get a detailed string representation
+    'data_folder': data_folder,
+    'class_labels': class_labels,
+    'boundaries': boundaries_dict,
+    'dataset_path': data_folder,
+    'cadence': cad,
+    'duration': dur,
+    'freq_rate': freq_rate,
+    }
 
-    with open(f'{log_path}/exp{exp_num}/data_params.yml', 'w') as outfile:
-        yaml.dump(data_dict, outfile, default_flow_style=False)
+    # Save the dictionary to a YAML file
+    with open(f'{log_path}/exp{exp_num}/data_params.yml', 'w') as file:
+        yaml.dump(data_dict, file, default_flow_style=False)
+    
+    print(f"yaml saved in {log_path}/exp{exp_num}/data_params.yml")
     print("logdir: ", f'{log_path}/exp{exp_num}')
     print("data params: ", data_dict)
     print("args: ", args)

@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from torch.nn.utils import weight_norm
-from util.utils import residual_by_period
 from util.period_analysis import analyze_lc_torch, analyze_lc
 from torchvision.models.swin_transformer import SwinTransformer
 import time
@@ -411,60 +410,6 @@ class LSTM_ATTN(LSTM):
         # values = (values[...,None] + out[:,None,:]).view(out.shape[0], -1)
         # conf = self.fc4(self.activation(self.fc3(values)))
         return out
-
-class LSTM_ATTN2(LSTM):
-    def __init__(self, attn='prob',n_heads=4, factor=5, dropout=0.35, output_attention=False, num_att_layers=4, **kwargs):
-        super(LSTM_ATTN2, self).__init__(**kwargs)
-        self.fc1 = nn.Linear(self.feature_extractor.hidden_size*self.feature_extractor.hidden_size*2, self.predict_size)
-        self.fc2 = nn.Linear(self.predict_size, self.num_classes)
-        self.pool = nn.AdaptiveMaxPool1d(self.feature_extractor.hidden_size)
-        self.layers = nn.ModuleList([ConformerBlock(
-            encoder_dim=self.feature_extractor.hidden_size*2,
-            num_attention_heads=n_heads,
-            feed_forward_dropout_p=dropout,
-            attention_dropout_p=dropout,
-            conv_dropout_p=dropout,
-        ) for _ in range(num_att_layers)])
-        # Attn = ProbAttention if attn=='prob' else FullAttention
-        # self.attention = AttentionLayer(Attn(False, factor, attention_dropout=dropout, output_attention=output_attention), 
-        #                         d_model=self.feature_extractor.hidden_size*2, n_heads=n_heads, mix=False)
-    def forward(self, x):
-        if len(x.shape) == 2:
-            x = x.unsqueeze(1)  
-        outputs, h_f, c_f = self.feature_extractor(x, return_cell=True)
-        # print("x_f: ", x_f.shape)
-        for layer in self.layers:
-            outputs = layer(outputs)
-        outputs = self.pool(outputs.permute(0,2,1)).reshape(outputs.shape[0], -1)
-        # c_f = torch.cat([c_f[-1], c_f[-2]], dim=1)
-
-        # values, _ = self.attention(x_f, x_f, x_f, attn_mask=None) 
-        outputs = self.fc2(self.activation(self.fc1(outputs)))
-        # values = (values[...,None] + out[:,None,:]).view(out.shape[0], -1)
-        # conf = self.fc4(self.activation(self.fc3(values)))
-        return outputs
-
-class LSTM_ATTN_QUANT(LSTM):
-    def __init__(self, attn='prob',n_heads=8, factor=5, dropout=0.1, output_attention=False, n_q=3, **kwargs):
-        super(LSTM_ATTN_QUANT, self).__init__(**kwargs)
-        self.fc1 = nn.Linear(self.feature_extractor.hidden_size*2, self.predict_size)
-        self.fc2 = nn.Linear(self.predict_size, self.num_classes)
-        Attn = ProbAttention if attn=='prob' else FullAttention
-        self.attention = AttentionLayer(Attn(False, factor, attention_dropout=dropout, output_attention=output_attention), 
-                                d_model=self.feature_extractor.hidden_size*2, n_heads=n_heads, mix=False)
-        self.quantiles = n_q
-    def forward(self, x):
-        if len(x.shape) == 2:
-            x = x.unsqueeze(1)  
-        x_f, h_f, c_f = self.feature_extractor(x, return_cell=True)
-        c_f = torch.cat([c_f[-1], c_f[-2]], dim=1)
-
-        values, _ = self.attention(x_f, x_f, x_f, attn_mask=None) 
-        values = values.unsqueeze(1).expand( values.shape[0],self.quantiles, values.shape[1], values.shape[2])
-        out = self.fc2(self.activation(self.fc1(values.max(dim=2).values)))
-        # values = (values[...,None] + out[:,None,:]).view(out.shape[0], -1)
-        # conf = self.fc4(self.activation(self.fc3(values)))
-        return out.transpose(1,2)
 
 class LSTM_DUAL(nn.Module):
     def __init__(self, dual_model, encoder_dims, lstm_args, predict_size=128,

@@ -22,73 +22,43 @@ from matplotlib import pyplot as plt
 
 
 warnings.filterwarnings("ignore")
-
-
-def count_occurence(x,y):
-  coord_counts = {}
-  for i in range(len(x)):
-      coord = (x[i], y[i])
-      if coord in coord_counts:
-          coord_counts[coord] += 1
-      else:
-          coord_counts[coord] = 1
-
-  # Extract unique coordinates and their counts
-  coords = np.array(list(coord_counts.keys()))
-  counts = np.array(list(coord_counts.values()))
-  return coords, counts/np.sum(counts)
-
-def sample_subset(array, probabilities):
-    # Normalize probabilities to sum up to 1
-    probabilities /= np.sum(probabilities)
     
-    # Sample indices from the array based on probabilities
-    subset_indices = np.random.choice(len(array), size=1, p=probabilities)
-    
-    # Create the subset array by selecting values from the original array
-    subset_array = array[subset_indices]
-    
-    return subset_array
-
-    
-
 def eval_results(output, target, conf, data_dir, model_name, boundaries, cls=False, labels=['Inclination', 'Period'], num_classes=2, only_one=False, test_df=None,
                 scale_target=True, scale_output=True, kepler=False, cos_inc=False):
-    """_summary_
-    evaluate results of a model and plot
-    Args:
-    
+    """_
+    evaluate results of a model and plot    
     """
     num_classes = len(labels) if not cls else num_classes
     if scale_target:
-        print("boundaries: ", boundaries)
-        max_p, min_p = boundaries['Period']
-        max_i, min_i = boundaries['Inclination']
         print("scaling target with cos_inc: ", cos_inc)
         print("target before ", target[:,1].max(), target[:,1].min())
         print("output before ", output[:,1].max(), output[:,1].min())
-        for i in range(len(labels)):
-            if labels[i] == 'Inclination' and cos_inc:
+        for i, label in enumerate(labels):
+            max_val = boundaries[f'max {label}']
+            min_val = boundaries[f'min {label}']
+            if label == 'Inclination' and cos_inc:
                 target[:,i] = np.arccos(target[:,i])
             else:
-                target[:,i] = target[:,i] * (boundaries[labels[i]][1] - boundaries[labels[i]][0]) + boundaries[labels[i]][0]
+                target[:,i] = target[:,i] * (max_val - min_val) + min_val
         
     if scale_output:
         print("scaling output")
-        for i in range(len(labels)):
-            print(labels[i], "before ", output[:,i].max(), output[:,i].min())
-            if labels[i] == 'Inclination' and cos_inc:
+        for i, label in enumerate(labels):
+            max_val = boundaries[f'max {label}']
+            min_val = boundaries[f'min {label}']
+            print(label, "before ", output[:,i].max(), output[:,i].min())
+            if label == 'Inclination' and cos_inc:
                 output[:,i] = np.arccos(np.clip(output[:,i], a_min=0, a_max=1))
             else:
-                output[:,i] = output[:,i] * (boundaries[labels[i]][1] - boundaries[labels[i]][0]) + boundaries[labels[i]][0]
-            print(labels[i], "after ", output[:,i].max(), output[:,i].min())
+                output[:,i] = output[:,i] * (max_val - min_val) + min_val
+            print(label, "after ", output[:,i].max(), output[:,i].min())
 
     df, diff =calc_diff(target, output, conf, test_df=test_df, cls=cls, labels=labels, num_classes=num_classes)
-    for i in range(len(labels)):            
+    for i, label in enumerate(labels):            
         thresholds = [0] if not len(conf) else [0,0.8,0.83, 0.85,0.87,0.88,0.89,0.9,0.91, 0.92, 0.94,0.96,0.98]
         for thresh in thresholds:
             high_conf = np.where(1 - np.abs(conf[:,i]) > thresh)[0] if len(conf) else np.arange(len(target))
-            name = f'{model_name}-{labels[i]}'
+            name = f'{model_name}-{label}'
             if len(high_conf > 1):
                 plot_results(data_dir, name, target[:,i][high_conf], output[:,i][high_conf], conf=thresh)
     if not kepler:
