@@ -1,5 +1,4 @@
 import os
-import random
 import sys
 from os import path
 import math
@@ -14,7 +13,7 @@ from scipy.signal import find_peaks, peak_prominences, peak_widths
 from matplotlib.lines import Line2D
 import butterpy as bp
 from scipy.signal import savgol_filter as savgol
-from wavelet import wavelet as wvl
+from util.wavelet import wavelet as wvl
 
 
 
@@ -25,22 +24,20 @@ ROOT_DIR = path.dirname(path.dirname(path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 print("running from ", ROOT_DIR)
 # from lightPred.datasets.simulations import TimeSeriesDataset
-from lightPred.dataloader import *
+from dataset.dataloader import *
 # from lightPred.augmentations import *
-from lightPred.utils import *
+from util.utils import *
 # from lightPred.optim import NoamOpt, ScheduledOptim
 # from lightPred.Informer2020.models.attn import HwinAttentionLayer, patchify, FullAttention
 # from lightPred.Informer2020.models.encoder import HwinEncoderLayer, Encoder, ConvLayer
 
-from lightPred.models import *
+from nn.models import *
 
-from lightPred.train import *
-from lightPred.sampler import DistributedSamplerWrapper
-from lightPred.transforms import *
-from lightPred.period_analysis import analyze_lc, analyze_lc_kepler
-from lightPred.timeDetr import TimeSeriesDetrModel
-from lightPred.timeDetrLoss import TimeSeriesDetrLoss, SetCriterion, HungarianMatcher
-from lightPred.analyze_results import read_csv_folder
+from nn.train import *
+from dataset.sampler import DistributedSamplerWrapper
+from transforms import *
+from util.period_analysis import analyze_lc, analyze_lc_kepler
+# from util.analyze_results import read_csv_folder
 # from lightPred.augmentations import DataTransform_TD_bank
 
 
@@ -86,46 +83,7 @@ idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nl
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
 
 
-
-def plot_transforms(num_samples=3):
-    Nlc = 5000
-    dur = 360
-    lc_path = r"C:\Users\Ilay\projects\kepler\data\butter\test_cos\simulations"
-    idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc)) + 1) for idx in range(Nlc)]
-    crop =  RandomCrop(int(dur / cad * DAY2MIN))
-    kep_transform = RandomCrop(int(dur / cad * DAY2MIN))
-    noise_t = KeplerNoiseAddition(noise_dataset=None, noise_path='data/noise', transforms=kep_transform)
-    avg = MovingAvg(13)
-    detrend = Detrend()
-    acf = ACF()
-    normalize = Normalize('std')
-    for i in range(num_samples):
-        idx = np.random.choice(idx_list)
-        x = pd.read_parquet(os.path.join(lc_path, f"lc_{idx}.pqt")).values
-        time, x = x[:, 0], x[:, 1]
-        x, _, info = crop(x, None, dict())
-        time = time[info['left_crop']:info['right_crop']]
-        x_noised, _, info = noise_t(x, None, info)
-        x_avg, _, info = avg(x_noised, None, info)
-        x_detrend, _, info = detrend(x_avg, None, info)
-        x_acf, _, info = acf(x_detrend, None, info)
-        x_normalize, _, info = normalize(x_acf, None, info)
-        print("shapes: ", x.shape, x_noised.shape, x_detrend.shape, x_acf.shape, x_normalize.shape)
-        fig, axs = plt.subplots(nrows=2, ncols=3, figsize=(20, 12))
-        axs = axs.ravel()
-        axs[0].plot(time, x)
-        axs[0].set_title('Raw')
-        axs[1].plot(time, x_noised)
-        axs[1].set_title('Noised')
-        axs[2].plot(time, x_avg)
-        axs[2].set_title('Averaged')
-        axs[3].plot(time, x_detrend)
-        axs[3].set_title('Diff')
-        axs[4].plot(time, x_acf[:, 0])
-        axs[4].set_ylim(-5,5)
-        axs[4].set_title('ACF')
-        axs[5].plot(time, x_normalize[:,1])
-        axs[5].set_title('Normalized')
+def lph():
 
         fig.text(0.5, 0.01, 'Time (Days)', ha='center', va='center')
         fig.text(0.03, 0.5, 'Flux', ha='center', va='center', rotation='vertical')
@@ -224,6 +182,7 @@ def sun_like_lc(num_samples):
 def shuffle_lc(segment_len=90 * 48):
     from matplotlib.pyplot import cm
     np.random.seed(42)
+
     x = np.load('data/samples/7831394.npy')
     x = fill_nan_np(x, interpolate=True)
     x = x / np.nanmedian(x)
@@ -1801,28 +1760,36 @@ def remove_leading_zeros(s):
     # Convert the remaining string to an integer and return
     return int(s)
 
-def test_butter():
+def test_butter(data_folder, num_samples=1000):
     sims = os.listdir(f'{data_folder}/simulations')
     props = pd.read_csv(f'{data_folder}/simulation_properties.csv')
     incs = []
     periods = []
     samples = set()
     print("number of files: ", len(sims))
-    for s in sims:
-        sample_num = remove_leading_zeros(s.split('_')[1].split('.')[0])
+    for i,s in enumerate(sims):
+        idx = s.split('_')[1].split('.')[0]
+        sample_num = remove_leading_zeros(idx)
+        lc = pd.read_parquet(os.path.join(f'{data_folder}/simulations', f"lc_{idx}.pqt")).values
+        if i % 100 == 0:
+            plt.plot(lc[:,0], lc[:,1])
+            plt.savefig(f'/data/tests/lc_{i}.png')
+            plt.close()
         if sample_num in samples:
             print("duplicate sample number: ", sample_num)
         samples.add(sample_num)
         p = props.iloc[sample_num]
         incs.append(p['Inclination'])
         periods.append(p['Period'])
+        if i == num_samples:
+            break
     incs = np.array(incs)
     periods = np.array(periods)
     plt.hist(incs, 80)
-    plt.savefig('/data/tests/incs_data2.png')
+    plt.savefig('/data/tests/incs_data.png')
     plt.clf()
     plt.hist(periods, 60)
-    plt.savefig('/data/tests/periods_data2.png')
+    plt.savefig('/data/tests/periods_data.png')
     plt.clf()
 
 
@@ -2054,7 +2021,7 @@ if __name__ == "__main__":
     # test_kepler()
     # test_patchify()
     # test_hwin()
-    # test_butter2()
+    test_butter('/data/butter/data_cos_long_period')
     # test_masked_ssl()
     # test_consistency()
     # test_sampler()
@@ -2091,11 +2058,9 @@ if __name__ == "__main__":
     # test_new_wavelet()
     # test_timeDetr()
     # shuffle_lc()
-    test_new_wavelet()
-    # sun_like_lc(10)
-    # test_cls(10)
+    # test_new_wavelet()
+    # create_stitched_koi_reference_samples()
     # break_samples_to_segments(8)
-    # plot_transforms(10)
 
 
 

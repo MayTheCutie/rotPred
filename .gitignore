@@ -10,7 +10,7 @@ opt_encdec.py
 augmentations.py
 denoise.py
 encoder.py
-acf.py
+experiments/acf.py
 acfimage.py
 autoformer.py
 clean.py
@@ -44,7 +44,7 @@ samples/*
 *.txt
 *.csv
 Astroconformer/*
-deprecated/*
+depreceated/*
 ```
 
 
