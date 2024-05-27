@@ -47,7 +47,7 @@ root_dir = '/data' if not local else '../'
 
 log_path = f'{root_dir}/logs/astroconf_cls'
 
-yaml_dir = '/data/lightPred/Astroconf'
+yaml_dir = 'Astroconf'
 # yaml_dir = 'Astroconf/'
 
 
@@ -159,15 +159,15 @@ if __name__ == '__main__':
         print("running locally")
         print("logdir ", f'{log_path}/exp{exp_num}')
     num_qs = dur//90
-    kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
-    refs = pd.read_csv('/data/lightPred/tables/all_refs.csv')
+    kepler_df = pd.read_csv('tables/all_kepler_samples.csv')
+    refs = pd.read_csv('tables/all_refs.csv')
     refs.dropna(subset=['i', 'prot'], inplace=True)
     refs['err_i'] = refs['err_i'].apply(convert_floats_to_list)
     # kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3,17))
     kepler_df = get_all_samples_df(num_qs=2)
     # kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
     kepler_df = kepler_df.merge(refs, on='KID', how='right')
-    kepler_df.to_csv('/data/lightPred/tables/ref_merged.csv', index=False)
+    kepler_df.to_csv('tables/ref_merged.csv', index=False)
     kepler_df.dropna(subset=['i', 'longest_consecutive_qs_indices'], inplace=True)
     print(f"all samples:  {len(kepler_df)}")
     global_t_loss = []
@@ -205,19 +205,19 @@ if __name__ == '__main__':
         conf_model.pred_layer = nn.Identity()
         model = LSTM_DUAL_CLS(conf_model, encoder_dims=args.encoder_dim, lstm_args=net_params, num_classes=10)
 
-        state_dict = torch.load(f'{log_path}/exp{exp_num}/astroconf.pth', map_location=torch.device('cpu'))
-        new_state_dict = OrderedDict()
-        for key, value in state_dict.items():
-            if key.startswith('module.'):
-                while key.startswith('module.'):
-                    key = key[7:]
-            new_state_dict[key] = value
-        state_dict = new_state_dict
-        model.load_state_dict(state_dict)
+        # state_dict = torch.load(f'{log_path}/exp{exp_num}/astroconf.pth', map_location=torch.device('cpu'))
+        # new_state_dict = OrderedDict()
+        # for key, value in state_dict.items():
+        #     if key.startswith('module.'):
+        #         while key.startswith('module.'):
+        #             key = key[7:]
+        #     new_state_dict[key] = value
+        # state_dict = new_state_dict
+        # model.load_state_dict(state_dict)
         model = model.to(local_rank)
 
         # model, net_params, _ = load_model(chekpoint_path, LSTM_ATTN, distribute=True, device=local_rank, to_ddp=True)
-        model = DDP(model, device_ids=[local_rank])
+        # model = DDP(model, device_ids=[local_rank])
 
 
         # print("number of params:", count_params(model))

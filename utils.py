@@ -39,11 +39,13 @@ def read_fits(filename):
     # print("reading fits file: ", filename)
     with fits.open(filename) as hdulist:
           binaryext = hdulist[1].data
-          header = hdulist[1].header
+          meta = hdulist[0].header
+          # print(header)
     df = pd.DataFrame(data=binaryext)
     x = df['PDCSAP_FLUX']
     time = df['TIME'].values
-    return x,time
+    # teff = meta['TEFF']
+    return x,time, meta
 
 def fill_nan_np(x, interpolate=True):
     # if np.isnan(x).any():
@@ -186,12 +188,12 @@ def plot_fit(
     """
     if fig is None:
         nrows = 1 if train_test_overlay else 2
-        ncols = 2
+        ncols = 1 if np.isnan(fit_res['train_acc']).any() else 2
         fig, axes = plt.subplots(
             nrows=nrows,
             ncols=ncols,
-            figsize=(8 * ncols, 5 * nrows),
             sharex="col",
+            figsize=(8 * ncols, 6 * nrows),
             sharey=False,
             squeeze=False,
         )
@@ -203,17 +205,18 @@ def plot_fit(
         for line in ax.lines:
             if line.get_label() == legend:
                 line.remove()
-
-    p = itertools.product(enumerate(["train", "val"]), enumerate(["loss", "acc"]))
+    if ncols > 1:
+        p = itertools.product(enumerate(["train", "val"]), enumerate(["loss", "acc"]))
+    else:
+        p = itertools.product(enumerate(["train", "val"]), enumerate(["loss"]))
     for (i, traintest), (j, lossacc) in p:
-
         ax = axes[j if train_test_overlay else i * 2 + j]
 
         attr = f"{traintest}_{lossacc}"
         data =fit_res[attr]
         label = traintest if train_test_overlay else legend
         h = ax.plot(np.arange(1, len(data) + 1), data, label=label)
-        ax.set_title(attr)
+        # ax.set_title(attr)
 
         if lossacc == "loss":
             ax.set_xlabel("Iteration #")
@@ -699,7 +702,7 @@ def find_longest_consecutive_indices(nums):
     return longest_start, longest_end
 
 def get_all_samples_df(num_qs=8):
-    kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
+    kepler_df = pd.read_csv('tables/all_kepler_samples.csv')
     # kepler_df = multi_quarter_kepler_df('data/', table_path=None, Qs=np.arange(3,17))
     try:
         kepler_df['data_file_path'] = kepler_df['data_file_path'].apply(convert_to_list)
@@ -707,10 +710,49 @@ def get_all_samples_df(num_qs=8):
         pass
     kepler_df['qs'] = kepler_df['data_file_path'].apply(extract_qs)  # Extract 'qs' numbers
     kepler_df['consecutive_qs'] = kepler_df['qs'].apply(consecutive_qs)  # Calculate length of longest consecutive sequence
-    kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
+    if num_qs is not None:
+        kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
     kepler_df['longest_consecutive_qs_indices'] = kepler_df['longest_consecutive_qs_indices'].apply(convert_ints_to_list)
     return kepler_df
-    
+
+def read_kepler_row(row, skip_idx=0, num_qs=17):
+    try:
+        q_sequence_idx = row['longest_consecutive_qs_indices']
+        info = dict()
+        if q_sequence_idx is np.nan:
+            q_sequence_idx = (0, 0)
+            # x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
+            # effective_qs = []
+        if isinstance(q_sequence_idx, str):
+            q_sequence_idx = q_sequence_idx.strip('()').split(',')
+            q_sequence_idx = [int(i) for i in q_sequence_idx]
+        if q_sequence_idx[1] > q_sequence_idx[0] and skip_idx < (q_sequence_idx[1] - q_sequence_idx[0]):
+            for i in range(q_sequence_idx[0] + skip_idx, q_sequence_idx[1]):
+                # print(row['data_file_path'])
+                x, time, meta = read_fits(row['data_file_path'][i])
+                x /= x.max()
+                x = fill_nan_np(np.array(x), interpolate=True)
+                if i == q_sequence_idx[0] + skip_idx:
+                    x_tot = x.copy()
+                else:
+                    border_val = np.mean(x) - np.mean(x_tot)
+                    x -= border_val
+                    x_tot = np.concatenate((x_tot, np.array(x)))
+                if i == num_qs:
+                    break
+            effective_qs = row['qs'][q_sequence_idx[0]: q_sequence_idx[1]]
+            info['Teff'] = meta['TEFF'] if meta['TEFF'] is not None else 0
+            info['R'] = meta['RADIUS'] if meta['RADIUS'] is not None else 0
+            info['logg'] = meta['LOGG'] if meta['LOGG'] is not None else 0
+        else:
+            effective_qs = []
+            x_tot, info = None, {'TEFF': None, 'RADIUS': None, 'LOGG': None}
+    except (TypeError, ValueError, FileNotFoundError) as e:
+        print("Error: ", e)
+        effective_qs = []
+        x_tot, info = None, {'TEFF': None, 'RADIUS': None, 'LOGG': None}
+    return x_tot, info, effective_qs
+
 def kepler_collate_fn(batch):
     # Separate the elements of each sample tuple (x, y, mask, info) into separate lists
     xs, ys, masks, masks_y, infos, infos_y = zip(*batch)

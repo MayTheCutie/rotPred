@@ -86,6 +86,82 @@ idx_list = [f'{idx:d}'.zfill(int(np.log10(test_Nlc))+1) for idx in range(test_Nl
 all_samples_list = [file_name for file_name in glob.glob(os.path.join(kepler_data_folder, '*')) if not os.path.isdir(file_name)]
 
 
+
+def plot_transforms(num_samples=3):
+    Nlc = 5000
+    dur = 360
+    lc_path = r"C:\Users\Ilay\projects\kepler\data\butter\test_cos\simulations"
+    idx_list = [f'{idx:d}'.zfill(int(np.log10(Nlc)) + 1) for idx in range(Nlc)]
+    crop =  RandomCrop(int(dur / cad * DAY2MIN))
+    kep_transform = RandomCrop(int(dur / cad * DAY2MIN))
+    noise_t = KeplerNoiseAddition(noise_dataset=None, noise_path='data/noise', transforms=kep_transform)
+    avg = MovingAvg(13)
+    detrend = Detrend()
+    acf = ACF()
+    normalize = Normalize('std')
+    for i in range(num_samples):
+        idx = np.random.choice(idx_list)
+        x = pd.read_parquet(os.path.join(lc_path, f"lc_{idx}.pqt")).values
+        time, x = x[:, 0], x[:, 1]
+        x, _, info = crop(x, None, dict())
+        time = time[info['left_crop']:info['right_crop']]
+        x_noised, _, info = noise_t(x, None, info)
+        x_avg, _, info = avg(x_noised, None, info)
+        x_detrend, _, info = detrend(x_avg, None, info)
+        x_acf, _, info = acf(x_detrend, None, info)
+        x_normalize, _, info = normalize(x_acf, None, info)
+        print("shapes: ", x.shape, x_noised.shape, x_detrend.shape, x_acf.shape, x_normalize.shape)
+        fig, axs = plt.subplots(nrows=2, ncols=3, figsize=(20, 12))
+        axs = axs.ravel()
+        axs[0].plot(time, x)
+        axs[0].set_title('Raw')
+        axs[1].plot(time, x_noised)
+        axs[1].set_title('Noised')
+        axs[2].plot(time, x_avg)
+        axs[2].set_title('Averaged')
+        axs[3].plot(time, x_detrend)
+        axs[3].set_title('Diff')
+        axs[4].plot(time, x_acf[:, 0])
+        axs[4].set_ylim(-5,5)
+        axs[4].set_title('ACF')
+        axs[5].plot(time, x_normalize[:,1])
+        axs[5].set_title('Normalized')
+
+        fig.text(0.5, 0.01, 'Time (Days)', ha='center', va='center')
+        fig.text(0.03, 0.5, 'Flux', ha='center', va='center', rotation='vertical')
+
+        plt.tight_layout()
+        plt.savefig("../imgs/lightcurve_sample_%d.png" % i)
+        plt.show()
+
+
+
+def break_samples_to_segments(num_qs):
+    kois_df = pd.read_csv('tables/ref_merged.csv')
+    kois_df.dropna(subset=['longest_consecutive_qs_indices'], inplace=True)
+    kois_df['longest_consecutive_qs_indices'] = kois_df['longest_consecutive_qs_indices'].apply(
+        lambda x: tuple(map(int, x.strip('[]').split(','))))
+    kois_df['data_file_path'] = kois_df['data_file_path'].apply(convert_to_list)
+    res_df = pd.DataFrame(columns=kois_df.columns)
+    for idx, row in kois_df.iterrows():
+        if len(row['data_file_path']) < num_qs:
+            continue
+        # print(len(row['data_file_path']), num_qs)
+        for j in range(len(row['data_file_path']) - num_qs):
+            sub_row = row.copy()
+            sub_samples = row['data_file_path'][j:j + num_qs]
+            sub_row['data_file_path'] = sub_samples
+            sub_row['qs'] = sub_row['qs'][j:j + num_qs]
+            sub_row['consecutive_qs'] = num_qs
+            sub_row['longest_consecutive_qs_indices'] = (0, num_qs)
+            sub_row['number_of_quarters'] = num_qs
+            sub_row['KID'] = f"{row['KID']}_{j}"
+            sub_row['kepler_name'] = f"{row['kepler_name']}_{j}"
+            sub_df = pd.DataFrame(sub_row).transpose()
+            print(sub_row.shape, res_df.shape)
+            res_df = pd.concat([res_df, sub_df], ignore_index=True)
+    print(res_df.shape)
+    print(res_df.head())
 def test_cls(num_samples):
     dur=720
     kep_transform = RandomCrop(int(dur/cad*DAY2MIN))
@@ -193,7 +269,7 @@ def test_new_wavelet():
     lc_avg, _, _ = avg(lc)
     acf_p, lags,acf, peaks, lph = analyze_lc(lc_avg)
     acf_p_idx = np.where(lags == acf_p)
-    wvt, freqs = wavelet_from_np(lc_avg, num_scales=512)
+    wvt, freqs = wavelet_from_np(lc_avg, num_scales=2048, sample_rate=1/73,  s0=-1)
     period = 1/freqs
     freq_sec = period_to_freq_micro_sec(period)
 
@@ -2015,9 +2091,11 @@ if __name__ == "__main__":
     # test_new_wavelet()
     # test_timeDetr()
     # shuffle_lc()
-    # test_new_wavelet()
+    test_new_wavelet()
     # sun_like_lc(10)
-    test_cls(10)
+    # test_cls(10)
+    # break_samples_to_segments(8)
+    # plot_transforms(10)
 
 
 

@@ -372,7 +372,7 @@ class PeriodNorm():
         p = info['period']
         if isinstance(x, np.ndarray):
             t, x = F_np.period_norm(x, p, self.num_ps, orig_freq=self.orig_freq)
-            mask = np.zeros(x.shape).astype(np.bool)
+            mask = np.zeros(x.shape).astype(bool)
         else:
             t, x = F_np.period_norm(x.cpu().detach().numpy(), p, self.num_ps, orig_freq=self.orig_freq)
         return x, mask, info

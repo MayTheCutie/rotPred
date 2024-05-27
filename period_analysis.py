@@ -409,11 +409,11 @@ def find_closest_minima(array, peaks):
 def find_period(data, lags, prom=None, method='first', name=''):
     peaks, _ = find_peaks(data, distance=5, prominence=prom)
     highest_peak, closest_left, closest_right = find_closest_minima(data, peaks)
-    plt.plot(lags, data)
-    plt.scatter(lags[highest_peak], data[highest_peak], color='red')
-    plt.scatter(lags[closest_left], data[closest_left], color='blue')
-    plt.scatter(lags[closest_right], data[closest_right], color='blue')
-    plt.show()
+    # plt.plot(lags, data)
+    # plt.scatter(lags[highest_peak], data[highest_peak], color='red')
+    # plt.scatter(lags[closest_left], data[closest_left], color='blue')
+    # plt.scatter(lags[closest_right], data[closest_right], color='blue')
+    # plt.show()
     if closest_left is not None and closest_right is not None:
         lph = data[highest_peak] - np.mean((data[closest_left], data[closest_right]))
     else:
@@ -465,14 +465,44 @@ def find_period(data, lags, prom=None, method='first', name=''):
         return p, peaks, lph
     return 0, peaks, lph
 
-def analyze_lc(lc, day_cadence=1/48, prom=0.01, max_period=50):
-    lc = lc - np.median(lc)
-    lc = gaussian_filter1d(lc, 7.5)
+def analyze_lc(lc, day_cadence=1/48, prom=0.01, max_period=70, preprocess='med', method='slope'):
+    if preprocess is not None:
+        if preprocess == 'med':
+            lc = lc/np.median(lc)
+            lc = gaussian_filter1d(lc, 7.5)
+        elif preprocess == 'minmax':
+            lc = (lc - lc.min())/(lc.max() - lc.min())
     xcf = A(lc, nlags=max_period/day_cadence - 1)
     xcf = (xcf - xcf.min())/(xcf.max() - xcf.min())
-    xcf_lags = np.arange(0,50, day_cadence)
-    xcf_period, peaks, lph = find_period(xcf, xcf_lags, prom=prom, name='XCF', method='max')
+    xcf_lags = np.arange(0,max_period, day_cadence)
+    xcf_period, peaks, lph = find_period(xcf, xcf_lags, prom=prom, name='full', method=method)
     return np.abs(xcf_period), xcf_lags, xcf, peaks, lph
+
+def local_acf(lc, q_days=90, day_cadence=1/48, prom=0.01, max_period=50, preprocess='med', method='slope'):
+    q_samples = int(q_days / day_cadence)
+    num_qs = int(len(lc) * day_cadence // q_days)
+    all_qs = []
+    all_acfs = []
+
+    for i in range(num_qs):
+        q_lc = lc[i * q_samples:(i + 1) * q_samples]
+        q_lc = np.pad(q_lc, (0, q_samples - len(q_lc)))
+        q_p, q_lags, q_acf, q_peaks, q_lph = analyze_lc(q_lc, day_cadence=day_cadence,
+                                                        prom=prom, max_period=max_period, preprocess=preprocess,
+                                                        method=method)
+        all_qs.append(q_p)
+        all_acfs.append(q_acf)
+    all_acfs = np.array(all_acfs)
+    xcf = np.mean(all_acfs, axis=0)
+    xcf = (xcf - xcf.min()) / (xcf.max() - xcf.min())
+    xcf_lags = np.arange(0, max_period, day_cadence)
+    xcf_period, peaks, lph = find_period(xcf, xcf_lags, prom=prom, name='full', method=method)
+    all_qs = np.array(all_qs)
+    qs_period = np.mean(all_qs)
+    diff_period = np.abs(xcf_period - all_qs)
+    consisteny = np.where(diff_period < xcf_period*0.1)[0]
+    return xcf_period, qs_period, consisteny
+
 
 def analyze_lc_kepler(lc, day_cadence=1/48, prom=0.12):
     xcf = A(lc, nlags=len(lc))
