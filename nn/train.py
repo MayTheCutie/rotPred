@@ -1,5 +1,6 @@
 from torch.utils.tensorboard import SummaryWriter
 import torch
+import torch.nn.functional as F
 import numpy as np
 import time
 import os
@@ -9,8 +10,8 @@ import glob
 from collections import OrderedDict
 from tqdm import tqdm
 import torch.distributed as dist
-# from lightPred.timeDetrLoss import cxcy_to_cxcywh
-from util.period_analysis import analyze_lc
+from util.classical_analysis import analyze_lc
+import umap
 # from lightPred.dataloader import boundary_values_dict
 
 # import NamedTuple
@@ -42,19 +43,24 @@ class Trainer(object):
     """
     A class that encapsulates the training loop for a PyTorch model.
     """
-    def __init__(self, model, optimizer, criterion, train_dataloader, device, world_size=1, num_classes=2, scheduler=None, val_dataloader=None,
-                 optim_params=None, max_iter=np.inf, net_params=None, scaler=None, grad_clip=False,
-                   exp_num=None, log_path=None, exp_name=None, plot_every=None, cos_inc=False):
+    def __init__(self, model, optimizer, criterion, train_dataloader, device, world_size=1, num_classes=2,
+                 scheduler=None, val_dataloader=None,  optim_params=None, max_iter=np.inf, net_params=None,
+                  scaler=None, grad_clip=False, exp_num=None, log_path=None, exp_name=None, plot_every=None,
+                   cos_inc=False, range_update=None, quantiles=1,
+                  ):
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
         self.scaler = scaler
         self.grad_clip = grad_clip
+        self.quantiles = quantiles
         self.cos_inc = cos_inc
         self.num_classes = num_classes
         self.scheduler = scheduler
         self.train_dl = train_dataloader
         self.val_dl = val_dataloader
+        self.train_sampler = self.get_sampler_from_dataloader(train_dataloader)
+        self.val_sampler = self.get_sampler_from_dataloader(val_dataloader)
         self.max_iter = max_iter
         self.device = device
         self.world_size = world_size
@@ -66,6 +72,9 @@ class Trainer(object):
         self.best_state_dict = None
         self.plot_every = plot_every
         self.logger = None
+        self.range_update = range_update
+        self.nc_err_i = np.zeros((1,quantiles))
+        self.nc_err_p = np.zeros((1,quantiles))
         if log_path is not None:
             self.logger =SummaryWriter(f'{self.log_path}/exp{self.exp_num}')
             # print(f"logger path: {self.log_path}/exp{self.exp_num}")
@@ -105,6 +114,18 @@ class Trainer(object):
         plt.colorbar(label='points frequency')
         plt.savefig(f"{self.log_path}/exp{self.exp_num}/Inc_{data}_epoch{epoch}.png")
         plt.close()
+    
+    def get_sampler_from_dataloader(self, dataloader):
+        if hasattr(dataloader, 'sampler'):
+            if isinstance(dataloader.sampler, torch.utils.data.DistributedSampler):
+                return dataloader.sampler
+            elif hasattr(dataloader.sampler, 'sampler'):
+                return dataloader.sampler.sampler
+        
+        if hasattr(dataloader, 'batch_sampler') and hasattr(dataloader.batch_sampler, 'sampler'):
+            return dataloader.batch_sampler.sampler
+        
+        return None
 
     def fit(self, num_epochs, device,  early_stopping=None, only_p=False, best='loss', conf=False):
         """
@@ -137,31 +158,36 @@ class Trainer(object):
             global_val_accuracy, global_val_loss = self.process_loss(v_acc, v_loss_mean)
             if main_proccess:  # Only perform this on the master GPU                
                 val_acc.append(global_val_accuracy.mean().item())
-                if self.scheduler is not None:
-                    self.scheduler.step(global_val_loss)
-                criterion = min_loss if best == 'loss' else best_acc
-                mult = 1 if best == 'loss' else -1
-                objective = global_val_loss if best == 'loss' else global_val_accuracy.mean()
-                if mult*objective < mult*criterion:
+                
+                current_objective = global_val_loss if best == 'loss' else global_val_accuracy.mean()
+                improved = False
+                
+                if best == 'loss':
+                    if current_objective < min_loss:
+                        min_loss = current_objective
+                        improved = True
+                else:
+                    if current_objective > best_acc:
+                        best_acc = current_objective
+                        improved = True
+                
+                if improved:
                     print("saving model...")
-                    if best == 'loss':
-                        min_loss = global_val_loss
-                    else:
-                        best_acc = global_val_accuracy.mean()
                     torch.save(self.model.state_dict(), f'{self.log_path}/exp{self.exp_num}/{self.exp_name}.pth')
                     self.best_state_dict = self.model.state_dict()
                     epochs_without_improvement = 0
                 else:
                     epochs_without_improvement += 1
-                    if epochs_without_improvement == early_stopping:
-                        print('early stopping!', flush=True)
-                        break
+
                 print(f'Epoch {epoch}: Train Loss: {global_train_loss:.6f}, Val Loss:'\
                 f'{global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, '\
-                 f'Val Acc: {global_val_accuracy.round(decimals=4).tolist()}, Time: {time.time() - start_time:.2f}s', flush=True)
+                f'Val Acc: {global_val_accuracy.round(decimals=4).tolist()}, Time: {time.time() - start_time:.2f}s', flush=True)
                 if epoch % 10 == 0:
                     print(os.system('nvidia-smi'))
 
+                if epochs_without_improvement == early_stopping:
+                    print('early stopping!', flush=True)
+                    break
                 if time.time() - global_time > (23.83 * 3600):
                     print("time limit reached")
                     break 
@@ -197,44 +223,41 @@ class Trainer(object):
         train_acc = 0
         all_accs = torch.zeros(self.num_classes, device=device)
         pbar = tqdm(self.train_dl)
-        for i, (x, y,_,info) in enumerate(pbar):
-            x = x.to(device)
-            y = y.to(device)
-            self.optimizer.zero_grad()
-            y_pred = self.model(x.float())
-            # print("y_pred: ", y_pred.shape, "y: ", y.shape)
-
-            if len(y.shape) == 1:
-                y = y.unsqueeze(1)
-            if conf:
-                y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:].abs()
-                conf_y = torch.abs(y - y_pred) 
-            # print(f"inclination range: {y_pred[:,1].min()} - {y_pred[:,1].max()}")
-            # print(f"pred y: {y_pred[:10,:]}")
-
-            # print("y_pred: ", y_pred.shape, "y: ", y.shape)
-            loss = self.criterion(y_pred, y) if not only_p else self.criterion(y_pred, y[:, 0])
-            if conf:
-                loss += self.criterion(conf_pred, conf_y)
-            # if self.logger is not None:
-            #     self.logger.add_scalar('train_loss', loss.item(), i + epoch*len(self.train_dl))
-            #     self.logger.add_scalar('lr', self.optimizer.param_groups[0]['lr'], i + epoch*len(self.train_dl))
-            # print("loss: ", loss, "y_pred: ", y_pred, "y: ", y)
-            loss.backward()
-            self.optimizer.step()
+        for i, batch in enumerate(pbar):
+            loss, acc = self.train_batch(batch, device, conf)
             train_loss.append(loss.item())
-            diff = torch.abs(y_pred - y)
-            train_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
-            all_acc = (diff < (y/10)).sum(0)
-            pbar.set_description(f"train_acc: {all_acc}, train_loss:  {loss.item()}") 
-            all_accs = all_accs + all_acc
-            # self.train_dl.dataset.step += 1 # for noise addition
-            # mean_acc = (diff[:,0]/(y[:,0])).sum().item()
-            # train_acc2 += (diff[:,self.num_classes-1] < y[:,self.num_classes-1]/10).sum().item()
+            all_accs = all_accs + acc
+            pbar.set_description(f"train_acc: {all_accs}, train_loss:  {loss.item()}")      
             if i > self.max_iter:
                 break
         print("number of train_accs: ", train_acc)
         return train_loss, all_accs/len(self.train_dl.dataset)
+    
+    def train_batch(self, batch, device, conf):
+        x,y,_,_ = batch
+        if x.shape[-1] == 2:
+            x = x[...,0].unsqueeze(-1).permute(0,2,1)
+        x = x.to(device)
+        y = y.to(device)
+        self.optimizer.zero_grad()
+        y_pred = self.model(x.float())
+        if len(y.shape) == 1:
+            y = y.unsqueeze(1)
+        if conf:
+            y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:].abs()
+            conf_y = torch.abs(y - y_pred) 
+        
+        loss = self.criterion(y_pred, y)
+        if conf:
+            loss += self.criterion(conf_pred, conf_y)
+        
+        loss.backward()
+        self.optimizer.step()
+        if self.scheduler is not None:
+            self.scheduler.step()
+        diff = torch.abs(y_pred - y)
+        acc = (diff < (y/10)).sum(0)
+        return loss, acc
 
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
         """
@@ -245,31 +268,32 @@ class Trainer(object):
         val_acc = 0
         all_accs = torch.zeros(self.num_classes, device=device)
         pbar = tqdm(self.val_dl)
-        for i,(x, y,_,_) in enumerate(pbar):
-            x = x.to(device)
-            y = y.to(device)
-            if len(y.shape) == 1:
-                y = y.unsqueeze(1)
-            with torch.no_grad():
-                y_pred = self.model(x)
-                if conf:
-                    y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:].abs()
-                    conf_y = torch.abs(y - y_pred)
-                else:
-                    conf_pred = torch.ones_like(y_pred)
-            loss = self.criterion(y_pred, y) if not only_p else self.criterion(y_pred, y[:, 0])
-            if conf:
-                loss += self.criterion(conf_pred, conf_y)
-            # if self.logger is not None:
-            #     self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
-            val_loss.append(loss.item())
-            diff = torch.abs(y_pred - y)
-            # print("diff: ", diff.shape, "y: ", y.shape)
-            val_acc += (diff[:,0] < (y[:,0]/10)).sum().item()  
-            all_acc = (diff < (y/10)).sum(0)
-            pbar.set_description(f"val_acc: {all_acc}, val_loss:  {loss.item()}")
-            all_accs = all_accs + all_acc
+        for i,batch in enumerate(pbar):
+            loss, acc = self.eval_batch(batch, device, conf)
+            val_loss.append(loss)
+            all_accs = all_accs + acc
+            pbar.set_description(f"val_acc: {all_accs}, val_loss:  {loss.item()}")
         return val_loss, all_accs/len(self.val_dl.dataset)
+
+    def eval_batch(self, batch, device, conf):
+        x,y,_,_ = batch
+        if x.shape[-1] == 2:
+            x = x[...,0].unsqueeze(-1).permute(0,2,1)
+        x = x.to(device)
+        y = y.to(device)
+        with torch.no_grad():
+            y_pred = self.model(x)
+            if conf:
+                y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:].abs()
+                conf_y = torch.abs(y - y_pred)
+            else:
+                conf_pred = torch.ones_like(y_pred)
+        loss = self.criterion(y_pred, y)
+        if conf:
+            loss += self.criterion(conf_pred, conf_y)
+        diff = torch.abs(y_pred - y)
+        acc = (diff < (y/10)).sum(0)
+        return loss, acc
 
     def load_best_model(self, to_ddp=True, from_ddp=True):
         data_dir = f'{self.log_path}/exp{self.exp_num}'
@@ -312,7 +336,7 @@ class Trainer(object):
         for i,(x, y,_,info) in enumerate(test_dataloader):
             x = x.to(device)
             with torch.no_grad():
-                y_pred = self.model(x)
+                y_pred, memory = self.model(x)
                 if conf:
                     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
             preds = np.concatenate((preds, y_pred.cpu().numpy()))
@@ -336,61 +360,56 @@ class DoubleInputTrainer(Trainer):
         train_loss = []
         train_acc = 0
         all_accs = torch.zeros(self.num_classes, device=device)
+        if self.train_sampler is not None:
+            try:
+                self.train_sampler.set_epoch(epoch)
+            except AttributeError:
+                pass
         pbar = tqdm(self.train_dl)
-        for i, (x,y, _,info) in enumerate(pbar):
-            tic = time.time()
-            x1, x2 = x[:, 0, :], x[:, 1, :]
-            x1 = x1.to(device)
-            x2 = x2.to(device)
-            y = y.to(device)
-            self.optimizer.zero_grad()
-            if 'acf_phr' in info:
-                y_pred = self.model(x1.float(), x2.float(), acf_phr=info['acf_phr'])
-            else:
-                y_pred = self.model(x1.float(), x2.float())
-            if y_pred.isnan().any():
-                print("y_pred is nan")
-                print("y_pred: ", y_pred)
-            if conf:
-                y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
-                conf_y = torch.abs(y - y_pred) 
-                if conf_pred.isnan().any():
-                    print("conf_pred is nan")
-                    print("conf_pred: ", conf_pred)
-                
-            # y_std = torch.std(y.squeeze(), dim=1)
-            # y_pred_std = torch.std(y_pred.squeeze(), dim=1)
-            if self.cos_inc:
-                inc_idx = 0
-                y_pred[:, inc_idx] = torch.cos(y_pred[:, inc_idx]*np.pi/2)
-                y[:, inc_idx] = torch.cos(y[:, inc_idx]*np.pi/2)
-            if y.isnan().any():
-                print("y is nan")
-                print("y: ", y)
+        for i, batch in enumerate(pbar):
+            loss, acc,_ = self.train_batch(batch, device, conf)
+            train_loss.append(loss.item())
+            pbar.set_description(f"train_acc: {acc}, train_loss:  {loss.item()}")
+            all_accs = all_accs + acc
+            if i > self.max_iter:
+                break
+            if self.range_update is not None and (i % self.range_update == 0):
+                self.train_dl.dataset.expand_label_range()
+                print("range: ", y.min(dim=0).values, y.max(dim=0).values)
+        return train_loss, all_accs/len(self.train_dl.dataset)
+    
+    def train_batch(self, batch, device, conf):
+        x,y,_,info = batch
+        x1, x2 = x[...,0], x[...,1]
+        x1 = x1.to(device)
+        x2 = x2.to(device)
+        y = y.to(device)
+        self.optimizer.zero_grad()
+        y_pred = self.model(x1.float(), x2.float())
+        if conf:
+            y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+            conf_y = torch.abs(y - y_pred) 
+        if self.cos_inc:
+            inc_idx = 0
+            y_pred[:, inc_idx] = torch.cos(y_pred[:, inc_idx]*np.pi/2)
+            y[:, inc_idx] = torch.cos(y[:, inc_idx]*np.pi/2)
+        if self.num_classes > 1:
             loss_i = self.criterion(y_pred[:, 0], y[:, 0])  # Loss for inclination
             loss_p = self.criterion(y_pred[:, 1], y[:, 1])  # Loss for period
             loss = (self.eta * loss_i) + ((1-self.eta) * loss_p)
             if conf:
+                loss_conf_i = self.criterion(conf_pred[:, 0], conf_y[:, 0])
+                loss_conf_p = self.criterion(conf_pred[:, 1], conf_y[:, 1])
+                loss += (self.eta * loss_conf_i) + ((1-self.eta) * loss_conf_p)
+        else:
+            loss = self.criterion(y_pred, y)
+            if conf:
                 loss += self.criterion(conf_pred, conf_y)
-                
-            # loss_std = self.criterion(y_pred_std, y_std)
-            # loss = loss + 0.5 * loss_std
-            
-            # print("loss: ", loss, "y_pred: ", y_pred, "y: ", y)
-            t2 = time.time()
-            loss.backward()
-            self.optimizer.step()
-            train_loss.append(loss.item())
-            diff = torch.abs(y_pred - y)
-            # train_acc += (diff[:,0] < (y[:,0]/10)).sum().item()
-            all_acc = (diff < (y/10)).sum(0)
-            all_accs = all_accs + all_acc
-            pbar.set_description(f"train_acc: {all_acc}, train_loss:  {loss.item()}")
-            toc = time.time()
-            # print(f"train time: {toc-tic}, forward time: {t1-tic}, loss time: {t2-t1}, backward time: {toc-t2}")
-            if i > self.max_iter:
-                break
-        return train_loss, all_accs/len(self.train_dl.dataset)
+        loss.backward()
+        self.optimizer.step()
+        diff = torch.abs(y_pred - y)
+        acc = (diff < (y/10)).sum(0)
+        return loss, acc, y_pred
     
     def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
         """
@@ -400,43 +419,54 @@ class DoubleInputTrainer(Trainer):
         val_loss = []
         val_acc = 0
         all_accs = torch.zeros(self.num_classes, device=device)
+        if self.val_sampler is not None:
+            try:
+                self.train_sampler.set_epoch(epoch)
+            except AttributeError:
+                pass
         pbar = tqdm(self.val_dl)
         targets = np.zeros((0, self.num_classes))
-        for i, (x,y, _,info) in enumerate(pbar):
-            x1, x2 = x[:, 0, :], x[:, 1, :]
-            x1 = x1.to(device)
-            x2 = x2.to(device)
-            y = y.to(device)
-            with torch.no_grad():
-                if 'acf_phr' in info:
-                    y_pred = self.model(x1.float(), x2.float(), acf_phr=info['acf_phr'])
-                else:
-                    y_pred = self.model(x1.float(), x2.float())
-                if conf:
-                    y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
-                    conf_y = torch.abs(y - y_pred)
-            # y_std = torch.std(y.squeeze(), dim=1)
-            # y_pred_std = torch.std(y_pred.squeeze(), dim=1)
+        for i, batch in enumerate(pbar):
+            loss, acc,_ = self.eval_batch(batch, device, conf)
+            val_loss.append(loss.item())
+            all_accs = all_accs + acc  
+            pbar.set_description(f"val_acc: {acc}, val_loss:  {loss.item()}")
+            if i > self.max_iter:
+                break
+            if self.range_update is not None and (i % self.range_update == 0):
+                self.train_dl.dataset.expand_label_range()
+        return val_loss, all_accs/len(self.val_dl.dataset)
+    
+    def eval_batch(self, batch, device, conf):
+        x,y,_,info = batch
+        x1, x2 = x[...,0], x[...,1]
+        x1 = x1.to(device)
+        x2 = x2.to(device)
+        y = y.to(device)
+        with torch.no_grad():
+            y_pred = self.model(x1.float(), x2.float())
+            if conf:
+                y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+                conf_y = torch.abs(y - y_pred) 
             if self.cos_inc:
                 inc_idx = 0
                 y_pred[:, inc_idx] = torch.cos(y_pred[:, inc_idx]*np.pi/2)
                 y[:, inc_idx] = torch.cos(y[:, inc_idx]*np.pi/2)
-            loss = self.criterion(y_pred, y) 
+            if self.num_classes > 1:
+                loss_i = self.criterion(y_pred[:, 0], y[:, 0])  # Loss for inclination
+                loss_p = self.criterion(y_pred[:, 1], y[:, 1])  # Loss for period
+                loss = (self.eta * loss_i) + ((1-self.eta) * loss_p)
             if conf:
-                loss += self.criterion(conf_pred, conf_y)
-                
-            # loss_std = self.criterion(y_pred_std, y_std)
-            # loss = loss + 0.5 * loss_std
-            # if self.logger is not None:
-            #     self.logger.add_scalar('validation_loss', loss.item(), i + epoch*len(self.train_dl))
-            val_loss.append(loss.item())
+                loss_conf_i = self.criterion(conf_pred[:, 0], conf_y[:, 0])
+                loss_conf_p = self.criterion(conf_pred[:, 1], conf_y[:, 1])
+                loss += (self.eta * loss_conf_i) + ((1-self.eta) * loss_conf_p)
+            else:
+                loss = self.criterion(y_pred, y)
+                if conf:
+                    loss += self.criterion(conf_pred, conf_y)
             diff = torch.abs(y_pred - y)
-            all_acc = (diff < (y/10)).sum(0)
-            pbar.set_description(f"val_acc: {all_acc}, val_loss:  {loss.item()}")
-            all_accs = all_accs + all_acc  
-            if i > self.max_iter:
-                break
-        return val_loss, all_accs/len(self.val_dl.dataset)
+            acc = (diff < (y/10)).sum(0)
+        return loss, acc, y_pred
 
     def predict(self, test_dataloader, device, conf=True, only_p=False, load_best=False):
         """
@@ -464,7 +494,7 @@ class DoubleInputTrainer(Trainer):
                     y_pred = self.model(x1.float(), x2.float(), acf_phr=info['acf_phr'])
                 else:
                     y_pred = self.model(x1.float(), x2.float())
-                # print(i, " y_pred: ", y_pred, "y: ", y)
+                # print(i, " y_pred: ", y_pred.shape, "y: ", y.shape)
                 if conf:
                     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
             loss = self.criterion(y_pred, y)
@@ -482,8 +512,293 @@ class DoubleInputTrainer(Trainer):
                 break
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
         
-        return preds, targets, confs
-    
+        return preds, targets, confs, []
+
+class MultiTrainer(Trainer):
+    def __init__(self, num_classes=2, eta=0.5, reg_lambda=0.1, start_epoch_reg=0, temperature=10,
+                 kl_lambda=0.1, kl_update_freq=5, start_epoch_kl=30, **kwargs):
+        super().__init__(**kwargs)
+        self.num_classes = num_classes
+        self.eta = eta
+        self.reg_lambda = reg_lambda
+        self.start_epoch_reg = start_epoch_reg
+        self.temperature = temperature
+        self.kl_lambda = kl_lambda
+        self.kl_update_freq = kl_update_freq
+        self.accumulated_predictions = []
+        self.accumulated_targets = []
+        self.start_epoch_kl = start_epoch_kl
+        self.cur_kl_lambda = 0
+        self.kl_loss = torch.nn.KLDivLoss(reduction='batchmean', log_target=False)
+
+    def calculate_kl_loss(self):
+        if not self.accumulated_predictions:
+            return torch.tensor(0.0, device=self.device)
+        
+        all_preds = torch.cat(self.accumulated_predictions, dim=0)
+        
+        # Calculate mean prediction for the first label
+        mean_pred = all_preds.mean(dim=0)
+        
+        # Calculate KL divergence for the first label using KLDivLoss
+        kl_div = self.kl_loss(F.log_softmax(all_preds, dim=-1),
+                              F.softmax(mean_pred.unsqueeze(0).expand_as(all_preds), dim=-1))
+        
+        return kl_div
+
+    def train_epoch(self, device, epoch=None, only_p=False, plot=False, conf=False):
+        self.model.train()
+        train_loss = []
+        train_acc = 0
+        all_accs = torch.zeros(self.num_classes, device=device)
+
+        if self.train_sampler is not None:
+            try:
+                self.train_sampler.set_epoch(epoch)
+            except AttributeError:
+                pass
+        if epoch >= self.start_epoch_reg:
+            k = 0.7
+            self.reg_lambda = 1 / (1 + np.exp(-k * (epoch - 35)))
+        else:
+            self.reg_lambda = 0
+        
+        if epoch >= self.start_epoch_kl:
+            self.cur_kl_lambda = self.kl_lambda
+        else:
+            self.cur_kl_lambda = 0
+        
+        pbar = tqdm(self.train_dl)
+        for i, (x, y, _, info) in enumerate(pbar):
+            self.optimizer.zero_grad()  # Zero gradients at the start of each batch
+            
+            loss, acc, y_pred = self.train_batch(x, y,  i, device, conf)
+            train_loss.append(loss.item())
+            all_accs += acc
+            
+            pbar.set_description(f"train_acc: {acc}, train_loss: {loss.item()}")
+            
+            if self.max_iter and i >= self.max_iter:
+                break
+
+            if self.range_update is not None and (i % self.range_update == 0):
+                self.train_dl.dataset.expand_label_range()
+
+        return train_loss, all_accs / len(self.train_dl.dataset)
+
+    def train_batch(self, x, y,  idx, device, conf):
+        if len(x.shape) == 3:
+            x = x.unsqueeze(1)
+        b, c, l, h = x.shape  # batch size, number of copies, sequence length, dimension
+        
+        x_reshaped = x.reshape(b*c, l, h)
+        x1, x2 = x_reshaped[..., 0], x_reshaped[..., 1]
+        x1 = x1.to(device)
+        x2 = x2.to(device)
+        y = y.to(device)
+
+        self.optimizer.zero_grad()
+        
+        y_pred = self.model(x1.float(), x2.float())
+        y_pred = y_pred.reshape(b, c, -1, self.num_classes)
+
+        if conf:
+            y_pred, conf_pred = y_pred[..., :self.num_classes], y_pred[..., self.num_classes:]
+            conf_y = torch.abs(y.unsqueeze(1) - y_pred)
+        # Calculate the main loss (average across copies)
+        if self.num_classes > 1:
+            loss_i = self.criterion(y_pred[..., 0].mean(dim=1), y[..., 0])
+            loss_p = self.criterion(y_pred[..., 1].mean(dim=1), y[..., 1])
+            loss = (self.eta * loss_i) + ((1 - self.eta) * loss_p)
+            if conf:
+                loss_conf_i = self.criterion(conf_pred[..., 0].mean(dim=1), conf_y[..., 0].mean(dim=1))
+                loss_conf_p = self.criterion(conf_pred[..., 1].mean(dim=1), conf_y[..., 1].mean(dim=1))
+                loss += (self.eta * loss_conf_i) + ((1 - self.eta) * loss_conf_p)
+        else:
+            loss = self.criterion(y_pred.mean(dim=1), y)
+            if conf:
+                loss += self.criterion(conf_pred.mean(dim=1), conf_y.mean(dim=1))
+        if y_pred.shape[1] > 1:
+            # Calculate regularization loss (standard deviation across copies)
+            reg_loss = y_pred.std(dim=1).mean()
+            
+            # Combine losses
+            total_loss = (1 - self.reg_lambda) * loss + self.reg_lambda * reg_loss
+        else:
+            total_loss = loss
+        
+        if (idx + 1) % self.kl_update_freq == 0:
+                kl_loss = self.calculate_kl_loss()
+                total_loss += self.cur_kl_lambda * kl_loss
+                self.accumulated_predictions = []  # Clear accumulated predictions
+        total_loss.backward()
+        self.optimizer.step()
+
+        # Calculate accuracy (using mean prediction across copies)
+        y_pred = y_pred.mean(dim=1)
+        # Accumulate predictions for KL loss (only first label)
+        self.accumulated_predictions.append(y_pred[:, :, 0].detach())  # Only first label
+        mean_pred = y_pred[:, self.quantiles//2, :]
+        diff = torch.abs(mean_pred - y)
+        acc = (diff < (y/10)).sum(0)
+
+        return total_loss, acc, y_pred
+
+    def eval_epoch(self, device, epoch=None, only_p=False, plot=False, conf=False):
+        self.model.eval()
+        val_loss = []
+        val_acc = 0
+        all_preds = np.zeros((0, self.quantiles, self.num_classes))
+        all_ys = np.zeros((0, self.num_classes))
+        all_accs = torch.zeros(self.num_classes, device=device)
+
+        if self.val_sampler is not None:
+            try:
+                self.val_sampler.set_epoch(epoch)
+            except AttributeError:
+                pass
+        if epoch >= self.start_epoch_reg:
+            k = 0.7
+            self.reg_lambda = self.reg_lambda / (1 + np.exp(-k * (epoch - 35)))
+        else:
+            self.reg_lambda = 0
+        
+        if epoch >= self.start_epoch_kl:
+            self.cur_kl_lambda = self.kl_lambda
+        else:
+            self.cur_kl_lambda = 0
+
+        pbar = tqdm(self.val_dl)
+        for i, (x, y, _, info) in enumerate(pbar):
+            loss, acc, preds = self.eval_batch(x, y, i, device, conf)
+            val_loss.append(loss.item())
+            all_accs += acc
+            pbar.set_description(f"val_acc: {acc}, val_loss: {loss.item()}")
+
+            all_preds = np.concatenate((all_preds, preds.cpu().numpy()))
+            all_ys = np.concatenate((all_ys, y.cpu().numpy()))
+            
+            if self.max_iter and i >= self.max_iter:
+                break
+        if self.quantiles > 1: # CQR calibration
+            self.nc_err_i = self.criterion.calibrate(all_preds[...,0], all_ys[...,0])
+            self.nc_err_p = self.criterion.calibrate(all_preds[...,1], all_ys[...,1])
+        return val_loss, all_accs / len(self.val_dl.dataset)
+
+    def eval_batch(self, x, y, idx, device, conf):
+        if len(x.shape) == 3:
+            x = x.unsqueeze(1)
+        b, c, l, h = x.shape
+
+        x_reshaped = x.reshape(b*c, l, h)
+        x1, x2 = x_reshaped[..., 0], x_reshaped[..., 1]
+        x1 = x1.to(device)
+        x2 = x2.to(device)
+        y = y.to(device)
+
+        with torch.no_grad():
+            y_pred = self.model(x1.float(), x2.float())
+            y_pred = y_pred.reshape(b, c, -1, self.num_classes)
+
+            if conf:
+                y_pred, conf_pred = y_pred[..., :self.num_classes], y_pred[..., self.num_classes:]
+                conf_y = torch.abs(y.unsqueeze(1) - y_pred)
+
+            # Calculate loss (average across copies)
+            if self.num_classes > 1:
+                loss_i = self.criterion(y_pred[..., 0].mean(dim=1), y[:, 0])
+                loss_p = self.criterion(y_pred[..., 1].mean(dim=1), y[:, 1])
+                loss = (self.eta * loss_i) + ((1 - self.eta) * loss_p)
+                if conf:
+                    loss_conf_i = self.criterion(conf_pred[..., 0].mean(dim=1), conf_y[..., 0].mean(dim=1))
+                    loss_conf_p = self.criterion(conf_pred[..., 1].mean(dim=1), conf_y[..., 1].mean(dim=1))
+                    loss += (self.eta * loss_conf_i) + ((1 - self.eta) * loss_conf_p)
+            else:
+                loss = self.criterion(y_pred[...,0].mean(dim=1), y)
+                if conf:
+                    loss += self.criterion(conf_pred.mean(dim=1), conf_y.mean(dim=1))
+            if y_pred.shape[1] > 1:
+                # Calculate regularization loss (standard deviation across copies)
+                reg_loss = y_pred.std(dim=1).mean()
+                
+                # Combine losses
+                total_loss = (1 - self.reg_lambda) * loss + self.reg_lambda * reg_loss
+            else:
+                total_loss = loss
+            
+            if (idx + 1) % self.kl_update_freq == 0:
+                kl_loss = self.calculate_kl_loss()
+                total_loss += self.cur_kl_lambda * kl_loss
+                self.accumulated_predictions = []  # Clear accumulated predictions
+
+            # Calculate accuracy (using mean prediction across copies)
+            mean_pred = y_pred.mean(dim=1)
+            self.accumulated_predictions.append(mean_pred[:, :, 0].detach())  # Only first label
+            diff = torch.abs(mean_pred[:, self.quantiles//2] - y)
+            acc = (diff < (y/10)).sum(0)
+
+        return loss, acc, mean_pred
+
+    def predict(self, test_dataloader, device, conf=True, only_p=False, load_best=False):
+        reducer = umap.UMAP()
+        if self.best_state_dict is not None:
+            self.model.load_state_dict(self.best_state_dict)
+        if load_best:
+            self.load_best_model(from_ddp=False)
+        self.model.eval()
+        preds = np.zeros((0, self.quantiles, self.num_classes))
+        targets = np.zeros((0, self.num_classes))
+        confs = np.zeros((0, self.num_classes))
+        embs = np.zeros((0, 2))
+        pbar = tqdm(test_dataloader)
+        for i, (x, y, _, info) in enumerate(pbar):
+            if len(x.shape) == 3:
+                x = x.unsqueeze(1)
+            b, c, l, h = x.shape
+            x_reshaped = x.reshape(b*c, l, h)
+            x1, x2 = x_reshaped[..., 0], x_reshaped[..., 1]
+            x1 = x1.to(device)
+            x2 = x2.to(device)
+            y = y.to(device)
+            with torch.no_grad():
+                if 'acf_phr' in info:
+                    y_pred, features = self.model(x1.float(), x2.float(), acf_phr=info['acf_phr'], return_features=True)
+                else:
+                    y_pred, features = self.model(x1.float(), x2.float(), return_features=True)
+                y_pred = y_pred.reshape(b, c, -1, self.num_classes)
+                features = features.reshape(b, c, -1)
+                if conf:
+                    y_pred, conf_pred = y_pred[..., :self.num_classes], y_pred[..., self.num_classes:]
+            mean_pred = y_pred.mean(dim=1)
+            features = features.mean(dim=1)
+            preds = np.concatenate((preds, mean_pred.cpu().numpy()))
+            targets = np.concatenate((targets, y.cpu().numpy()))
+            # embedding = reducer.fit_transform(features.detach().cpu().numpy())
+            # embs = np.concatenate((embs, embedding))
+            if conf:
+                mean_conf = conf_pred.mean(dim=1)
+                confs = np.concatenate((confs, mean_conf.cpu().numpy()))
+            
+            if self.max_iter and i >= self.max_iter:
+                break
+            
+            if self.num_classes > 1:
+                loss_i = self.criterion(y_pred[..., 0].mean(dim=1), y[:, 0])
+                loss_p = self.criterion(y_pred[..., 1].mean(dim=1), y[:, 1])
+                loss = (self.eta * loss_i) + ((1 - self.eta) * loss_p)
+            else:
+                loss = self.criterion(y_pred[...,0].mean(dim=1), y)
+            diff = torch.abs(mean_pred[:, self.quantiles//2,:] - y)
+            all_acc = (diff < (y/10)).sum(0)
+            pbar.set_description(f"test_acc: {all_acc}, test_loss: {loss.item()}")
+        if self.quantiles > 1:
+            print(self.nc_err_i, self.nc_err_p)
+            preds[...,0] = self.criterion.predict(preds[...,0], self.nc_err_i)
+            preds[...,1] = self.criterion.predict(preds[...,1], self.nc_err_p)
+
+        print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
+        
+        return preds, targets, confs, embs
 
 class KeplerTrainer(Trainer):
     def __init__(self, eta=0.5, **kwargs):
@@ -572,7 +887,7 @@ class KeplerTrainer(Trainer):
         if load_best:
             self.load_best_model()
         self.model.eval()
-        preds = np.zeros((0, self.num_classes))
+        preds = np.zeros((0, self.quantiles, self.num_classes))
         targets = np.zeros((0))
         confs = np.zeros((0, self.num_classes))
         tot_kic = np.zeros((0))
@@ -1050,6 +1365,105 @@ class ContrastiveTrainer(Trainer):
                 break  
             pbar.set_description(f"val_loss:  {loss.item()}")     
         return val_loss, 0.
+    
+class HybridTrainer(Trainer):
+    def __init__(self, temperature=1, stack_pairs=False, eta=0.5, **kwargs):
+        super().__init__(**kwargs)
+        self.stack_pairs = stack_pairs
+        self.temperature = temperature
+        self.eta = eta
+        
+    def train_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=None):
+        """
+        Trains the model for one epoch.
+        """
+        self.model.train()
+        train_loss = []
+        train_acc = 0
+        pbar = tqdm(self.train_dl)
+        for i, (x1, x2, y, _, info1, info2) in enumerate(pbar):
+            x1, x2, y = x1.to(device), x2.to(device), y.to(device)
+            if self.stack_pairs:
+                x = torch.cat((x1, x2), dim=0)
+                out = self.model(x, temperature=self.temperature)
+            else:
+                out = self.model(x1, x2)
+            self.optimizer.zero_grad()
+            loss_ssl = out['loss']
+            y_pred = out['predictions']
+            y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+            conf_y = torch.abs(y - y_pred)
+            loss_pred = self.criterion(y_pred, y) 
+            loss_pred += self.criterion(conf_pred, conf_y)
+            loss = loss_ssl*self.eta + loss_pred*(1-self.eta)
+
+            loss.backward()
+            self.optimizer.step()
+            train_loss.append(loss.item())  
+            if i > (self.max_iter//self.world_size):
+                break
+            diff = torch.abs(y_pred - y)
+            acc = (diff < (y/10)).sum(0)
+            train_acc += acc
+            pbar.set_description(f"train_loss:  {loss.item()}, train_acc: {acc}")
+        return train_loss, train_acc/len(self.train_dl.dataset)
+
+    def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
+        """
+        Evaluates the model for one epoch.
+        """
+        self.model.eval()
+        val_loss = []
+        val_acc = 0
+        pbar = tqdm(self.val_dl)
+        for i, (x1, x2, y, _, info1, info2) in enumerate(pbar):
+            x1, x2, y = x1.to(device), x2.to(device), y.to(device)
+            with torch.no_grad():
+                if self.stack_pairs:
+                    x = torch.cat((x1, x2), dim=0)
+                    out = self.model(x, temperature=self.temperature)
+                else:
+                    out = self.model(x1, x2)
+            loss_ssl = out['loss']
+            y_pred = out['predictions']
+            y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+            conf_y = torch.abs(y - y_pred)
+            loss_pred = self.criterion(y_pred, y) 
+            loss_pred += self.criterion(conf_pred, conf_y)
+            loss = loss_ssl*self.eta + loss_pred*(1-self.eta)
+
+            val_loss.append(loss.item())  
+            if i > (self.max_iter//self.world_size/5):
+                break  
+            diff = torch.abs(y_pred - y)
+            acc = (diff < (y/10)).sum(0)
+            val_acc += acc
+            pbar.set_description(f"val_loss:  {loss.item()}, val_acc: {acc}")     
+        return val_loss, val_acc/len(self.val_dl.dataset)
+    
+    def predict(self, test_dataloader, device, conf=True, only_p=False, load_best=False):
+        self.model.eval()
+        preds = np.zeros((0, self.num_classes))
+        targets = np.zeros((0, self.num_classes))
+        confs = np.zeros((0, self.num_classes))
+        pbar = tqdm(self.val_dl)
+        for i, (x1, x2, y, _, info1, info2) in enumerate(pbar):
+            x1, x2, y = x1.to(device), x2.to(device), y.to(device)
+            with torch.no_grad():
+                if self.stack_pairs:
+                    x = torch.cat((x1, x2), dim=0)
+                    out = self.model(x, temperature=self.temperature)
+                else:
+                    out = self.model(x1, x2)
+            y_pred = out['predictions']
+            y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+            targets = np.concatenate((targets, y.cpu().numpy()))
+            preds = np.concatenate((preds, y_pred.cpu().numpy()))
+            confs = np.concatenate((confs, conf_pred.cpu().numpy()))
+           
+            if i > (self.max_iter//self.world_size/5):
+                break          
+        return preds, targets, confs
 
 
 class MaskedSSLTrainer(Trainer):
@@ -1108,6 +1522,34 @@ class MaskedSSLTrainer(Trainer):
         t = target.masked_select(inverse_token_mask)
         s = (torch.abs(r - t) < epsilon).sum()
         return s
+
+class CQRTrainer(object):
+    def __init(self, trainer):
+        self.trainer = trainer
+    def fit(self, device, epochs=1):
+        for epoch in range(epochs):
+            self.trainer.train_epoch(device, epoch)
+    def calibrate(self, device):
+        self.trainer.eval_epoch
+    def predict(self, device, test_dl):
+        for i, (x, y, _, info) in enumerate(test_dl):
+            if len(x.shape) == 3:
+                x = x.unsqueeze(1)
+            b, c, l, h = x.shape
+            x_reshaped = x.reshape(b*c, l, h)
+            x1, x2 = x_reshaped[..., 0], x_reshaped[..., 1]
+            x1 = x1.to(device)
+            x2 = x2.to(device)
+            y = y.to(device)
+            with torch.no_grad():              
+                y_pred, features = self.trainer.model(x1.float(), x2.float(), return_features=True)
+                y_pred = y_pred.reshape(b, c, -1, self.trainer.num_classes)
+            mean_pred = y_pred.mean(dim=1)
+            preds = np.concatenate((preds, mean_pred.cpu().numpy()))
+            targets = np.concatenate((targets, y.cpu().numpy()))         
+        preds[...,0] = self.trianer.criterion.predict(preds[...,0], self.trainer.nc_err_i)
+        preds[...,1] = self.trainer.criterion.predict(preds[...,1], self.trainer.nc_err_p)
+        return preds, targets
 
 # class ACFPredictorKepler():
 #     def __init__(self):

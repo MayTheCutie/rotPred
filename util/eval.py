@@ -23,7 +23,7 @@ from matplotlib import pyplot as plt
 
 warnings.filterwarnings("ignore")
     
-def eval_results(output, target, conf, data_dir, model_name, boundaries, cls=False, labels=['Inclination', 'Period'], num_classes=2, only_one=False, test_df=None,
+def eval_results(output, target, conf, quantiles, data_dir, model_name, boundaries, cls=False, labels=['Inclination', 'Period'], num_classes=2, only_one=False, test_df=None,
                 scale_target=True, scale_output=True, kepler=False, cos_inc=False):
     """_
     evaluate results of a model and plot    
@@ -31,41 +31,102 @@ def eval_results(output, target, conf, data_dir, model_name, boundaries, cls=Fal
     num_classes = len(labels) if not cls else num_classes
     if scale_target:
         print("scaling target with cos_inc: ", cos_inc)
-        print("target before ", target[:,1].max(), target[:,1].min())
-        print("output before ", output[:,1].max(), output[:,1].min())
         for i, label in enumerate(labels):
             max_val = boundaries[f'max {label}']
             min_val = boundaries[f'min {label}']
             if label == 'Inclination' and cos_inc:
-                target[:,i] = np.arccos(target[:,i])
+                target[...,i] = np.arccos(target[...,i])
             else:
-                target[:,i] = target[:,i] * (max_val - min_val) + min_val
+                target[...,i] = target[:,i] * (max_val - min_val) + min_val
         
     if scale_output:
         print("scaling output")
         for i, label in enumerate(labels):
             max_val = boundaries[f'max {label}']
             min_val = boundaries[f'min {label}']
-            print(label, "before ", output[:,i].max(), output[:,i].min())
+            print(label, "before ", output[...,i].max(), output[...,i].min())
             if label == 'Inclination' and cos_inc:
-                output[:,i] = np.arccos(np.clip(output[:,i], a_min=0, a_max=1))
+                output[...,i] = np.arccos(np.clip(output[...,i], a_min=0, a_max=1))
             else:
-                output[:,i] = output[:,i] * (max_val - min_val) + min_val
-            print(label, "after ", output[:,i].max(), output[:,i].min())
+                output[...,i] = output[...,i] * (max_val - min_val) + min_val
+            print(label, "after ", output[...,i].max(), output[...,i].min())
 
-    df, diff =calc_diff(target, output, conf, test_df=test_df, cls=cls, labels=labels, num_classes=num_classes)
-    for i, label in enumerate(labels):            
-        thresholds = [0] if not len(conf) else [0,0.8,0.83, 0.85,0.87,0.88,0.89,0.9,0.91, 0.92, 0.94,0.96,0.98]
-        for thresh in thresholds:
-            high_conf = np.where(1 - np.abs(conf[:,i]) > thresh)[0] if len(conf) else np.arange(len(target))
+    df, diff =calc_diff(target, output, conf, quantiles, test_df=test_df, cls=cls, labels=labels, num_classes=num_classes)
+    df.to_csv(f"{data_dir}/eval.csv")
+    if conf is not None:
+        if not kepler:
+            plot_df(df, data_dir, labels=labels)
+        else:
+            plot_kepler_df(df, data_dir)
+        for i, label in enumerate(labels):            
+            thresholds = [0] if not len(conf) else [0,0.8,0.83, 0.85,0.87,0.88,0.89,0.9,0.91, 0.92, 0.94,0.96,0.98]
+            for thresh in thresholds:
+                name = f'{model_name}-{label}'
+                high_conf = np.where(1 - np.abs(conf[...,i]) > thresh)[0] if len(conf) else np.arange(len(target))
+                if len(high_conf > 1):
+                    plot_results(data_dir, name, target[...,i][high_conf], output[...,i][high_conf], conf=thresh)
+    if quantiles is not None:
+        for i, label in enumerate(labels):
             name = f'{model_name}-{label}'
-            if len(high_conf > 1):
-                plot_results(data_dir, name, target[:,i][high_conf], output[:,i][high_conf], conf=thresh)
-    if not kepler:
-        plot_df(df, data_dir, labels=labels)
-    else:
-        plot_kepler_df(df, data_dir)
+            plot_quantile_predictions(data_dir, name, output[...,i], target[...,i], quantiles)
 
+def plot_quantile_predictions(data_dir, name, quantile_preds, true_values, quantiles):
+    """
+    Plot true vs predicted results with confidence intervals.
+    
+    Args:
+    quantile_preds (np.array): Predictions of shape (b, q) where:
+        b is batch size, q is number of quantiles
+    true_values (np.array): True values of shape (b, l)
+    quantiles (list): List of quantiles used in the prediction
+    """
+    assert quantile_preds.shape[1] == len(quantiles), "Number of quantiles doesn't match predictions"
+    assert quantile_preds.shape[0] == true_values.shape[0], "Batch sizes don't match"
+    # assert quantile_preds.shape[2] == true_values.shape[1], "Number of predictions doesn't match"
+    
+    # Flatten the arrays
+    true_flat = true_values.flatten()
+    pred_flat = quantile_preds.reshape(-1, len(quantiles))
+    
+    # Sort by true values for a cleaner plot
+    sort_idx = np.argsort(true_flat)
+    true_sorted = true_flat[sort_idx]
+    pred_sorted = pred_flat[sort_idx]
+    median_idx = quantiles.index(0.5) if 0.5 in quantiles else len(quantiles) // 2
+    diff = np.abs(quantile_preds[:, median_idx] - true_values)
+
+    acc_6 = (diff < 6).sum()/len(diff)
+    acc_10 = (diff < 10).sum()/len(diff)
+    acc_10p = (diff < true_values/10).sum()/len(diff)
+    mean_error = np.mean(diff/(true_values+1)*100)
+    
+    # Plot
+    plt.figure(figsize=(12, 6))
+    
+    
+    # Plot confidence intervals
+    for i in range(len(quantiles) // 2):
+        lower = pred_sorted[:, i]
+        upper = pred_sorted[:, -(i+1)]
+        error = np.clip(np.concatenate([lower.reshape(1,-1), upper.reshape(1,-1)], axis=0), 0, None)
+        plt.errorbar(true_values, quantile_preds[:, median_idx], alpha=0.1, yerr=error,
+                         label=f'{quantiles[i]*100:.0f}%-{quantiles[-(i+1)]*100:.0f}% CI')
+    plt.grid(True, alpha=0.3)
+    plt.savefig(f"{data_dir}/{name}_eval_quantiles.png")
+    plt.clf()
+        
+    # Plot true values
+    plt.scatter(true_values, quantile_preds[:, median_idx])
+    
+    plt.plot(true_values, 0.9*true_values, color='red')
+    plt.plot(true_values, 1.1*true_values, color='red')
+    plt.title(f"{name} acc6={acc_6:.2f} acc10={acc_10:.2f} acc10p={acc_10p:.2f}, mean error(%)={mean_error:.2f}")
+    plt.xlabel("True ")
+    plt.ylabel("Predicted")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.savefig(f"{data_dir}/{name}_eval.png")
+    plt.clf()
 
 def plot_results(data_dir, name, target, output, conf=''):
     
@@ -134,16 +195,21 @@ def plot_df(df, save_dir, labels):
     df.to_csv(f"{save_dir}/eval.csv")
     plt.clf()
 
-def calc_diff(target, output, conf, test_df=None, cls=False, labels=['Inclination', 'Period'], num_classes=2):
+def calc_diff(target, output, conf, quantiles=[0.5], test_df=None, cls=False, labels=['Inclination', 'Period'], num_classes=2):
     if test_df is not None:
         df = test_df
     else:
         df = pd.DataFrame()
     for i in range(len(labels)):
-        df[f"predicted {labels[i]}"] = output[:,i] if not cls else np.argmax(output[:,i*num_classes:(i+1)*num_classes], axis=1)
-        df[labels[i]] = target[:,i]
-        if not cls and len(conf):
+        if quantiles is not None:
+            for q in range(len(quantiles)):
+                df[f"predicted {labels[i]} {quantiles[q]}"] = output[:,q,i]
+                df[labels[i]] = target[:,i]            
+        if conf is not None:
             df[f'{labels[i]} confidence'] = conf[:,i]
-    diff = np.abs(output[:,:len(labels)] - target[:,:len(labels)]) if not cls else None
+    if quantiles is not None:
+        diff = np.abs(output[:,len(quantiles)//2, :len(labels)] - target[:,:len(labels)]) if not cls else None
+    else:
+        diff = np.abs(output[:, :len(labels)] - target[:,:len(labels)]) if not cls else None
     return df,diff
 

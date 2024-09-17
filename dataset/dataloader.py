@@ -14,6 +14,9 @@ from scipy.signal import stft, correlate2d
 from scipy import signal
 import time
 from scipy.signal import find_peaks, peak_prominences, peak_widths, savgol_filter as savgol
+import csv
+from dataset.sampler import DynamicRangeSampler
+
 # import torchaudio.transforms as T
 
 
@@ -64,7 +67,7 @@ def mask_array(array, mask_percentage=0.15, mask_value=-1, vocab_size=1024):
       inverse_token_mask[i] = False  
   return array, inverse_token_mask
 
-class Subset(Dataset):
+class SubsetF(Dataset):
     """
     Subset of a dataset at specified indices.
     Arguments:
@@ -83,7 +86,7 @@ class Subset(Dataset):
             return len(self.indices)
 
     def __getitem__(self, idx):
-        return self.dataset[self.indices[idx]]
+        return self.dataset[self.indices[idx % len(self.indices)]]
 
 class TimeSsl(Dataset):
     """
@@ -186,12 +189,12 @@ class TimeSsl(Dataset):
           else:
               self.num_bad_samples += 1
               effective_qs = []
-              x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
+              x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None, 'KMAG': None}
           # meta['qs'] = row['qs']
-        except (TypeError, ValueError, FileNotFoundError)  as e:
+        except (TypeError, ValueError, FileNotFoundError, OSError)  as e:
             print("Error: ", e)
             effective_qs = []
-            x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None}
+            x_tot, meta = np.zeros((self.seq_len)), {'TEFF': None, 'RADIUS': None, 'LOGG': None, 'KMAG': None}
         return x_tot, meta, effective_qs, y_val
     
     def __getitem__(self, idx):
@@ -262,7 +265,7 @@ class KeplerDataset(TimeSsl):
     self.uniform_bound = uniform_bound
     self.target_transforms = target_transforms
     self.prot_df = prot_df
-    if df is not None:
+    if df is not None and 'predicted period' not in df.columns:
       if prot_df is not None:
         self.df = pd.merge(df, prot_df[['KID', 'predicted period']], on='KID')
       else:
@@ -334,6 +337,7 @@ class KeplerDataset(TimeSsl):
     info_y = copy.deepcopy(info)
     x /= x.max()
     target = x.copy()
+    mask = None
     if self.transforms is not None:
           x, mask, info = self.transforms(x, mask=None, info=info)
           if self.seq_len > x.shape[0]:
@@ -361,6 +365,7 @@ class KeplerDataset(TimeSsl):
       info['Teff'] = meta['TEFF'] if meta['TEFF'] is not None else 0
       info['R'] = meta['RADIUS'] if meta['RADIUS'] is not None else 0
       info['logg'] = meta['LOGG'] if meta['LOGG'] is not None else 0
+      info['kmag'] = meta['KMAG'] if meta['KMAG'] is not None else 0
     info['path'] = self.df.iloc[idx]['data_file_path'] if self.df is not None else self.path_list[idx]
     info['KID'] = self.df.iloc[idx]['KID'] if self.df is not None else self.path_list[idx].split("/")[-1].split("-")[0].split('kplr')[-1]
     toc = time.time()
@@ -387,8 +392,8 @@ class KeplerNoiseDataset(KeplerDataset):
     self.samples = []
     # print(f"preparing kepler data of {len(self.df)} samples...")
     for i in range(len(self.df)):
-      if i % 1000 == 0:
-        print(i, flush=True)
+      # if i % 1000 == 0:
+        # print(i, flush=True)
       x, masked_x, inv_mask, info = super().__getitem__(i)
       self.samples.append((x, masked_x, inv_mask, info))
 
@@ -501,7 +506,7 @@ class TimeSeriesDataset(Dataset):
       self.loaded_labels = pd.read_csv(self.targets_path)
       self.norm=norm
       self.boundary_values_dict = create_boundary_values_dict(self.loaded_labels)
-      if num_classes == None:
+      if num_classes == None and self.labels is not None:
         self.num_classes = len(labels)
       else:
         self.num_classes = num_classes
@@ -521,7 +526,7 @@ class TimeSeriesDataset(Dataset):
       self.cls = classification
 
   def read_spots(self, idx):
-    spots = pd.read_parquet(os.path.join(self.spots_path, f"spots_{idx}.pqt")).values
+    spots = pd.(os.path.join(self.spots_path, f"spots_{idx}.pqt")).values
     return spots
 
   def crop_spots(self, spots, info):
@@ -602,13 +607,13 @@ class TimeSeriesDataset(Dataset):
       if self.transforms is not None:
         x, _, info = self.transforms(x[:,1], mask=None,  info=info, step=self.step)
         if self.seq_len > x.shape[0] and (not self.p_norm):
-          print("padding: ", x.shape, self.seq_len)
           x = F.pad(x, (0, self.seq_len - x.shape[-1], 0,0), mode="constant", value=0)
         info['idx'] = idx
       else:
         x = x[:,1]
-      x = x.T[:, :self.seq_len]
+      # x = x.T[:, :self.seq_len]
       x = x.nan_to_num(0)
+
       if not self.cls:
         y = self.get_labels(sample_idx)
       else:
@@ -625,4 +630,242 @@ class TimeSeriesDataset(Dataset):
       info['time'] = end-s
       return x.float(), y, torch.ones_like(x), info
   
+class HybridDataset(TimeSeriesDataset):
+  """
+  A dataset for hybrid data
+  """
+  def __init__(self, root_dir:str,
+              idx_list:List,
+              labels:List=['Inclination', 'Period'],
+              t_samples:int=None,
+              norm:str='std',
+              transforms:object=None,
+              acf=False,
+              return_raw=False,
+              cos_inc=False,
+              freq_rate=1/48,
+              init_frac=0.4,
+              dur=360,
+              spots=False,
+              period_norm=False,
+              classification=False,
+              num_classes=None,
+              **kwargs):
+      """
+      A dataset for hybrid data
+      Args:
+          root_dir (str): root directory
+          idx_list (List): list of indices
+          labels (List, optional): labels to be used. Defaults to ['Inclination', 'Period'].
+          t_samples (int, optional): length of samples. Defaults to None.
+          norm (str, optional): normalizing method. Defaults to 'std'.
+          transforms (object, optional): data transformations. Defaults to None.
+          acf (bool, optional): calculate ACF. Defaults to False.
+          return_raw (bool, optional): return raw lightcurve. Defaults to False.
+          cos_inc (bool, optional): cosine of inclination. Defaults to False.
+          freq_rate (float, optional): frequency rate. Defaults to 1/48.
+          init_frac (float, optional): fraction of the lightcurve to cut. Defaults to 0.4.
+          dur (int, optional): duration in days. Defaults to 360.
+          spots (bool, optional): include spots. Defaults to False.
+          period_norm (bool, optional): normalize lightcurve by period. Defaults to False.
+          classification (bool, optional): prepare labels for cls task. Defaults to False.
+          num_classes ([type], optional): number of classes. Defaults to None.
+      """
+      super().__init__(root_dir, idx_list, labels=labels, t_samples=t_samples, norm=norm, transforms=transforms,
+                       acf=acf, return_raw=return_raw, cos_inc=cos_inc, freq_rate=freq_rate, init_frac=init_frac,
+                       dur=dur, spots=spots, period_norm=period_norm, classification=classification, num_classes=num_classes)
+      self.targets_path = os.path.join(root_dir, "simulation_properties.csv")
+      self.loaded_labels = pd.read_csv(self.targets_path)
+  def __getitem__(self, idx):
+      s  =time.time()
+      sample_idx = remove_leading_zeros(self.idx_list[idx])
+      p = self.loaded_labels.iloc[sample_idx]['Period']
+      info = {'idx': idx, 'period': p}
+      x = pd.read_parquet(os.path.join(self.lc_path, f"lc_{self.idx_list[idx]}.pqt")).values
+      x = x[int(self.init_frac*len(x)):,:]
+      x[:,1] = fill_nan_np(x[:,1], interpolate=True)
+      x1, _, info1 = self.transforms[0](x[:,1], mask=None,  info=info, step=self.step)
+      x2, _, info2 = self.transforms[1](x[:,1], mask=None,  info=info, step=self.step)
+      if self.seq_len > x.shape[0] and (not self.p_norm):
+        x1 = F.pad(x1, (0, self.seq_len - x1.shape[-1], 0,0), mode="constant", value=0)
+        x2 = F.pad(x2, (0, self.seq_len - x2.shape[-1], 0,0), mode="constant", value=0)
+      info1['idx'] = idx
+      info2['idx'] = idx
+      x1 = x1.T[:, :self.seq_len].nan_to_num(0)
+      x2 = x2.T[:, :self.seq_len].nan_to_num(0)
+      y = self.get_labels(sample_idx)
+      info1['time'] = time.time() - s
+      return x1.float(), x2.float(), y, torch.ones_like(x1), info1, info2
 
+class DynamicRangeDataset(Dataset):
+  """
+  A dataset for dynamic range data
+  """
+  def __init__(self, root_dir:str,
+               indices:List,
+              labels:List=['Inclination', 'Period'],
+              seq_len:int=None,
+              transforms:object=None,
+              initial_max_label=0.2,
+              increment=0.05,
+              threshold=10,
+              num_samples = np.inf,
+              **kwargs):
+      """
+      A dataset for dynamic range data
+      Args:
+          root_dir (str): root directory
+          idx_list (List): list of indices
+          labels (List, optional): labels to be used. Defaults to ['Inclination', 'Period'].
+          t_samples (int, optional): length of samples. Defaults to None.
+          norm (str, optional): normalizing method. Defaults to 'std'.
+          transforms (object, optional): data transformations. Defaults to None.
+          acf (bool, optional): calculate ACF. Defaults to False.
+          return_raw (bool, optional): return raw lightcurve. Defaults to False.
+          cos_inc (bool, optional): cosine of inclination. Defaults to False.
+          freq_rate (float, optional): frequency rate. Defaults to 1/48.
+          init_frac (float, optional): fraction of the lightcurve to cut. Defaults to 0.4.
+          dur (int, optional): duration in days. Defaults to 360.
+          spots (bool, optional): include spots. Defaults to False.
+          period_norm (bool, optional): normalize lightcurve by period. Defaults to False.
+          classification (bool, optional): prepare labels for cls task. Defaults to False.
+          num_classes ([type], optional): number of classes. Defaults to None.
+      """
+      self.targets_path = os.path.join(root_dir, "simulation_properties.csv")
+      self.indices_list = indices
+      self.loaded_labels = pd.read_csv(self.targets_path)
+      self.root_dir = root_dir
+      self.boundary_values_dict = create_boundary_values_dict(self.loaded_labels)
+      self.samples_paths = [os.path.join(f'{root_dir}/simulations', p) for p in
+                             os.listdir(f'{root_dir}/simulations') if p.endswith('.pqt')]
+      self.transform = transforms
+      self.seq_len = seq_len
+      self.num_samples = num_samples
+      self.labels_vals = labels
+      self.labels = []
+      self.samples = []
+      self.current_max_label = initial_max_label
+      self.increment = increment
+      self.threshold = threshold
+      self.iteration_counter = 0
+      print("loading data...")
+      self.load_data()
+      self.update_filtered_indices()
+
+  def get_labels(self, row):
+      if self.labels_vals is None:
+        return row
+      y = torch.tensor([row[label] for label in self.labels_vals])
+      for i,label in enumerate(self.labels_vals):
+          min_val, max_val = self.boundary_values_dict[f'min {label}'], self.boundary_values_dict[f'max {label}']
+          y[i] = (y[i] - min_val)/(max_val - min_val)
+      if len(self.labels_vals) == 1:
+        return y.float()
+      return y.squeeze(0).squeeze(-1).float()
+  
+  def load_data(self):
+     with open(self.targets_path, 'r') as f:
+          for i, row in self.loaded_labels.iloc[self.indices_list].iterrows():
+              sim_num = row['Simulation Number']
+              sim_num_str = f'{sim_num:d}'.zfill(int(np.log10(len(self.loaded_labels)))+1)
+              labels = self.get_labels(row)
+              self.labels.append(labels)
+              self.samples.append(os.path.join(self.root_dir, f'simulations/lc_{sim_num_str}.pqt'))
+              if i > self.num_samples:
+                break
+
+  def __len__(self):
+        return len(self.indices_list)
+  
+  def __getitem__(self, idx):
+        t = time.time()
+        x = pd.read_parquet(self.samples[idx]).values
+        x = x[:, 1]
+        y = self.labels[idx]
+        if self.transform is not None:
+            x, _, info = self.transform(x, mask=None, info=dict())
+            if self.seq_len > x.shape[0]:
+                x = F.pad(x, (0, self.seq_len - x.shape[-1], 0, 0), mode="constant", value=0)
+        else:
+            x = torch.Tensor(x[None,:])
+        x = x.nan_to_num(0)
+        info['idx'] = idx
+        info['time'] = time.time() - t
+        return x, y, torch.ones_like(x), info
+  
+  def update_filtered_indices(self):
+        self.filtered_indices = [i for i, label in enumerate(self.labels) if (1 - label[0] <= self.current_max_label)]
+        print("filtered indices: ", len(self.filtered_indices))
+
+  def expand_label_range(self):
+        self.current_max_label += self.increment
+        self.current_max_label = min(1, self.current_max_label)
+        print("current max label: ", self.current_max_label)
+        self.update_filtered_indices()
+
+
+class DynamicRangeDataLoader(DataLoader):
+    def __init__(self, dataset, *args, **kwargs):
+        self.dataset = dataset
+        self.iteration_counter = 0
+        self.threshold = dataset.threshold
+        sampler = DynamicRangeSampler(dataset)
+        super().__init__(dataset, sampler=sampler, *args, **kwargs)
+
+    def __iter__(self):
+        self.iteration_counter += 1
+        if self.iteration_counter >= self.threshold:
+            self.dataset.expand_label_range()
+            self.iteration_counter = 0  # Reset the counter after expanding the range
+        return super().__iter__()
+
+class MultiCopyDataset(Dataset):
+    def __init__(self, dataset,
+                 num_copies=2,
+                 ):
+        self.dataset = dataset
+        self.num_copies = num_copies
+    
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        res = []
+        for i in range(self.num_copies):
+            data = self.dataset[idx]
+            res.append(data[0])
+        return torch.stack(res), *data[1:]
+        
+
+class TimeSeriesGraphDataset(TimeSeriesDataset):
+    def __init__(self, time_series_data, periods, num_noisy_edges=5):
+        self.time_series_data = time_series_data
+        self.periods = periods
+        self.num_noisy_edges = num_noisy_edges
+
+    def __len__(self):
+        return len(self.time_series_data)
+    
+    def __getitem__(self, idx):
+        series = self.time_series_data[idx]
+        period = self.periods[idx]
+        
+        # Create edges for temporal connections
+        edges_temporal = [(i, i + 1) for i in range(len(series) - 1)]
+        
+        # Define periodic edges (connecting with nodes that are one period away)
+        edges_periodic = [(i, (i + period) % len(series)) for i in range(len(series))]
+        
+        # Define noisy edges (example: random connections)
+        edges_noisy = [(random.randint(0, len(series) - 1), random.randint(0, len(series) - 1)) for _ in range(self.num_noisy_edges)]
+        
+        # Combine all edges
+        edges = edges_temporal + edges_periodic + edges_noisy
+        
+        # Convert to PyTorch tensors
+        edge_index = torch.tensor(list(set(edges)).T, dtype=torch.long)
+        
+        # Create a PyTorch Geometric Data object
+        data = Data(x=torch.tensor(series).view(-1, 1), edge_index=edge_index)
+        
+        return data, period

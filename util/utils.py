@@ -25,7 +25,7 @@ ROOT_DIR = path.dirname(path.dirname(path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 print("running from ", ROOT_DIR)   
 
-from util.period_analysis import analyze_lc
+from util.classical_analysis import analyze_lc
 
 
 def read_fits(filename: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -103,6 +103,62 @@ def replace_zeros_with_average(arr: np.ndarray) -> np.ndarray:
 
     return arr
 
+def compute_coverage_len(y_test, y_lower, y_upper):
+    """ Compute average coverage and length of prediction intervals
+
+    Parameters
+    ----------
+
+    y_test : numpy array, true labels (n)
+    y_lower : numpy array, estimated lower bound for the labels (n)
+    y_upper : numpy array, estimated upper bound for the labels (n)
+
+    Returns
+    -------
+
+    coverage : float, average coverage
+    avg_length : float, average length
+
+    References
+    ----------
+    Y. Romano, E. Patterson, E.J Candes,
+    "Conformalized Quantile Regression"
+
+    """
+    in_the_range = np.sum((y_test >= y_lower) & (y_test <= y_upper))
+    coverage = in_the_range / len(y_test) * 100
+    avg_length = np.mean(abs(y_upper - y_lower))
+    return coverage, avg_length
+
+def rearrange_quantiles(all_quantiles, quantile_low, quantile_high, test_preds):
+    """ Produce monotonic quantiles
+
+    Parameters
+    ----------
+
+    all_quantiles : numpy array (q), grid of quantile levels in the range (0,1)
+    quantile_low : float, desired low quantile in the range (0,1)
+    quantile_high : float, desired high quantile in the range (0,1)
+    test_preds : numpy array of predicted quantile (nXq)
+
+    Returns
+    -------
+
+    q_fixed : numpy array (nX2), containing the rearranged estimates of the
+              desired low and high quantile
+
+    References
+    ----------
+    .. [1]  Chernozhukov, Victor, Iván Fernández‐Val, and Alfred Galichon.
+            "Quantile and probability curves without crossing."
+            Econometrica 78.3 (2010): 1093-1125.
+
+    """
+    scaling = all_quantiles[-1] - all_quantiles[0]
+    low_val = (quantile_low - all_quantiles[0])/scaling
+    high_val = (quantile_high - all_quantiles[0])/scaling
+    q_fixed = np.quantile(test_preds,(low_val, high_val),interpolation='linear',axis=1)
+    return q_fixed.T
 def dataset_weights(dl:torch.utils.data.DataLoader, Nlc:int):
     """
     Calculate weights for each sample in the dataset

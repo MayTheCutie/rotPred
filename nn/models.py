@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from torch.nn.utils import weight_norm
-from util.period_analysis import analyze_lc_torch, analyze_lc
+from util.classical_analysis import analyze_lc_torch, analyze_lc
 from torchvision.models.swin_transformer import SwinTransformer
 import time
 
@@ -50,6 +50,8 @@ class projection_MLP(nn.Module):
 
     def forward(self, x):
         # print("projection_MLP: ", x.shape)
+        if isinstance(x, tuple):
+            x = x[0]
         if self.num_layers == 3:
             x = self.layer1(x)
             x = self.layer2(x)
@@ -429,18 +431,14 @@ class LSTM_DUAL(nn.Module):
         self.num_features = num_lstm_features + encoder_dims
         self.output_dim = self.num_features
         self.dual_model = dual_model
-
-        self.pred_layer = nn.Sequential(
-        nn.Linear(self.num_features, predict_size),
-        nn.GELU(),
-        nn.Dropout(p=0.3),
-        nn.Linear(predict_size,num_classes//2),)
-
-        self.conf_layer = nn.Sequential(
-        nn.Linear(16, 16),
-        nn.GELU(),
-        nn.Dropout(p=0.3),
-        nn.Linear(16,num_classes//2),)
+        if ssl:
+            self.pred_layer = nn.Identity()
+        else:
+            self.pred_layer = nn.Sequential(
+            nn.Linear(self.num_features, predict_size),
+            nn.GELU(),
+            nn.Dropout(p=0.3),
+            nn.Linear(predict_size,num_classes),)
 
     def lstm_attention(self, query, keys, values):
         # Query = [BxQ]
@@ -458,9 +456,9 @@ class LSTM_DUAL(nn.Module):
         linear_combination = torch.bmm(energy, values).squeeze(1) #[Bx1xT]x[BxTxV] -> [BxV]
         return linear_combination
     
-    def forward(self, x, x_dual=None, acf_phr=None):
+    def forward(self, x, x_dual=None, acf_phr=None, return_features=False):
         if x_dual is None:
-            x, x_dual = x[:,0,:], x[:,1,:]
+            x, x_dual = x[...,0], x[...,1]
         if len(x.shape) == 2:
             x = x.unsqueeze(1)
         x, h_f, c_f = self.feature_extractor(x, return_cell=True) # [B, L//stride, 2*hidden_size], [B, 2*nlayers, hidden_szie], [B, 2*nlayers, hidden_Size]
@@ -468,17 +466,71 @@ class LSTM_DUAL(nn.Module):
         t_features = self.lstm_attention(c_f, x, x) # [B, 2*hidden_size]
         d_features, _ = self.dual_model(x_dual) # [B, encoder_dims]
         features = torch.cat([t_features, d_features], dim=1) # [B, 2*hidden_size + encoder_dims]
-        if self.ssl:
-            return features
         out = self.pred_layer(features)
-        if acf_phr is not None:
-            phr = acf_phr.reshape(-1,1).float()
+        if return_features:
+            return out, features
+        return out
+
+class QUANTILE_LSTM_DUAL(nn.Module):
+    def __init__(self, dual_model, encoder_dims, lstm_args, predict_size=128,
+                 num_classes=4, quantiles=1, freeze=False, ssl=False, **kwargs):
+        super(QUANTILE_LSTM_DUAL, self).__init__(**kwargs)
+        # print("intializing dual model")
+        # if lstm_model is not None:
+        self.feature_extractor = LSTMFeatureExtractor(**lstm_args)
+        self.ssl= ssl
+        self.quantiles = quantiles
+        self.num_classes = num_classes
+        # self.attention = lstm_model.attention
+        if freeze:
+            for param in self.feature_extractor.parameters():
+                param.requires_grad = False
+                # for param in self.attention.parameters():
+                #     param.requires_grad = False
+        num_lstm_features = self.feature_extractor.hidden_size*2
+        self.num_features = num_lstm_features + encoder_dims
+        self.output_dim = self.num_features
+        self.dual_model = dual_model
+        if ssl:
+            self.pred_layer = nn.Identity()
         else:
-            phr = torch.zeros(features.shape[0],1, device=features.device)
-        mean_features = torch.nn.functional.adaptive_avg_pool1d(features.unsqueeze(1), 16).squeeze(1)
-        mean_features += phr
-        conf = self.conf_layer(mean_features)
-        return torch.cat([out, conf], dim=1)
+            self.pred_layer = nn.Sequential(
+            nn.Linear(self.num_features, predict_size),
+            nn.GELU(),
+            nn.Dropout(p=0.3),
+            nn.Linear(predict_size,num_classes*self.quantiles),)
+
+    def lstm_attention(self, query, keys, values):
+        # Query = [BxQ]
+        # Keys = [BxTxK]
+        # Values = [BxTxV]
+        # Outputs = a:[TxB], lin_comb:[BxV]
+
+        # Here we assume q_dim == k_dim (dot product attention)
+        scale = 1/(keys.size(-1) ** -0.5)
+        query = query.unsqueeze(1) # [BxQ] -> [Bx1xQ]
+        keys = keys.transpose(1,2) # [BxTxK] -> [BxKxT]
+        energy = torch.bmm(query, keys) # [Bx1xQ]x[BxKxT] -> [Bx1xT]
+        energy = F.softmax(energy.mul_(scale), dim=2) # scale, normalize
+
+        linear_combination = torch.bmm(energy, values).squeeze(1) #[Bx1xT]x[BxTxV] -> [BxV]
+        return linear_combination
+    
+    def forward(self, x, x_dual=None, acf_phr=None, return_features=False):
+        if x_dual is None:
+            x, x_dual = x[...,0], x[...,1]
+        if len(x.shape) == 2:
+            x = x.unsqueeze(1)
+        x, h_f, c_f = self.feature_extractor(x, return_cell=True) # [B, L//stride, 2*hidden_size], [B, 2*nlayers, hidden_szie], [B, 2*nlayers, hidden_Size]
+        c_f = torch.cat([c_f[-1], c_f[-2]], dim=1) # [B, 2*hidden_szie]
+        t_features = self.lstm_attention(c_f, x, x) # [B, 2*hidden_size]
+        d_features, _ = self.dual_model(x_dual) # [B, encoder_dims]
+        features = torch.cat([t_features, d_features], dim=1) # [B, 2*hidden_size + encoder_dims]
+        out = self.pred_layer(features)
+        out = out.view(out.shape[0], self.quantiles, self.num_classes )
+        if return_features:
+            return out, features
+        return out
     
 class LSTM_DUAL_CLS(nn.Module):
     def __init__(self, dual_model, encoder_dims, lstm_args, predict_size=128,
@@ -538,6 +590,36 @@ class LSTM_DUAL_CLS(nn.Module):
         out = self.pred_layer(features)
         # val = self.regression_layer(features)
         return F.log_softmax(out, dim=1)
+
+
+class LightPredHybrid(nn.Module):
+    def __init__(self, conformer_model, encoder_dims, lstm_args, predict_size=128, output_dim=4):
+        super(LightPredHybrid, self).__init__()
+        conformer_model.pred_layer = nn.Identity()
+        self.backbone = LSTM_DUAL(conformer_model, encoder_dims, lstm_args, predict_size, ssl=True)
+        self.backbone.pred_layer = nn.Identity()
+        self.ssl_projector = projection_MLP(self.backbone.output_dim)
+        self.ssl_predictor = prediction_MLP()
+        self.pred_layer = nn.Sequential(
+        nn.Linear(self.backbone.num_features, predict_size),
+        nn.GELU(),
+        nn.Dropout(p=0.3),
+        nn.BatchNorm1d(predict_size),
+        nn.Linear(predict_size, predict_size),
+        nn.GELU(),
+        nn.Dropout(p=0.3),
+        nn.BatchNorm1d(predict_size),
+        nn.Linear(predict_size,output_dim),)
+    
+    def forward(self, x1, x2):
+        f1, f2 = self.backbone(x1), self.backbone(x2)
+        z1, z2 = self.ssl_projector(f1), self.ssl_projector(f2)
+        p1, p2 = self.ssl_predictor(z1), self.ssl_predictor(z2)
+        ssl_loss = D(p1, z2) / 2 + D(p2, z1) / 2
+        pred1, pred2 = self.pred_layer(f1), self.pred_layer(f2)
+        pred = torch.cat([pred1.unsqueeze(-1), pred2.unsqueeze(-1)], dim=-1).mean(dim=-1)
+        return {'loss': ssl_loss, 'predictions': pred}
+      
 
 class EncoderDecoder(torch.nn.Module):
     def __init__(self, encoder, decoder):

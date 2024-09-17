@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 import lightkurve as lk
-import SpinSpotter as ss
+# import SpinSpotter as ss
 import os
 from astropy.io import fits
 from astropy.table import Table 
@@ -438,7 +438,9 @@ def find_period(data, lags, prom=None, method='first', name=''):
             p = lags[peaks[max_idx]]
         # print(max_idx, max_peak)
         elif method == 'slope':
-            #   print("sloping")
+            if len(peaks) > 2:
+                if (data[peaks[0]] < data[peaks[1]]) & (data[peaks[2]] < data[peaks[1]]):
+                    return lags[peaks[1]], peaks, lph
             first_peaks = []
             #   print("num peaks: ", len(peaks))
             while i < 4:
@@ -447,7 +449,6 @@ def find_period(data, lags, prom=None, method='first', name=''):
                 if i == len(peaks):
                     break
             #   print("peaks: " , first_peaks)
-
             if i >= 4:
                 slope, intercept, r_value, p_value, std_err = linregress(np.arange(len(first_peaks)), first_peaks)
                 # first_peaks.append(intercept)
@@ -466,7 +467,7 @@ def find_period(data, lags, prom=None, method='first', name=''):
     return 0, peaks, lph
 
 
-def analyze_lc(lc, day_cadence=1/48, prom=0.01, max_period=70, preprocess='med', method='slope'):
+def analyze_lc(lc, day_cadence=1/48, prom=0.01, max_period=90, preprocess='med', method='slope'):
     if preprocess is not None:
         if preprocess == 'med':
             lc = lc/np.median(lc)
