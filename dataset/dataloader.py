@@ -526,7 +526,7 @@ class TimeSeriesDataset(Dataset):
       self.cls = classification
 
   def read_spots(self, idx):
-    spots = pd.(os.path.join(self.spots_path, f"spots_{idx}.pqt")).values
+    spots = pd(os.path.join(self.spots_path, f"spots_{idx}.pqt")).values
     return spots
 
   def crop_spots(self, spots, info):
