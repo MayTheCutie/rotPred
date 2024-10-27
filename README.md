@@ -7,7 +7,7 @@ Ilay Kamai,
 official implementation of
 > "Accurate and Robust Stellar Rotation Periods catalog for 82771 Kepler stars using deep learning"
 > 
-> [![arXiv](https://img.shields.io/badge/arXiv-<paper_id>-b31b1b.svg)](https://arxiv.org/abs/2407.06858)
+> [![arXiv](https://img.shields.io/badge/arXiv-2407.06858-b31b1b.svg)](https://arxiv.org/abs/2407.06858)
 
 
 LightPred is a deep learning model to learn stellar period and inclination
