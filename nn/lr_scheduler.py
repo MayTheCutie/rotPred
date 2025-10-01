@@ -1,7 +1,6 @@
 
-import math
-
-from torch.optim.lr_scheduler import LRScheduler
+import numpy as np
+import torch.optim.lr_scheduler as LRScheduler
 
 
 class WarmupLRScheduler(LRScheduler):
@@ -74,7 +73,7 @@ class CosLRScheduler(LRScheduler):
         else:
             decay_steps = self.decay_steps - self.warmup_steps
             step = min(self._step_count - self.warmup_steps, decay_steps)
-            cosine_decay = 0.5 * (1 + math.cos(math.pi * step / self.decay_steps))
+            cosine_decay = 0.5 * (1 + np.cos(np.pi * step / self.decay_steps))
             decayed = (1 - self.alpha) * cosine_decay + self.alpha
             learning_rates = [lr * decayed for lr in self.base_lrs]
         return learning_rates
