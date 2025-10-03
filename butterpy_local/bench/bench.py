@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from tqdm import tqdm
+from julia import __main__
 
 from butterpy.spots import Spots
 from butterpy.regions import regions
