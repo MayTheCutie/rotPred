@@ -21,7 +21,7 @@ def D(p, z, version='simplified'):  # negative cosine similarity
         raise Exception
 
 
-class projection_MLP(nn.Module):
+class ProjectionMLP(nn.Module):
     def __init__(self, in_dim, hidden_dim=64, out_dim=64):
         super().__init__()
         ''' page 3 baseline setting
@@ -50,7 +50,7 @@ class projection_MLP(nn.Module):
         self.num_layers = num_layers
 
     def forward(self, x):
-        # print("projection_MLP: ", x.shape)
+        # print("ProjectionMLP: ", x.shape)
         if isinstance(x, tuple):
             x = x[0]
         if self.num_layers == 3:
@@ -113,8 +113,8 @@ class SimCLR(nn.Module):
     def __init__(self, backbone, hidden_dim=64):
         super(SimCLR, self).__init__()
         self.backbone = backbone
-        self.projector = projection_MLP(backbone.num_features,
-                                        hidden_dim=hidden_dim, out_dim=hidden_dim)
+        self.projector = ProjectionMLP(backbone.num_features,
+                                       hidden_dim=hidden_dim, out_dim=hidden_dim)
         self.predictor = prediction_MLP(in_dim=hidden_dim,
                                         hidden_dim=hidden_dim // 2, out_dim=hidden_dim)
 
@@ -132,7 +132,7 @@ class SimSiam(nn.Module):
         super().__init__()
 
         self.backbone = backbone
-        self.projector = projection_MLP(backbone.output_dim)
+        self.projector = ProjectionMLP(backbone.output_dim)
 
         self.encoder = nn.Sequential(  # f encoder
             self.backbone,
@@ -623,7 +623,7 @@ class LightPredHybrid(nn.Module):
         conformer_model.pred_layer = nn.Identity()
         self.backbone = LSTM_DUAL(conformer_model, encoder_dims, lstm_args, predict_size, ssl=True)
         self.backbone.pred_layer = nn.Identity()
-        self.ssl_projector = projection_MLP(self.backbone.output_dim)
+        self.ssl_projector = ProjectionMLP(self.backbone.output_dim)
         self.ssl_predictor = prediction_MLP()
         self.pred_layer = nn.Sequential(
             nn.Linear(self.backbone.num_features, predict_size),

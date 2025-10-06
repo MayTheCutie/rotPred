@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from tqdm import tqdm
-from julia import __main__
 
-from butterpy.spots import Spots
+
+import butterpy.src.spots
 from butterpy.regions import regions
 from butterpy.constants import FLUX_SCALE, DAY2MIN
 
